@@ -12,6 +12,7 @@
 ///   After installation, set CURL_IMPERSONATE_LIB to the path of
 ///   libcurl-impersonate-chrome.a (or .dylib) in build.zig.
 ///
+// TODO(Phase 3): Replace with owned BoringSSL stack. See awr-spec/Phase1-Networking-TLS.md — AWR is a first-party browser, not a Chrome impersonator.
 /// TODO(curl-impersonate): Replace stub implementation with real C-ABI wrapper
 ///   when libcurl-impersonate is available at:
 ///     /usr/local/lib/libcurl-impersonate-chrome.{a,dylib}
