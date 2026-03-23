@@ -4,6 +4,10 @@ pub fn build(b: *std.Build) void {
     const target   = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // ── libxev dependency ─────────────────────────────────────────────────
+    const xev_dep = b.dependency("libxev", .{ .target = target, .optimize = optimize });
+    const xev_mod = xev_dep.module("xev");
+
     // ── nghttp2 paths (brew install libnghttp2) ───────────────────────────
     const nghttp2_prefix = "/opt/homebrew/opt/libnghttp2";
     const nghttp2_include = b.path("src/net"); // for h2_shim.h
@@ -11,14 +15,13 @@ pub fn build(b: *std.Build) void {
     const nghttp2_lib = std.Build.LazyPath{ .cwd_relative = nghttp2_prefix ++ "/lib" };
 
     // ── Net layer modules (pure-Zig, no C deps) ───────────────────────────
-    const net_modules = [_]struct { name: []const u8, src: []const u8 }{
+    const pure_net_modules = [_]struct { name: []const u8, src: []const u8 }{
         .{ .name = "fingerprint", .src = "src/net/fingerprint.zig" },
         .{ .name = "cookie",      .src = "src/net/cookie.zig" },
         .{ .name = "http1",       .src = "src/net/http1.zig" },
         .{ .name = "http2",       .src = "src/net/http2.zig" },
         .{ .name = "pool",        .src = "src/net/pool.zig" },
         .{ .name = "tls",         .src = "src/net/tls.zig" },
-        .{ .name = "tcp",         .src = "src/net/tcp.zig" },
         .{ .name = "url",         .src = "src/net/url.zig" },
     };
 
@@ -31,7 +34,7 @@ pub fn build(b: *std.Build) void {
     const test_net_step    = b.step("test-net",    "Run src/net unit tests");
     const test_client_step = b.step("test-client", "Run src/client unit tests");
 
-    for (net_modules) |m| {
+    for (pure_net_modules) |m| {
         const mod = b.createModule(.{
             .root_source_file = b.path(m.src),
             .target   = target,
@@ -44,6 +47,23 @@ pub fn build(b: *std.Build) void {
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);
         test_net_step.dependOn(&run_t.step);
+    }
+
+    // ── tcp module (depends on libxev) ────────────────────────────────────
+    {
+        const tcp_mod = b.createModule(.{
+            .root_source_file = b.path("src/net/tcp.zig"),
+            .target   = target,
+            .optimize = optimize,
+        });
+        tcp_mod.addImport("xev", xev_mod);
+        const tcp_test = b.addTest(.{
+            .name        = "tcp",
+            .root_module = tcp_mod,
+        });
+        const run_tcp = b.addRunArtifact(tcp_test);
+        test_step.dependOn(&run_tcp.step);
+        test_net_step.dependOn(&run_tcp.step);
     }
 
     // ── h2session module (needs C shim + nghttp2) ─────────────────────────
@@ -80,6 +100,7 @@ pub fn build(b: *std.Build) void {
         .target   = target,
         .optimize = optimize,
     });
+    client_mod.addImport("xev", xev_mod);
     const client_test = b.addTest(.{
         .name        = "client",
         .root_module = client_mod,

@@ -152,10 +152,10 @@ pub const Client = struct {
             written += n;
         }
 
-        // Read response via a GenericReader wrapping the TCP stream
-        const stream = conn.stream orelse return FetchError.RecvFailed;
-        const StreamReader = std.io.GenericReader(std.net.Stream, std.net.Stream.ReadError, std.net.Stream.read);
-        const stream_reader = StreamReader{ .context = stream };
+        // Read response via a GenericReader wrapping the libxev TcpConn.
+        // TcpConn.readFn drives a single xev loop iteration per read call.
+        const TcpReader = std.io.GenericReader(*tcp.TcpConn, tcp.TcpError, tcp.TcpConn.readFn);
+        const stream_reader = TcpReader{ .context = &conn };
         var resp = try http1.readResponse(stream_reader, self.allocator);
         errdefer resp.deinit();
 
