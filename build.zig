@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) void {
     const test_step        = b.step("test",        "Run all unit tests");
     const test_net_step    = b.step("test-net",    "Run src/net unit tests");
     const test_client_step = b.step("test-client", "Run src/client unit tests");
+    const test_e2e_step    = b.step("test-e2e",    "Run end-to-end integration tests (requires network)");
 
     for (pure_net_modules) |m| {
         const mod = b.createModule(.{
@@ -108,4 +109,18 @@ pub fn build(b: *std.Build) void {
     const run_client = b.addRunArtifact(client_test);
     test_step.dependOn(&run_client.step);
     test_client_step.dependOn(&run_client.step);
+
+    // ── End-to-end integration tests (network required) ───────────────────
+    const e2e_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_e2e.zig"),
+        .target   = target,
+        .optimize = optimize,
+    });
+    e2e_mod.addImport("xev", xev_mod);
+    const e2e_test = b.addTest(.{
+        .name        = "e2e",
+        .root_module = e2e_mod,
+    });
+    const run_e2e = b.addRunArtifact(e2e_test);
+    test_e2e_step.dependOn(&run_e2e.step);
 }

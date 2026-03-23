@@ -81,6 +81,9 @@ pub const Request = struct {
         try self.headers.append(allocator, ":authority", self.host);
         try self.headers.append(allocator, ":scheme",    "https");
         try self.headers.append(allocator, ":path",      self.path);
+        // HTTP/1.1 Host header — required by RFC 7230 §5.4; skipped in H2
+        // because :authority carries the same information.
+        try self.headers.append(allocator, "host", self.host);
         // Regular headers in Chrome 132 order
         try self.headers.append(allocator, "accept",
             "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
