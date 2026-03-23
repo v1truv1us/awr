@@ -7,6 +7,10 @@
             .url = "https://github.com/mitchellh/libxev/archive/refs/heads/main.tar.gz",
             .hash = "libxev-0.0.0-86vtc689EwAjQWysidPm9NKkAwwUNByiE3kZTg_xu0Hp",
         },
+        .quickjs_ng = .{
+            .url = "https://github.com/mitchellh/zig-quickjs-ng/archive/refs/heads/main.tar.gz",
+            .hash = "quickjs_ng-0.0.0-0cZnA8XHAwCc95T1GAebWrw-SGEwp1Y0fUAmilP8xGuS",
+        },
     },
     .minimum_zig_version = "0.15.0",
     .paths = .{"."},

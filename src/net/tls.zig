@@ -1,27 +1,22 @@
-/// tls.zig — TLS connection via curl-impersonate.
+/// tls.zig — TLS connection abstraction.
 ///
-/// curl-impersonate patches libcurl to emit a browser-identical TLS ClientHello.
-/// The Chrome 132 profile produces JA4+ = t13d1517h2_8daaf6152771_b6f405a00624.
+/// Supports two build backends selected via -Dtls-backend:
+///   - stub: no native deps, all operations return CurlImpersonateNotAvailable.
+///     Tests compile and pass without curl-impersonate installed.
+///   - curl_impersonate: real TLS via the curl-impersonate C shim.
+///     Requires libcurl-impersonate-chrome at the configured prefix.
 ///
-/// INSTALLATION REQUIRED:
-///   curl-impersonate is NOT installed on this system.
-///   Install via:
-///     macOS:  brew install curl-impersonate  (if available)
-///     or build from source: https://github.com/lwthiker/curl-impersonate
-///
-///   After installation, set CURL_IMPERSONATE_LIB to the path of
-///   libcurl-impersonate-chrome.a (or .dylib) in build.zig.
-///
-// TODO(Phase 3): Replace with owned BoringSSL stack. See awr-spec/Phase1-Networking-TLS.md — AWR is a first-party browser, not a Chrome impersonator.
-/// TODO(curl-impersonate): Replace stub implementation with real C-ABI wrapper
-///   when libcurl-impersonate is available at:
-///     /usr/local/lib/libcurl-impersonate-chrome.{a,dylib}
-///     /opt/homebrew/lib/libcurl-impersonate-chrome.{a,dylib}
-///
-/// The stub models the correct API surface so that:
-///   1. All other modules compile and test successfully without curl-impersonate.
-///   2. The integration is a drop-in: replace the stub body with @cImport calls.
+/// The Zig API surface is identical regardless of backend. Backend selection
+/// is purely a build-time concern.
+
 const std = @import("std");
+const build_opts = @import("build_opts");
+const use_curl = build_opts.tls_backend == .curl_impersonate;
+
+/// C shim import — only compiled when curl_impersonate backend is selected.
+const c = if (use_curl) @cImport({
+    @cInclude("tls_curl_shim.h");
+});
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -53,14 +48,8 @@ pub const TlsError = error{
 
 // ── TlsConn ───────────────────────────────────────────────────────────────
 
-/// TLS connection wrapping curl-impersonate.
-///
-/// TODO(curl-impersonate): Replace `curl_handle: ?*anyopaque` with the real
-/// `curl: *curl_impersonate.CURL` from the @cImport wrapper.
+/// TLS connection. Backend-specific details are hidden behind the public API.
 pub const TlsConn = struct {
-    /// Opaque curl handle (null = stub mode; real = *CURL from curl_easy_init())
-    curl_handle: ?*anyopaque,
-
     /// Impersonation target (always chrome_132 for Phase 1)
     profile: ChromeProfile,
 
@@ -77,13 +66,14 @@ pub const TlsConn = struct {
     port: u16,
 
     /// TLS 1.3 session ticket for 0-RTT resumption (null = no ticket yet)
-    /// TODO(curl-impersonate): Populate from CURLINFO_TLS_SESSION after handshake
     session_ticket: ?[]u8,
 
     allocator: std.mem.Allocator,
 
-    /// Create a new TlsConn in stub mode.
-    /// TODO(curl-impersonate): Call curl_easy_init() here.
+    /// Underlying shim context (null in stub mode).
+    shim_ctx: if (use_curl) ?*c.awr_tls_ctx else void,
+
+    /// Create a new TlsConn.
     pub fn init(
         allocator: std.mem.Allocator,
         host: []const u8,
@@ -91,46 +81,91 @@ pub const TlsConn = struct {
         profile: ChromeProfile,
     ) !TlsConn {
         return TlsConn{
-            .curl_handle  = null, // TODO(curl-impersonate): = curl_easy_init()
-            .profile      = profile,
-            .tls_state    = .closed,
-            .protocol     = .http2, // default; overridden by ALPN after handshake
-            .host         = host,
-            .port         = port,
+            .profile        = profile,
+            .tls_state      = .closed,
+            .protocol       = .http2,
+            .host           = host,
+            .port           = port,
             .session_ticket = null,
-            .allocator    = allocator,
+            .allocator      = allocator,
+            .shim_ctx       = if (use_curl) null else {},
         };
     }
 
     /// Perform TLS handshake.
-    /// TODO(curl-impersonate): Call curl_easy_impersonate(handle, "chrome132", 0)
-    ///   then curl_easy_setopt(CURLOPT_URL, ...) and curl_easy_perform().
     pub fn handshake(self: *TlsConn) TlsError!void {
-        if (self.curl_handle != null) {
-            // Real implementation: invoke curl_easy_impersonate + curl_easy_perform
-            return TlsError.HandshakeFailed;
+        if (use_curl) {
+            if (self.shim_ctx != null) {
+                // Already handshook or in progress
+                if (self.tls_state == .established) return;
+                return TlsError.AlreadyClosed;
+            }
+
+            self.tls_state = .handshaking;
+
+            // Allocate C string for host
+            const host_c = self.allocator.dupeZ(u8, self.host) catch
+                return TlsError.HandshakeFailed;
+            defer self.allocator.free(host_c);
+
+            const ctx = c.awr_tls_init(host_c.ptr, self.port);
+            if (ctx == null) {
+                self.tls_state = .closed;
+                return TlsError.CurlImpersonateNotAvailable;
+            }
+
+            const status = c.awr_tls_handshake(ctx);
+            if (status != c.AWR_TLS_OK) {
+                self.tls_state = .closed;
+                c.awr_tls_close(ctx);
+                return TlsError.HandshakeFailed;
+            }
+
+            // Map negotiated protocol
+            const negotiated = c.awr_tls_negotiated_protocol(ctx);
+            self.protocol = switch (negotiated) {
+                c.AWR_HTTP_1_1 => .http1_1,
+                c.AWR_HTTP_2   => .http2,
+                else => .http2, // default to http2 for Chrome 132
+            };
+
+            self.shim_ctx = ctx;
+            self.tls_state = .established;
+            return;
         }
-        // Stub: always return NotAvailable so tests can detect stub mode
+
+        // Stub mode
         return TlsError.CurlImpersonateNotAvailable;
-        // TODO: integration test, requires curl-impersonate
     }
 
     /// Send `data` over the TLS connection. Returns bytes written.
-    /// TODO(curl-impersonate): Write to the curl connection via callback.
     pub fn send(self: *TlsConn, data: []const u8) TlsError!usize {
         if (self.tls_state != .established) return TlsError.NotConnected;
-        _ = data;
+
+        if (use_curl) {
+            const ctx = self.shim_ctx orelse return TlsError.NotConnected;
+            const result = c.awr_tls_send(ctx, data.ptr, data.len);
+            if (result < 0) return TlsError.SendFailed;
+            return @intCast(result);
+        }
+
+        // Stub mode
         return TlsError.CurlImpersonateNotAvailable;
-        // TODO: integration test, requires curl-impersonate
     }
 
     /// Receive into `buf`. Returns bytes read.
-    /// TODO(curl-impersonate): Read from curl's write callback buffer.
     pub fn recv(self: *TlsConn, buf: []u8) TlsError!usize {
         if (self.tls_state != .established) return TlsError.NotConnected;
-        _ = buf;
+
+        if (use_curl) {
+            const ctx = self.shim_ctx orelse return TlsError.NotConnected;
+            const result = c.awr_tls_recv(ctx, buf.ptr, buf.len);
+            if (result < 0) return TlsError.RecvFailed;
+            return @intCast(result);
+        }
+
+        // Stub mode
         return TlsError.CurlImpersonateNotAvailable;
-        // TODO: integration test, requires curl-impersonate
     }
 
     /// Return the protocol negotiated via ALPN (after handshake).
@@ -139,20 +174,33 @@ pub const TlsConn = struct {
     }
 
     /// Close the TLS connection.
-    /// TODO(curl-impersonate): Call curl_easy_cleanup(handle).
     pub fn deinit(self: *TlsConn) void {
         if (self.session_ticket) |t| self.allocator.free(t);
+        self.session_ticket = null;
         self.tls_state = .closed;
-        // TODO(curl-impersonate): curl_easy_cleanup(self.curl_handle);
-        self.curl_handle = null;
+
+        if (use_curl) {
+            if (self.shim_ctx) |ctx| {
+                c.awr_tls_close(ctx);
+                self.shim_ctx = null;
+            }
+        }
+    }
+
+    /// GenericReader adapter — lets callers wrap TlsConn in a Reader
+    /// (e.g. for http1.readResponse).
+    pub fn readFn(self: *TlsConn, buf: []u8) TlsError!usize {
+        return self.recv(buf);
+    }
+
+    /// GenericWriter adapter — lets callers wrap TlsConn in a Writer
+    /// (e.g. for http1.Request.write).
+    pub fn writeFn(self: *TlsConn, data: []const u8) TlsError!usize {
+        return self.send(data);
     }
 };
 
 // ── Tests ──────────────────────────────────────────────────────────────────
-//
-// Tests here verify struct initialization, profile constants, and state
-// transitions in stub mode. All live-network tests are marked:
-//   // TODO: integration test, requires curl-impersonate
 
 test "TlsConn.init creates conn with chrome_132 profile" {
     var conn = try TlsConn.init(std.testing.allocator, "example.com", 443, .chrome_132);
@@ -177,13 +225,6 @@ test "TlsConn.init has null session_ticket (no resumption yet)" {
     var conn = try TlsConn.init(std.testing.allocator, "example.com", 443, .chrome_132);
     defer conn.deinit();
     try std.testing.expectEqual(@as(?[]u8, null), conn.session_ticket);
-}
-
-test "TlsConn.handshake returns CurlImpersonateNotAvailable in stub mode" {
-    var conn = try TlsConn.init(std.testing.allocator, "example.com", 443, .chrome_132);
-    defer conn.deinit();
-    const result = conn.handshake();
-    try std.testing.expectError(TlsError.CurlImpersonateNotAvailable, result);
 }
 
 test "TlsConn.send returns NotConnected when not established" {
@@ -213,10 +254,21 @@ test "TlsConn.deinit transitions to closed state" {
     try std.testing.expectEqual(TlsState.closed, conn.tls_state);
 }
 
-// TODO: integration test, requires curl-impersonate
-// test "TlsConn handshakes with tls.peet.ws and returns JA4+ = t13d1517h2_8daaf6152771_b6f405a00624" {
-//     var conn = try TlsConn.init(std.testing.allocator, "tls.peet.ws", 443, .chrome_132);
-//     defer conn.deinit();
-//     try conn.handshake();
-//     // ... fetch /api/all, assert ja4 field
-// }
+// Stub-only tests: verify handshake returns NotAvailable when stub mode
+test "TlsConn.handshake returns NotAvailable in stub mode" {
+    if (use_curl) return; // skip in curl_impersonate mode
+    var conn = try TlsConn.init(std.testing.allocator, "example.com", 443, .chrome_132);
+    defer conn.deinit();
+    const result = conn.handshake();
+    try std.testing.expectError(TlsError.CurlImpersonateNotAvailable, result);
+}
+
+// Integration tests — only run with curl_impersonate backend
+test "integration: TlsConn handshake to example.com" {
+    if (!use_curl) return error.SkipZigTest;
+    var conn = try TlsConn.init(std.testing.allocator, "example.com", 443, .chrome_132);
+    defer conn.deinit();
+    try conn.handshake();
+    try std.testing.expectEqual(TlsState.established, conn.tls_state);
+    try std.testing.expect(conn.negotiatedProtocol() == .http1_1 or conn.negotiatedProtocol() == .http2);
+}

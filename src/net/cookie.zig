@@ -15,6 +15,14 @@ const std = @import("std");
 
 pub const SameSite = enum { strict, lax, none };
 
+/// SameSite send context. Tracks whether the current request is cross-site.
+pub const CookieSendContext = struct {
+    /// True if the request host differs from the cookie's registered domain.
+    is_cross_site: bool = false,
+    /// True if this is a top-level navigation (not a sub-resource request).
+    is_navigational: bool = true,
+};
+
 pub const Cookie = struct {
     name: []u8,
     value: []u8,
@@ -119,12 +127,26 @@ pub const CookieJar = struct {
         try self.cookies.append(self.allocator, cookie);
     }
 
-    /// Build Cookie: header value for a request. Caller owns the returned slice.
+    /// Build Cookie: header value for a request.
+    /// Caller owns the returned slice.
+    ///
+    /// For Phase 1, treats all requests as same-site navigations.
     pub fn getCookieHeader(
         self: *CookieJar,
         request_host: []const u8,
         request_path: []const u8,
         https: bool,
+    ) ![]u8 {
+        return self.getCookieHeaderContext(request_host, request_path, https, .{});
+    }
+
+    /// Build Cookie: header value with explicit SameSite enforcement context.
+    pub fn getCookieHeaderContext(
+        self: *CookieJar,
+        request_host: []const u8,
+        request_path: []const u8,
+        https: bool,
+        ctx: CookieSendContext,
     ) ![]u8 {
         const now = std.time.timestamp();
         var buf: std.ArrayList(u8) = .{};
@@ -135,7 +157,22 @@ pub const CookieJar = struct {
             if (c.expires) |exp| if (exp <= now) continue;
             if (c.secure and !https) continue;
             if (!domainMatches(request_host, c.domain)) continue;
-            if (!std.mem.startsWith(u8, request_path, c.path)) continue;
+            if (!pathMatches(request_path, c.path)) continue;
+
+            // SameSite enforcement
+            switch (c.same_site) {
+                .strict => {
+                    // SameSite=strict: never send on cross-site requests
+                    if (ctx.is_cross_site) continue;
+                },
+                .lax => {
+                    // SameSite=lax: allow on same-site, allow on cross-site navigational GET
+                    if (ctx.is_cross_site and !ctx.is_navigational) continue;
+                },
+                .none => {
+                    // SameSite=none: always send (Secure is already checked above)
+                },
+            }
 
             if (!first) try buf.appendSlice(self.allocator, "; ");
             try buf.appendSlice(self.allocator, c.name);
@@ -168,6 +205,31 @@ pub const CookieJar = struct {
 fn attrStartsWithIgnoreCase(attr: []const u8, prefix: []const u8, prefix_len: usize) bool {
     if (attr.len < prefix_len) return false;
     return std.ascii.eqlIgnoreCase(attr[0..prefix_len], prefix);
+}
+
+/// RFC 6265 §5.1.4 path matching.
+/// Returns true if `cookie_path` matches `request_path`.
+///
+/// A cookie path matches if:
+///   1. The paths are equal, OR
+///   2. The cookie path is a prefix of the request path AND:
+///      - the cookie path ends with '/', OR
+///      - the next character in the request path is '/'
+///
+/// This prevents /api from matching /apiOld while still allowing /api to match /api/users.
+pub fn pathMatches(request_path: []const u8, cookie_path: []const u8) bool {
+    // Exact match
+    if (std.mem.eql(u8, request_path, cookie_path)) return true;
+
+    // Prefix match: cookie_path must be a prefix of request_path
+    if (!std.mem.startsWith(u8, request_path, cookie_path)) return false;
+
+    // If the cookie path is "/", it always matches (it's the default root path)
+    if (std.mem.eql(u8, cookie_path, "/")) return true;
+
+    // Boundary check: cookie path must end with '/' OR next char in request must be '/'
+    const next_char = request_path[cookie_path.len];
+    return cookie_path[cookie_path.len - 1] == '/' or next_char == '/';
 }
 
 /// RFC 6265 §5.1.3 domain matching.
@@ -268,6 +330,34 @@ test "domainMatches rejects suffix-but-not-subdomain (notexample.com)" {
     try std.testing.expect(!domainMatches("notexample.com", "example.com"));
 }
 
+test "pathMatches exact match" {
+    try std.testing.expect(pathMatches("/api/users", "/api/users"));
+}
+
+test "pathMatches prefix with trailing slash" {
+    try std.testing.expect(pathMatches("/api/users", "/api/"));
+}
+
+test "pathMatches prefix without trailing slash (boundary)" {
+    try std.testing.expect(pathMatches("/api/users", "/api"));
+}
+
+test "pathMatches rejects non-boundary prefix (/api vs /apiOld)" {
+    try std.testing.expect(!pathMatches("/apiOld", "/api"));
+}
+
+test "pathMatches root always matches" {
+    try std.testing.expect(pathMatches("/anything/here", "/"));
+}
+
+test "pathMatches rejects different prefix (/foo vs /bar)" {
+    try std.testing.expect(!pathMatches("/bar/baz", "/foo"));
+}
+
+test "pathMatches identical root" {
+    try std.testing.expect(pathMatches("/", "/"));
+}
+
 test "getCookieHeader serializes matching cookies" {
     var jar = CookieJar.init(std.testing.allocator);
     defer jar.deinit();
@@ -333,4 +423,54 @@ test "purgeExpired removes expired cookies" {
     jar.purgeExpired();
     try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
     try std.testing.expectEqualStrings("fresh", jar.cookies.items[0].name);
+}
+
+test "SameSite=Strict excluded on cross-site request" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+    try jar.parseSetCookie("sid=1; SameSite=Strict", "example.com");
+    const ctx = CookieSendContext{ .is_cross_site = true, .is_navigational = true };
+    const header = try jar.getCookieHeaderContext("example.com", "/", false, ctx);
+    defer std.testing.allocator.free(header);
+    try std.testing.expectEqualStrings("", header);
+}
+
+test "SameSite=Strict included on same-site request" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+    try jar.parseSetCookie("sid=1; SameSite=Strict", "example.com");
+    const ctx = CookieSendContext{ .is_cross_site = false, .is_navigational = true };
+    const header = try jar.getCookieHeaderContext("example.com", "/", false, ctx);
+    defer std.testing.allocator.free(header);
+    try std.testing.expect(std.mem.indexOf(u8, header, "sid=1") != null);
+}
+
+test "SameSite=Lax included on cross-site navigational" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+    try jar.parseSetCookie("sid=1; SameSite=Lax", "example.com");
+    const ctx = CookieSendContext{ .is_cross_site = true, .is_navigational = true };
+    const header = try jar.getCookieHeaderContext("example.com", "/", false, ctx);
+    defer std.testing.allocator.free(header);
+    try std.testing.expect(std.mem.indexOf(u8, header, "sid=1") != null);
+}
+
+test "SameSite=Lax excluded on cross-site non-navigational" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+    try jar.parseSetCookie("sid=1; SameSite=Lax", "example.com");
+    const ctx = CookieSendContext{ .is_cross_site = true, .is_navigational = false };
+    const header = try jar.getCookieHeaderContext("example.com", "/", false, ctx);
+    defer std.testing.allocator.free(header);
+    try std.testing.expectEqualStrings("", header);
+}
+
+test "SameSite=None always sent if secure over HTTPS" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+    try jar.parseSetCookie("sid=1; SameSite=None; Secure", "example.com");
+    const ctx = CookieSendContext{ .is_cross_site = true, .is_navigational = false };
+    const header = try jar.getCookieHeaderContext("example.com", "/", true, ctx);
+    defer std.testing.allocator.free(header);
+    try std.testing.expect(std.mem.indexOf(u8, header, "sid=1") != null);
 }

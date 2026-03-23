@@ -3,31 +3,32 @@
 /// These tests exercise the full pipeline:
 ///   URL parser → TcpConn (libxev) → HTTP/1.1 request → Response
 ///
+/// HTTPS behavior depends on -Dtls-backend:
+///   - curl_impersonate: HTTPS goes through TlsConn (Chrome 132 TLS fingerprint)
+///   - stub / std:       HTTPS falls back to std.http.Client
+///
 /// They require real network access and are intentionally separated from
 /// the unit test suite so CI can gate on them independently:
 ///
 ///   zig build test-e2e     # run only integration tests
 ///   zig build test         # unit tests only (no network)
-///
-/// Phase 1 constraints reflected here:
-///   - HTTPS is stubbed; only http:// URLs work end-to-end.
-///   - example.com returns 200 for plain HTTP.
-///   - Redirects to https:// are caught as TlsNotAvailable (expected in Phase 1).
-const std    = @import("std");
-const client = @import("client.zig");
+const std        = @import("std");
+const build_opts = @import("build_opts");
+const client     = @import("client.zig");
+const tls_mod    = @import("net/tls.zig");
+
+const use_curl_tls = build_opts.tls_backend == .curl_impersonate;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /// Make a single GET with minimal (non-Chrome) headers so the response body
-/// arrives uncompressed.  Phase 1 has no decompression; Chrome headers send
-/// `accept-encoding: gzip, deflate, br, zstd` which would give us a
-/// compressed body we cannot parse.  A separate test verifies Chrome headers
-/// produce a 200 without inspecting the compressed body.
+/// arrives uncompressed.  Chrome headers send `accept-encoding: gzip, deflate, br, zstd`
+/// which would give us a compressed body we cannot parse.
 fn getPlain(allocator: std.mem.Allocator, url: []const u8) !client.Response {
     var c = client.Client.init(allocator, .{
         .follow_redirects   = true,
         .max_redirects      = 5,
-        .use_chrome_headers = false,  // no accept-encoding → uncompressed body
+        .use_chrome_headers = false,
     });
     defer c.deinit();
     return c.fetch(url);
@@ -44,11 +45,10 @@ fn getChrome(allocator: std.mem.Allocator, url: []const u8) !client.Response {
     return c.fetch(url);
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
+// ── HTTP tests (backend-independent) ──────────────────────────────────────
 
 test "e2e: GET http://example.com/ returns 200 with HTML body" {
     const allocator = std.testing.allocator;
-    // Plain headers → no accept-encoding → uncompressed body we can inspect.
     var resp = try getPlain(allocator, "http://example.com/");
     defer resp.deinit();
 
@@ -81,14 +81,24 @@ test "e2e: GET http://example.com/ body contains 'Example Domain'" {
 }
 
 test "e2e: Chrome-132 headers yield 200 from example.com" {
-    // Verifies Chrome fingerprint headers are accepted; body may be compressed.
     const allocator = std.testing.allocator;
     var resp = try getChrome(allocator, "http://example.com/");
     defer resp.deinit();
     try std.testing.expectEqual(@as(u16, 200), resp.status);
 }
 
-test "e2e: HTTPS fetch succeeds via std.crypto.tls (Phase 1)" {
+test "e2e: invalid host returns DnsResolutionFailed" {
+    const allocator = std.testing.allocator;
+    var c = client.Client.init(allocator, .{});
+    defer c.deinit();
+    const result = c.fetch("http://this-host-definitely-does-not-exist.invalid/");
+    try std.testing.expectError(client.FetchError.DnsResolutionFailed, result);
+}
+
+// ── HTTPS tests (backend-dependent) ───────────────────────────────────────
+
+test "e2e: HTTPS fetch succeeds (backend: std fallback)" {
+    if (use_curl_tls) return error.SkipZigTest; // skip — curl_tls path tested separately
     const allocator = std.testing.allocator;
     var c = client.Client.init(allocator, .{});
     defer c.deinit();
@@ -98,10 +108,21 @@ test "e2e: HTTPS fetch succeeds via std.crypto.tls (Phase 1)" {
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "Example Domain") != null);
 }
 
-test "e2e: invalid host returns DnsResolutionFailed" {
+test "e2e: HTTPS fetch succeeds via TlsConn (curl_impersonate)" {
+    if (!use_curl_tls) return error.SkipZigTest; // skip — no curl_impersonate backend
     const allocator = std.testing.allocator;
     var c = client.Client.init(allocator, .{});
     defer c.deinit();
-    const result = c.fetch("http://this-host-definitely-does-not-exist.invalid/");
-    try std.testing.expectError(client.FetchError.DnsResolutionFailed, result);
+    var resp = try c.fetch("https://example.com/");
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "Example Domain") != null);
+}
+
+test "e2e: TlsConn handshake succeeds to example.com (curl_impersonate)" {
+    if (!use_curl_tls) return error.SkipZigTest;
+    var conn = try tls_mod.TlsConn.init(std.testing.allocator, "example.com", 443, .chrome_132);
+    defer conn.deinit();
+    try conn.handshake();
+    try std.testing.expectEqual(tls_mod.TlsState.established, conn.tls_state);
 }

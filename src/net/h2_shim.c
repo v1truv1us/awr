@@ -218,16 +218,17 @@ int32_t awr_h2_submit_get(awr_h2_session_t *sess,
                            const char *authority,
                            const char *path) {
     nghttp2_nv nva[4];
+    /* Chrome 132 pseudo-header order: :method, :authority, :scheme, :path */
     nva[0].name     = (uint8_t *)":method";    nva[0].namelen  = 7;
     nva[0].value    = (uint8_t *)method;       nva[0].valuelen = strlen(method);
     nva[0].flags    = NGHTTP2_NV_FLAG_NONE;
 
-    nva[1].name     = (uint8_t *)":scheme";    nva[1].namelen  = 7;
-    nva[1].value    = (uint8_t *)scheme;       nva[1].valuelen = strlen(scheme);
+    nva[1].name     = (uint8_t *)":authority"; nva[1].namelen  = 10;
+    nva[1].value    = (uint8_t *)authority;    nva[1].valuelen = strlen(authority);
     nva[1].flags    = NGHTTP2_NV_FLAG_NONE;
 
-    nva[2].name     = (uint8_t *)":authority"; nva[2].namelen  = 10;
-    nva[2].value    = (uint8_t *)authority;    nva[2].valuelen = strlen(authority);
+    nva[2].name     = (uint8_t *)":scheme";    nva[2].namelen  = 7;
+    nva[2].value    = (uint8_t *)scheme;       nva[2].valuelen = strlen(scheme);
     nva[2].flags    = NGHTTP2_NV_FLAG_NONE;
 
     nva[3].name     = (uint8_t *)":path";      nva[3].namelen  = 5;
