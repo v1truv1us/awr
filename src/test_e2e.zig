@@ -88,12 +88,14 @@ test "e2e: Chrome-132 headers yield 200 from example.com" {
     try std.testing.expectEqual(@as(u16, 200), resp.status);
 }
 
-test "e2e: HTTPS fetch stubs out with TlsNotAvailable in Phase 1" {
+test "e2e: HTTPS fetch succeeds via std.crypto.tls (Phase 1)" {
     const allocator = std.testing.allocator;
     var c = client.Client.init(allocator, .{});
     defer c.deinit();
-    const result = c.fetch("https://example.com/");
-    try std.testing.expectError(client.FetchError.TlsNotAvailable, result);
+    var resp = try c.fetch("https://example.com/");
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "Example Domain") != null);
 }
 
 test "e2e: invalid host returns DnsResolutionFailed" {

@@ -93,8 +93,17 @@ pub const Client = struct {
     fn fetchUrl(self: *Client, parsed: Url, redirect_count: u8) anyerror!Response {
         if (redirect_count > self.options.max_redirects) return FetchError.TooManyRedirects;
 
-        // HTTPS not available until curl-impersonate is wired in
-        if (parsed.is_https) return FetchError.TlsNotAvailable;
+        // HTTPS: delegate to std.http.Client which uses std.crypto.tls internally.
+        // TODO(Phase 3): Replace with AWR BoringSSL stack + JA4+ Chrome 132 fingerprint.
+        if (parsed.is_https) {
+            var path_buf: [2048]u8 = undefined;
+            const path = parsed.pathWithQuery(&path_buf);
+            var url_buf: [4096]u8 = undefined;
+            const full_url = std.fmt.bufPrint(&url_buf, "https://{s}:{d}{s}", .{
+                parsed.host, parsed.port, path,
+            }) catch return error.OutOfMemory;
+            return self.fetchHttpsViaStd(full_url);
+        }
 
         // Resolve hostname
         const addr_list = std.net.getAddressList(self.allocator, parsed.host, parsed.port) catch
@@ -198,6 +207,34 @@ pub const Client = struct {
             .allocator = self.allocator,
         };
     }
+
+    /// HTTPS fetch via std.http.Client (uses std.crypto.tls under the hood).
+    /// TODO(Phase 3): Replace with AWR's owned BoringSSL stack + JA4+ Chrome 132 fingerprint.
+    fn fetchHttpsViaStd(self: *Client, url_str: []const u8) anyerror!Response {
+        var std_client = std.http.Client{ .allocator = self.allocator };
+        defer std_client.deinit();
+
+        var body_writer = std.Io.Writer.Allocating.init(self.allocator);
+        const result = std_client.fetch(.{
+            .location        = .{ .url = url_str },
+            .response_writer = &body_writer.writer,
+        }) catch |err| {
+            body_writer.deinit();
+            return err;
+        };
+
+        const body = body_writer.toOwnedSlice() catch {
+            body_writer.deinit();
+            return error.OutOfMemory;
+        };
+
+        return Response{
+            .status    = @as(u16, @intFromEnum(result.status)),
+            .headers   = http1.HeaderList{},
+            .body      = body,
+            .allocator = self.allocator,
+        };
+    }
 };
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -216,12 +253,15 @@ test "Client options defaults" {
     try std.testing.expect(opts.use_chrome_headers);
 }
 
-test "fetch returns TlsNotAvailable for https in stub mode" {
-    var client = Client.init(std.testing.allocator, .{});
-    defer client.deinit();
-    const result = client.fetch("https://example.com/");
-    try std.testing.expectError(FetchError.TlsNotAvailable, result);
-}
+// Integration test — requires network; uncomment to run manually
+// test "integration: fetch https://example.com" {
+//     var client = Client.init(std.testing.allocator, .{});
+//     defer client.deinit();
+//     var resp = try client.fetch("https://example.com/");
+//     defer resp.deinit();
+//     try std.testing.expectEqual(@as(u16, 200), resp.status);
+//     try std.testing.expect(std.mem.indexOf(u8, resp.body, "Example Domain") != null);
+// }
 
 test "fetch returns InvalidUrl for bad URL" {
     var client = Client.init(std.testing.allocator, .{});
