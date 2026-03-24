@@ -2,7 +2,6 @@
 ///
 /// These tests exercise the full pipeline:
 ///   URL parser → TcpConn (libxev) → HTTP/1.1 request → Response
-///   HTTPS: std.http.Client (std.crypto.tls) — no curl-impersonate dependency.
 ///
 /// They require real network access and are intentionally separated from
 /// the unit test suite so CI can gate on them independently:
@@ -15,8 +14,8 @@ const client = @import("client.zig");
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /// Make a single GET with minimal (non-Chrome) headers so the response body
-/// arrives uncompressed.  Chrome headers send `accept-encoding: gzip, deflate, br, zstd`
-/// which would give us a compressed body we cannot parse.
+/// arrives uncompressed.  Chrome headers send `accept-encoding: gzip, …`
+/// which would give a compressed body we cannot parse here.
 fn getPlain(allocator: std.mem.Allocator, url: []const u8) !client.Response {
     var c = client.Client.init(allocator, .{
         .follow_redirects   = true,
@@ -38,7 +37,7 @@ fn getChrome(allocator: std.mem.Allocator, url: []const u8) !client.Response {
     return c.fetch(url);
 }
 
-// ── HTTP tests (backend-independent) ──────────────────────────────────────
+// ── HTTP tests ─────────────────────────────────────────────────────────────
 
 test "e2e: GET http://example.com/ returns 200 with HTML body" {
     const allocator = std.testing.allocator;
@@ -88,9 +87,9 @@ test "e2e: invalid host returns DnsResolutionFailed" {
     try std.testing.expectError(client.FetchError.DnsResolutionFailed, result);
 }
 
-// ── HTTPS tests ────────────────────────────────────────────────────────────
+// ── HTTPS tests ─────────────────────────────────────────────────────────────
 
-test "e2e: HTTPS fetch succeeds via std.crypto.tls" {
+test "e2e: HTTPS fetch succeeds (std.http.Client)" {
     const allocator = std.testing.allocator;
     var c = client.Client.init(allocator, .{});
     defer c.deinit();
