@@ -274,12 +274,6 @@ test "TlsConn.handshake returns NotAvailable in stub mode" {
     try std.testing.expectError(TlsError.CurlImpersonateNotAvailable, result);
 }
 
-// Integration tests — only run with curl_impersonate backend
-test "integration: TlsConn handshake to example.com" {
-    if (!use_curl) return error.SkipZigTest;
-    var conn = try TlsConn.init(std.testing.allocator, "example.com", 443, .chrome_132);
-    defer conn.deinit();
-    try conn.handshake();
-    try std.testing.expectEqual(TlsState.established, conn.tls_state);
-    try std.testing.expect(conn.negotiatedProtocol() == .http1_1 or conn.negotiatedProtocol() == .http2);
-}
+// TODO(Phase 3): Add integration test for TlsConn handshake once BoringSSL
+// stack is in place. curl_impersonate integration tested via test-e2e with
+// -Dtls-backend=curl_impersonate flag.
