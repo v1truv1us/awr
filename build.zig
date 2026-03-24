@@ -54,6 +54,7 @@ pub fn build(b: *std.Build) void {
     const test_dom_step    = b.step("test-dom",    "Run src/dom unit tests");
     const test_client_step = b.step("test-client", "Run src/client unit tests");
     const test_h2_step     = b.step("test-h2",     "Run h2session and HTTP/2 frame tests");
+    const test_page_step   = b.step("test-page",   "Run src/page unit tests");
     const test_e2e_step    = b.step("test-e2e",    "Run end-to-end integration tests (requires network)");
 
     // ── Net layer modules (pure-Zig, no C deps) ───────────────────────────
@@ -235,6 +236,34 @@ pub fn build(b: *std.Build) void {
         const run_dom = b.addRunArtifact(dom_test);
         test_step.dependOn(&run_dom.step);
         test_dom_step.dependOn(&run_dom.step);
+    }
+
+    // ── Page module (Phase 2 — wires fetch+HTML+JS) ───────────────────────
+    {
+        const page_mod = b.createModule(.{
+            .root_source_file = b.path("src/page.zig"),
+            .target   = target,
+            .optimize = optimize,
+        });
+        // client deps
+        page_mod.addImport("xev", xev_mod);
+        page_mod.addOptions("build_opts", build_opts);
+        // JS engine dep
+        page_mod.addImport("quickjs", qjs_mod);
+
+        const page_test = b.addTest(.{
+            .name        = "page",
+            .root_module = page_mod,
+            .use_llvm    = true, // required for QuickJS-NG
+        });
+        page_test.linkLibrary(qjs_dep.artifact("quickjs-ng"));
+        page_test.linkLibC();
+        page_test.addIncludePath(lexbor_include);
+        page_test.addLibraryPath(lexbor_lib);
+        page_test.linkSystemLibrary("lexbor");
+        const run_page = b.addRunArtifact(page_test);
+        test_step.dependOn(&run_page.step);
+        test_page_step.dependOn(&run_page.step);
     }
 
     // ── Client module ─────────────────────────────────────────────────────
