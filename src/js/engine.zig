@@ -142,6 +142,20 @@ pub const JsEngine = struct {
         return result.toBool(self.ctx) catch false;
     }
 
+    /// Evaluate and return a heap-allocated string result.
+    /// Caller owns the returned slice and must free it.
+    pub fn evalString(self: *JsEngine, source: []const u8) JsError![]u8 {
+        const val = self.ctx.eval(source, "<eval>", .{});
+        if (val.isException()) {
+            val.deinit(self.ctx);
+            return JsError.EvalException;
+        }
+        defer val.deinit(self.ctx);
+        const cstr = val.toCString(self.ctx) orelse return JsError.OutOfMemory;
+        defer self.ctx.freeCString(cstr);
+        return self.allocator.dupe(u8, std.mem.span(cstr));
+    }
+
     /// Drain the microtask / Promise job queue.
     pub fn drainMicrotasks(self: *JsEngine) void {
         while (self.rt.isJobPending()) {
@@ -489,4 +503,24 @@ test "JsEngine — setGlobal exposes value to JS" {
 
     const ok = try engine.evalBool("__testProp__ === 99");
     try std.testing.expect(ok);
+}
+
+test "JsEngine.evalString — string concatenation" {
+    var eng = try JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    const result = try eng.evalString("'hello ' + 'world'");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("hello world", result);
+}
+test "JsEngine.evalString — number to string" {
+    var eng = try JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    const result = try eng.evalString("String(42)");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("42", result);
+}
+test "JsEngine.evalString — exception returns error" {
+    var eng = try JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try std.testing.expectError(error.EvalException, eng.evalString("throw new Error('x')"));
 }
