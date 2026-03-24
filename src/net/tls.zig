@@ -265,9 +265,7 @@ test "TlsConn.deinit transitions to closed state" {
     try std.testing.expectEqual(TlsState.closed, conn.tls_state);
 }
 
-// Stub-only tests: verify handshake returns NotAvailable when stub mode
 test "TlsConn.handshake returns NotAvailable in stub mode" {
-    if (use_curl) return; // skip in curl_impersonate mode
     var conn = try TlsConn.init(std.testing.allocator, "example.com", 443, .chrome_132);
     defer conn.deinit();
     const result = conn.handshake();
