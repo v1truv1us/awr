@@ -1,35 +1,37 @@
 /// page.zig — AWR Phase 2 top-level Page type.
 ///
-/// Wires the full pipeline: fetch URL → parse HTML → execute inline <script>
-/// tags via QuickJS-NG → return post-JS document state.
+/// Wires the full pipeline:
+///   Client.fetch → HtmlParser.parse → Document.fromLexbor →
+///   installDomBridge → execute inline <script> tags →
+///   drainMicrotasks → extract title + body_text → PageResult
 ///
 /// Usage:
 ///   var page = try Page.init(allocator);
 ///   defer page.deinit();
-///   var result = try page.navigate("https://example.com/");
+///   var result = try page.navigate("http://example.com/");
 ///   defer result.deinit();
 ///   std.debug.print("title: {?s}\n", .{result.title});
-const std = @import("std");
-
-const client_mod = @import("client.zig");
-const engine_mod = @import("js/engine.zig");
-const html_mod   = @import("html/parser.zig");
-const dom_mod    = @import("dom/node.zig");
+const std    = @import("std");
+const client = @import("client.zig");
+const engine = @import("js/engine.zig");
+const dom    = @import("dom/node.zig");   // parseDocument handles HTML+DOM internally
+const bridge = @import("dom/bridge.zig");
 
 // ── PageResult ────────────────────────────────────────────────────────────
 
-/// Result of a Page.navigate() call. Caller owns all memory; call deinit().
+/// Result of a Page.navigate() or Page.processHtml() call.
+/// All fields are owned by this struct; call deinit() when done.
 pub const PageResult = struct {
-    /// Final URL after any redirects (same as input for now — redirect tracking TODO).
+    /// The URL that was requested.
     url: []const u8,
     /// HTTP status code of the final response.
     status: u16,
     /// Content of the <title> element, or null if absent.
-    title: ?[]u8,
-    /// Concatenated visible text content of the <body>.
-    body_text: []u8,
-    /// Raw HTML response bytes.
-    html: []u8,
+    title: ?[]const u8,
+    /// Concatenated visible text content of <body>.
+    body_text: []const u8,
+    /// Full raw HTML response bytes.
+    html: []const u8,
 
     allocator: std.mem.Allocator,
 
@@ -41,132 +43,128 @@ pub const PageResult = struct {
     }
 };
 
-// ── Page errors ───────────────────────────────────────────────────────────
-
-pub const PageError = error{
-    FetchFailed,
-    ParseFailed,
-    JsInitFailed,
-    OutOfMemory,
-};
-
 // ── Page ──────────────────────────────────────────────────────────────────
 
+/// Top-level browser page.  Owns an HTTP client and a JS engine.
+///
+/// The JS engine context persists across navigations; variables set by
+/// scripts in one navigation remain visible in subsequent ones.
+/// Phase 3 will add per-navigation context resets.
 pub const Page = struct {
     allocator: std.mem.Allocator,
+    client:    client.Client,
+    js:        engine.JsEngine,
 
-    pub fn init(allocator: std.mem.Allocator) PageError!Page {
-        return Page{ .allocator = allocator };
+    /// Initialise a new Page with default client options.
+    pub fn init(allocator: std.mem.Allocator) !Page {
+        var js_engine = try engine.JsEngine.init(allocator, null);
+        errdefer js_engine.deinit();
+        return Page{
+            .allocator = allocator,
+            .client    = client.Client.init(allocator, .{
+                .use_chrome_headers = false, // plain headers → uncompressed body
+            }),
+            .js = js_engine,
+        };
     }
 
-    pub fn deinit(_: *Page) void {}
+    pub fn deinit(self: *Page) void {
+        self.js.deinit();
+        self.client.deinit();
+    }
+
+    // ── Public API ───────────────────────────────────────────────────────
 
     /// Fetch `url`, parse the HTML, execute inline <script> tags, and return
-    /// the post-JS document state. Caller owns the returned PageResult.
-    pub fn navigate(self: *Page, url: []const u8) anyerror!PageResult {
+    /// the post-JS document state.  Caller must call result.deinit().
+    pub fn navigate(self: *Page, url: []const u8) !PageResult {
+        var resp = try self.client.fetch(url);
+        defer resp.deinit();
+        return self.processHtml(url, resp.status, resp.body);
+    }
+
+    /// Process an already-fetched HTML string without making a network
+    /// request.  Useful for unit tests and offline scenarios.
+    /// Caller must call result.deinit().
+    pub fn processHtml(
+        self:     *Page,
+        url:      []const u8,
+        status:   u16,
+        html_src: []const u8,
+    ) !PageResult {
         const gpa = self.allocator;
 
-        // 1. Fetch
-        var http_client = client_mod.Client.init(gpa, .{
-            .follow_redirects = true,
-            .use_chrome_headers = false, // plain headers → uncompressed body
-        });
-        defer http_client.deinit();
+        // Keep a copy of the raw HTML for PageResult.html.
+        const html = try gpa.dupe(u8, html_src);
+        errdefer gpa.free(html);
 
-        var resp = http_client.fetch(url) catch return PageError.FetchFailed;
-        defer resp.deinit();
+        // ── Parse HTML + build Zig DOM in one step ────────────────────────
+        // dom.parseDocument keeps everything within a single @cImport context,
+        // avoiding the cross-module cImport type-mismatch that arises when
+        // html/parser.zig and dom/node.zig are imported separately.
+        var zig_doc = try dom.parseDocument(gpa, html);
+        defer zig_doc.deinit();
 
-        // Keep a copy of the raw HTML owned by PageResult
-        const html_copy = try gpa.dupe(u8, resp.body);
-        errdefer gpa.free(html_copy);
+        // ── Install DOM bridge (document/window globals in JS) ────────────
+        // removeDomBridge runs before zig_doc.deinit (LIFO defer order).
+        try bridge.installDomBridge(&self.js, &zig_doc, gpa);
+        defer bridge.removeDomBridge(&self.js);
 
-        // 2. Parse HTML
-        var parser = html_mod.HtmlParser.init() catch return PageError.ParseFailed;
-        defer parser.deinit();
-        var doc = parser.parse(resp.body) catch return PageError.ParseFailed;
-        defer doc.deinit();
+        // ── Execute inline <script> tags in document order ────────────────
+        if (zig_doc.htmlElement()) |root| self.executeScriptsInElement(root);
 
-        // 3. Build DOM tree
-        var dom = dom_mod.parseDocument(gpa, resp.body) catch return PageError.ParseFailed;
-        defer dom.deinit();
+        // ── Drain microtask / Promise queue ───────────────────────────────
+        self.js.drainMicrotasks();
 
-        // 4. Extract title
-        const title: ?[]u8 = blk: {
-            var title_len: usize = 0;
-            if (doc.title(&title_len)) |t| {
-                break :blk gpa.dupe(u8, t[0..title_len]) catch break :blk null;
-            }
-            break :blk null;
+        // ── Extract title ─────────────────────────────────────────────────
+        const title: ?[]const u8 = blk: {
+            const head = zig_doc.head() orelse break :blk null;
+            const title_elem = head.firstChildByTag("title") orelse break :blk null;
+            const text = title_elem.textContent(gpa) catch break :blk null;
+            if (text.len == 0) { gpa.free(text); break :blk null; }
+            break :blk text;
         };
         errdefer if (title) |t| gpa.free(t);
 
-        // 5. Extract visible body text
-        const body_text: []u8 = blk: {
-            if (dom.body()) |body_elem| {
-                const txt = body_elem.textContent(gpa) catch break :blk try gpa.dupe(u8, "");
-                break :blk txt;
-            }
-            break :blk try gpa.dupe(u8, "");
+        // ── Extract body text ─────────────────────────────────────────────
+        const body_text: []const u8 = blk: {
+            const body = zig_doc.body() orelse break :blk try gpa.dupe(u8, "");
+            break :blk body.textContent(gpa) catch try gpa.dupe(u8, "");
         };
         errdefer gpa.free(body_text);
 
-        // 6. Execute inline <script> tags via QuickJS-NG
-        var js = engine_mod.JsEngine.init(gpa, null) catch return PageError.JsInitFailed;
-        defer js.deinit();
-
-        if (dom.body()) |body_elem| {
-            try executeScripts(&js, body_elem);
-        }
-        js.drainMicrotasks();
-
-        // 7. Build result
         const url_copy = try gpa.dupe(u8, url);
-        errdefer gpa.free(url_copy);
 
         return PageResult{
-            .url        = url_copy,
-            .status     = resp.status,
-            .title      = title,
-            .body_text  = body_text,
-            .html       = html_copy,
-            .allocator  = gpa,
+            .url       = url_copy,
+            .status    = status,
+            .title     = title,
+            .body_text = body_text,
+            .html      = html,
+            .allocator = gpa,
         };
     }
 
-    /// Walk the DOM subtree and eval every <script> element whose src is
-    /// absent (inline scripts only). Remote scripts are skipped in Phase 2.
-    fn executeScripts(
-        js: *engine_mod.JsEngine,
-        root: *dom_mod.Element,
-    ) anyerror!void {
-        for (root.children.items) |child| {
-            switch (child) {
-                .element => |elem| {
-                    // Can't mutate via const — get a mutable pointer via index
-                    _ = elem; // suppress unused warning; we use child_ptr below
-                },
-                else => {},
-            }
-        }
-        // Use index-based walk so we can pass mutable pointers
-        var i: usize = 0;
-        while (i < root.children.items.len) : (i += 1) {
-            const child = &root.children.items[i];
-            if (child.* != .element) continue;
-            const elem = &child.element;
-            if (std.ascii.eqlIgnoreCase(elem.tag, "script")) {
-                if (elem.getAttribute("src") == null) {
-                    const src = elem.textContent(js.allocator) catch continue;
-                    defer js.allocator.free(src);
-                    if (src.len > 0) {
-                        js.eval(src, "inline") catch |err| {
-                            std.log.warn("page: inline script error: {}", .{err});
-                        };
-                    }
+    // ── Script execution ─────────────────────────────────────────────────
+
+    /// Walk the DOM subtree depth-first and eval each inline <script> in
+    /// document order.  External scripts (src=) are skipped — Phase 3.
+    fn executeScriptsInElement(self: *Page, elem: *const dom.Element) void {
+        if (std.ascii.eqlIgnoreCase(elem.tag, "script")) {
+            if (elem.getAttribute("src") == null) {
+                const src = elem.textContent(self.allocator) catch return;
+                defer self.allocator.free(src);
+                const trimmed = std.mem.trim(u8, src, " \t\r\n");
+                if (trimmed.len > 0) {
+                    // Silently ignore JS exceptions — consistent with browser
+                    // error semantics (script errors don't halt page loading).
+                    self.js.eval(trimmed, "<inline-script>") catch {};
                 }
             }
-            // Recurse
-            try executeScripts(js, elem);
+            return; // never recurse into <script> contents
+        }
+        for (elem.children.items) |child| {
+            if (child == .element) self.executeScriptsInElement(child.element);
         }
     }
 };
@@ -178,42 +176,112 @@ test "Page.init and deinit" {
     defer page.deinit();
 }
 
-test "PageResult.deinit frees all fields" {
-    // Build a PageResult manually and deinit it — checks no leaks
-    const gpa = std.testing.allocator;
-    const result = PageResult{
-        .url       = try gpa.dupe(u8, "http://example.com/"),
-        .status    = 200,
-        .title     = try gpa.dupe(u8, "Test"),
-        .body_text = try gpa.dupe(u8, "Hello world"),
-        .html      = try gpa.dupe(u8, "<html></html>"),
-        .allocator = gpa,
-    };
-    var r = result;
-    r.deinit();
+test "Page.processHtml — preserves status code" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("http://example.com/", 200,
+        "<html><body></body></html>");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u16, 200), result.status);
 }
 
-test "PageResult with null title" {
-    const gpa = std.testing.allocator;
-    const result = PageResult{
-        .url       = try gpa.dupe(u8, "http://example.com/"),
-        .status    = 404,
-        .title     = null,
-        .body_text = try gpa.dupe(u8, ""),
-        .html      = try gpa.dupe(u8, ""),
-        .allocator = gpa,
-    };
-    var r = result;
-    r.deinit();
-    try std.testing.expect(true); // deinit with null title must not crash
+test "Page.processHtml — preserves URL" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("http://example.com/page", 200,
+        "<html><body></body></html>");
+    defer result.deinit();
+    try std.testing.expectEqualStrings("http://example.com/page", result.url);
 }
 
-// Integration test — requires network; run with: zig build test-page
-// test "integration: navigate http://example.com/" {
-//     var page = try Page.init(std.testing.allocator);
-//     defer page.deinit();
-//     var result = try page.navigate("http://example.com/");
-//     defer result.deinit();
-//     try std.testing.expectEqual(@as(u16, 200), result.status);
-//     try std.testing.expect(result.body_text.len > 0);
-// }
+test "Page.processHtml — extracts title" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("http://example.com/", 200,
+        "<html><head><title>Hello AWR</title></head><body></body></html>");
+    defer result.deinit();
+    try std.testing.expect(result.title != null);
+    try std.testing.expectEqualStrings("Hello AWR", result.title.?);
+}
+
+test "Page.processHtml — null title when <title> absent" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("http://example.com/", 200,
+        "<html><body><p>no title here</p></body></html>");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?[]const u8, null), result.title);
+}
+
+test "Page.processHtml — extracts body text" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("http://example.com/", 200,
+        "<html><body><p>Hello World</p></body></html>");
+    defer result.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.body_text, "Hello World") != null);
+}
+
+test "Page.processHtml — html field is raw source" {
+    const src = "<html><head><title>T</title></head><body></body></html>";
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("http://example.com/", 200, src);
+    defer result.deinit();
+    try std.testing.expectEqualStrings(src, result.html);
+}
+
+test "Page.processHtml — executes inline script, JS state persists" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("http://example.com/", 200,
+        "<html><body><script>var __awr_x__ = 42;</script></body></html>");
+    defer result.deinit();
+    // JS engine persists after processHtml — variable should be visible.
+    const ok = try page.js.evalBool("__awr_x__ === 42");
+    try std.testing.expect(ok);
+}
+
+test "Page.processHtml — document.title accessible inside script" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("http://example.com/", 200,
+        "<html><head><title>My Page</title></head><body>" ++
+        "<script>var __awr_title__ = document.title;</script>" ++
+        "</body></html>");
+    defer result.deinit();
+    const ok = try page.js.evalBool("__awr_title__ === 'My Page'");
+    try std.testing.expect(ok);
+}
+
+test "Page.processHtml — empty body gives empty body_text" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("http://example.com/", 200,
+        "<html><body></body></html>");
+    defer result.deinit();
+    const trimmed = std.mem.trim(u8, result.body_text, " \t\r\n");
+    try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+}
+
+test "Page.processHtml — external script (src=) is skipped without crash" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("http://example.com/", 200,
+        "<html><body><script src=\"/app.js\">fallback</script></body></html>");
+    defer result.deinit();
+    // Should complete without error even though src= script cannot be loaded.
+    try std.testing.expectEqual(@as(u16, 200), result.status);
+}
+
+// ── Integration test (requires network) ───────────────────────────────────
+
+test "Page.navigate — fetches http://example.com" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.navigate("http://example.com/");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u16, 200), result.status);
+    try std.testing.expect(result.title != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.body_text, "Example Domain") != null);
+}

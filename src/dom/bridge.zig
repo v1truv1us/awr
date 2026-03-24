@@ -103,6 +103,32 @@ fn installNativeCallbacks(eng: *engine.JsEngine) !void {
     }
 }
 
+/// Write `str` as a JSON string literal (with surrounding quotes and escaping)
+/// into any writer that exposes `writeByte` and `writeAll`.  Using `anytype`
+/// here avoids depending on the std.json serialization API which changed in
+/// Zig 0.15 (encodeJsonString / stringify moved into std.json.Stringify and
+/// require the new *std.io.Writer type rather than the old GenericWriter).
+fn writeJsonStr(w: anytype, str: []const u8) !void {
+    try w.writeByte('"');
+    for (str) |c| {
+        switch (c) {
+            '"'         => try w.writeAll("\\\""),
+            '\\'        => try w.writeAll("\\\\"),
+            '\n'        => try w.writeAll("\\n"),    // 0x0a
+            '\r'        => try w.writeAll("\\r"),    // 0x0d
+            '\t'        => try w.writeAll("\\t"),    // 0x09
+            // remaining control chars not already handled above
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => {
+                var esc: [6]u8 = undefined;
+                const s = std.fmt.bufPrint(&esc, "\\u{x:0>4}", .{c}) catch continue;
+                try w.writeAll(s);
+            },
+            else        => try w.writeByte(c),
+        }
+    }
+    try w.writeByte('"');
+}
+
 /// Serialize an Element to a compact JSON object string.
 /// Writes into `buf`; returns the written slice or null on overflow.
 fn elementToJson(elem: *const dom.Element, buf: []u8) ?[]const u8 {
@@ -110,21 +136,21 @@ fn elementToJson(elem: *const dom.Element, buf: []u8) ?[]const u8 {
     const w = fbs.writer();
 
     w.writeAll("{\"tag\":") catch return null;
-    std.json.encodeJsonString(elem.tag, .{}, w) catch return null;
+    writeJsonStr(w, elem.tag) catch return null;
     w.writeAll(",\"attrs\":[") catch return null;
     for (elem.attributes, 0..) |attr, i| {
         if (i > 0) w.writeByte(',') catch return null;
         w.writeAll("{\"name\":") catch return null;
-        std.json.encodeJsonString(attr.name, .{}, w) catch return null;
+        writeJsonStr(w, attr.name) catch return null;
         w.writeAll(",\"value\":") catch return null;
-        std.json.encodeJsonString(attr.value, .{}, w) catch return null;
+        writeJsonStr(w, attr.value) catch return null;
         w.writeByte('}') catch return null;
     }
     w.writeAll("],\"text\":") catch return null;
-    // Use a temp buffer for text content
     var tbuf: [2048]u8 = undefined;
-    const text = elem.textContent(std.heap.FixedBufferAllocator.init(&tbuf).allocator()) catch "";
-    std.json.encodeJsonString(text, .{}, w) catch return null;
+    var fba = std.heap.FixedBufferAllocator.init(&tbuf);
+    const text = elem.textContent(fba.allocator()) catch "";
+    writeJsonStr(w, text) catch return null;
     w.writeByte('}') catch return null;
 
     return fbs.getWritten();

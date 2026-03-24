@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) void {
     // "zig build test-dom"    → DOM layer only
     // "zig build test-client" → client layer only
     // "zig build test-h2"     → h2session + h2 frame tests
+    // "zig build test-page"   → Page type (unit + integration, requires network)
     // "zig build test-e2e"    → end-to-end integration tests (requires network)
     //
     // Production Phase 1 verification (requires curl-impersonate installed):
@@ -54,7 +55,7 @@ pub fn build(b: *std.Build) void {
     const test_dom_step    = b.step("test-dom",    "Run src/dom unit tests");
     const test_client_step = b.step("test-client", "Run src/client unit tests");
     const test_h2_step     = b.step("test-h2",     "Run h2session and HTTP/2 frame tests");
-    const test_page_step   = b.step("test-page",   "Run src/page unit tests");
+    const test_page_step   = b.step("test-page",   "Run src/page tests (unit + integration, requires network)");
     const test_e2e_step    = b.step("test-e2e",    "Run end-to-end integration tests (requires network)");
 
     // ── Net layer modules (pure-Zig, no C deps) ───────────────────────────
