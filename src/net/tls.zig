@@ -1,10 +1,21 @@
-/// tls.zig — TLS connection abstraction.
+/// tls.zig — TLS connection abstraction (Phase 3 / opt-in backend).
 ///
-/// Supports two build backends selected via -Dtls-backend:
-///   - stub: no native deps, all operations return CurlImpersonateNotAvailable.
-///     Tests compile and pass without curl-impersonate installed.
-///   - curl_impersonate: real TLS via the curl-impersonate C shim.
-///     Requires libcurl-impersonate-chrome at the configured prefix.
+/// PHASE 1 HTTPS: HTTPS fetches are handled by client.zig's fetchHttpsViaStd(),
+/// which delegates to std.http.Client (backed by std.crypto.tls). TlsConn is
+/// NOT used in the default Phase 1 build.
+///
+/// This file provides the Phase 3 TlsConn API for JA4+ fingerprint-matching TLS.
+/// Two backends are selectable via -Dtls-backend at build time:
+///
+///   - stub (default): no native deps; all ops return CurlImpersonateNotAvailable.
+///     Used in Phase 1. Tests compile and pass without any TLS library.
+///   - curl_impersonate: real Chrome-impersonating TLS via the C shim.
+///     Requires libcurl-impersonate-chrome. Temporary scaffold until Phase 3.
+///
+/// TODO(Phase 3): Replace curl_impersonate backend with owned BoringSSL stack.
+///   AWR is a first-party browser — it will have its own TLS fingerprint,
+///   not impersonate Chrome. curl-impersonate is only a validation scaffold.
+///   See awr-spec/Phase1-Networking-TLS.md for the full decision record.
 ///
 /// The Zig API surface is identical regardless of backend. Backend selection
 /// is purely a build-time concern.
