@@ -2,22 +2,15 @@
 ///
 /// These tests exercise the full pipeline:
 ///   URL parser → TcpConn (libxev) → HTTP/1.1 request → Response
-///
-/// HTTPS behavior depends on -Dtls-backend:
-///   - curl_impersonate: HTTPS goes through TlsConn (Chrome 132 TLS fingerprint)
-///   - stub / std:       HTTPS falls back to std.http.Client
+///   HTTPS: std.http.Client (std.crypto.tls) — no curl-impersonate dependency.
 ///
 /// They require real network access and are intentionally separated from
 /// the unit test suite so CI can gate on them independently:
 ///
 ///   zig build test-e2e     # run only integration tests
 ///   zig build test         # unit tests only (no network)
-const std        = @import("std");
-const build_opts = @import("build_opts");
-const client     = @import("client.zig");
-const tls_mod    = @import("net/tls.zig");
-
-const use_curl_tls = build_opts.tls_backend == .curl_impersonate;
+const std    = @import("std");
+const client = @import("client.zig");
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -95,10 +88,9 @@ test "e2e: invalid host returns DnsResolutionFailed" {
     try std.testing.expectError(client.FetchError.DnsResolutionFailed, result);
 }
 
-// ── HTTPS tests (backend-dependent) ───────────────────────────────────────
+// ── HTTPS tests ────────────────────────────────────────────────────────────
 
-test "e2e: HTTPS fetch succeeds (backend: std fallback)" {
-    if (use_curl_tls) return error.SkipZigTest; // skip — curl_tls path tested separately
+test "e2e: HTTPS fetch succeeds via std.crypto.tls" {
     const allocator = std.testing.allocator;
     var c = client.Client.init(allocator, .{});
     defer c.deinit();
@@ -106,23 +98,4 @@ test "e2e: HTTPS fetch succeeds (backend: std fallback)" {
     defer resp.deinit();
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "Example Domain") != null);
-}
-
-test "e2e: HTTPS fetch succeeds via TlsConn (curl_impersonate)" {
-    if (!use_curl_tls) return error.SkipZigTest; // skip — no curl_impersonate backend
-    const allocator = std.testing.allocator;
-    var c = client.Client.init(allocator, .{});
-    defer c.deinit();
-    var resp = try c.fetch("https://example.com/");
-    defer resp.deinit();
-    try std.testing.expectEqual(@as(u16, 200), resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "Example Domain") != null);
-}
-
-test "e2e: TlsConn handshake succeeds to example.com (curl_impersonate)" {
-    if (!use_curl_tls) return error.SkipZigTest;
-    var conn = try tls_mod.TlsConn.init(std.testing.allocator, "example.com", 443, .chrome_132);
-    defer conn.deinit();
-    try conn.handshake();
-    try std.testing.expectEqual(tls_mod.TlsState.established, conn.tls_state);
 }
