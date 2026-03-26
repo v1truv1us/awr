@@ -14,6 +14,11 @@ pub fn build(b: *std.Build) void {
     const build_opts = b.addOptions();
     build_opts.addOption(TlsBackend, "tls_backend", tls_backend);
 
+    // Embed git short hash for `./awr --version` → "0.0.<hash>"
+    const git_hash_raw = b.run(&.{ "git", "rev-parse", "--short", "HEAD" });
+    const git_hash = std.mem.trimRight(u8, git_hash_raw, &[_]u8{ 0x20, 0x0a, 0x0d });
+    build_opts.addOption([]const u8, "git_hash", git_hash);
+
     // ── libxev dependency ─────────────────────────────────────────────────
     const xev_dep = b.dependency("libxev", .{ .target = target, .optimize = optimize });
     const xev_mod = xev_dep.module("xev");
@@ -282,6 +287,41 @@ pub fn build(b: *std.Build) void {
     const run_client = b.addRunArtifact(client_test);
     test_step.dependOn(&run_client.step);
     test_client_step.dependOn(&run_client.step);
+
+    // ── AWR executable ───────────────────────────────────────────────────────
+    {
+        // Share one options module instance to avoid "file exists in two modules" error
+        const opts_mod = build_opts.createModule();
+
+        const exe_page_mod = b.createModule(.{
+            .root_source_file = b.path("src/page.zig"),
+            .target   = target,
+            .optimize = optimize,
+        });
+        exe_page_mod.addImport("xev", xev_mod);
+        exe_page_mod.addImport("build_opts", opts_mod);
+        exe_page_mod.addImport("quickjs", qjs_mod);
+
+        const exe_mod = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target   = target,
+            .optimize = optimize,
+        });
+        exe_mod.addImport("page", exe_page_mod);
+        exe_mod.addImport("build_opts", opts_mod);
+
+        const exe = b.addExecutable(.{
+            .name        = "awr",
+            .root_module = exe_mod,
+            .use_llvm    = true,
+        });
+        exe.linkLibrary(qjs_dep.artifact("quickjs-ng"));
+        exe.linkLibC();
+        exe.addIncludePath(lexbor_include);
+        exe.addLibraryPath(lexbor_lib);
+        exe.linkSystemLibrary("lexbor");
+        b.installArtifact(exe);
+    }
 
     // ── End-to-end integration tests (network required) ───────────────────
     const e2e_mod = b.createModule(.{
