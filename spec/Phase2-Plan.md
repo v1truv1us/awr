@@ -1,7 +1,7 @@
 # AWR Phase 2 Plan — Programmable Headless Page
 
 > **Last updated:** 2026-03-23
-> **Status:** Core pipeline committed; 3 atomic steps remain to call Phase 2 complete.
+> **Status:** ✅ COMPLETE — all 5 steps shipped, 419/419 tests passing as of 2026-03-26.
 
 ---
 
@@ -19,7 +19,7 @@ programmable headless page:
 | 4 | Expose `window`, `document`, `console` globals to JS | ✅ done — `dom/bridge.zig` polyfill |
 | 5 | `document.querySelector` / `document.getElementById` from JS | ✅ done — native callbacks + polyfill |
 | 6 | `setTimeout` / `Promise` execution (basic) | ✅ done — stubs + `drainMicrotasks` |
-| 7 | Return page title, body text, data scripts set on `window` | ⚠️ partial — title + body_text returned; `window.*` data not yet surfaced in `PageResult` |
+| 7 | Return page title, body text, data scripts set on `window` | ✅ done — `PageResult.window_data` surfaces `window.__awrData__` JSON |
 | 8 | Integration test against a real page with inline JS | ✅ done — `Page.navigate` hits example.com; processHtml tests cover inline JS DOM reads |
 
 ### Current gap (the only thing keeping Phase 2 from "done")
