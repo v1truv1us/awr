@@ -548,6 +548,13 @@ pub fn readResponse(reader: anytype, allocator: std.mem.Allocator) !HttpResponse
 
 ## nghttp2 Integration
 
+> **Phase 2 status note**: `src/net/h2session.zig` (AWR's own H2 session) is only
+> reachable via `fetchHttpsViaTls`, which requires the curl_impersonate TLS backend
+> (`-Dtls-backend=curl_impersonate`).  In the **default Phase 1/2 build**, HTTPS
+> fetches go through `fetchHttpsViaStd` (`std.http.Client`), which handles HTTP/2
+> via OS/stdlib ALPN — AWR's own H2 implementation is **not active**.
+> Phase 3 goal: wire `h2session.zig` into AWR's own BoringSSL TLS stack.
+
 nghttp2 provides the H2 framing layer. AWR calls nghttp2's C callbacks to inject custom SETTINGS values and control frame ordering.
 
 ```zig
