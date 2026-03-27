@@ -1,12 +1,10 @@
 /// h2session.zig — HTTP/2 session layer for AWR.
 ///
-/// STATUS (Phase 2): This module is wired into client.zig's `fetchHttpsViaTls`
-/// path, which requires the curl_impersonate TLS backend (-Dtls-backend=curl_impersonate).
-/// In the DEFAULT Phase 1/2 build, HTTPS fetches go through `fetchHttpsViaStd`
-/// (std.http.Client), which handles HTTP/2 via OS/stdlib ALPN — AWR's own H2
-/// implementation is NOT used.
+/// STATUS: NOT YET WIRED into the active fetch path.
+/// HTTPS fetches currently go through client.zig's `fetchHttpsViaStd`
+/// (std.http.Client / std.crypto.tls), which handles HTTP/2 via OS/stdlib ALPN.
 ///
-/// Phase 3 goal: wire h2session.zig into AWR's own BoringSSL TLS stack so that
+/// TODO(Phase 3): Wire h2session.zig into AWR's own BoringSSL TLS stack so that
 /// AWR fully owns the HTTP/2 connection including ALPN negotiation, stream
 /// multiplexing, and header compression.
 ///

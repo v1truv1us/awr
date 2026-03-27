@@ -1,24 +1,19 @@
 /// client.zig — AWR HTTP client.
 ///
 /// Wires together all Phase 1 net modules into a single fetch() call:
-///   URL parser → TcpConn → (TlsConn if HTTPS) → ALPN → H2Session / HTTP/1.1 → CookieJar → Response
+///   URL parser → TcpConn → HTTP/1.1 request → Response
+///   URL parser → std.http.Client (HTTPS) → Response
 ///
-/// HTTPS routing depends on -Dtls-backend build option:
-///   - curl_impersonate: HTTPS goes through TlsConn with ALPN-aware protocol selection
-///   - stub / std:       HTTPS falls back to std.http.Client
+/// HTTPS uses std.http.Client (backed by std.crypto.tls).
+/// TODO(Phase 3): Replace with AWR's owned BoringSSL stack + JA4+ Chrome 132 fingerprint.
 ///
 /// TCP is synchronous via libxev (Phase 2 will bring full async).
-/// H2 path uses nghttp2 via src/net/h2session.zig when ALPN negotiates HTTP/2.
 const std = @import("std");
-const build_opts = @import("build_opts");
-const use_curl_tls = build_opts.tls_backend == .curl_impersonate;
 
-const http1  = @import("net/http1.zig");
-const h2     = @import("net/h2session.zig");
-const cookie = @import("net/cookie.zig");
-const pool   = @import("net/pool.zig");
-const tcp    = @import("net/tcp.zig");
-const tls    = @import("net/tls.zig");
+const http1   = @import("net/http1.zig");
+const cookie  = @import("net/cookie.zig");
+const pool    = @import("net/pool.zig");
+const tcp     = @import("net/tcp.zig");
 const url_mod = @import("net/url.zig");
 
 pub const Url = url_mod.Url;
@@ -101,13 +96,9 @@ pub const Client = struct {
     fn fetchUrl(self: *Client, parsed: Url, redirect_count: u8) anyerror!Response {
         if (redirect_count > self.options.max_redirects) return FetchError.TooManyRedirects;
 
-        // HTTPS: route through TlsConn when curl_impersonate backend is selected.
-        // Fall back to std.http.Client for stub/std backends.
+        // HTTPS: delegate to std.http.Client (std.crypto.tls under the hood).
+        // TODO(Phase 3): Replace with AWR's owned BoringSSL stack.
         if (parsed.is_https) {
-            if (use_curl_tls) {
-                return self.fetchHttpsViaTls(parsed, redirect_count);
-            }
-            // Fallback: delegate to std.http.Client
             var path_buf: [2048]u8 = undefined;
             const path = parsed.pathWithQuery(&path_buf);
             var url_buf: [4096]u8 = undefined;
@@ -260,257 +251,6 @@ pub const Client = struct {
             .status    = @as(u16, @intFromEnum(result.status)),
             .headers   = http1.HeaderList{},
             .body      = body,
-            .allocator = self.allocator,
-        };
-    }
-
-    /// HTTPS fetch via AWR's TlsConn (Chrome 132 TLS fingerprint).
-    /// TlsConn wraps curl-impersonate which handles DNS, TCP connect, and TLS.
-    fn fetchHttpsViaTls(self: *Client, parsed: Url, redirect_count: u8) anyerror!Response {
-        // Build origin key for connection pool
-        var origin_buf: [512]u8 = undefined;
-        const origin = std.fmt.bufPrint(&origin_buf, "https://{s}:{d}", .{
-            parsed.host, parsed.port,
-        }) catch return FetchError.ConnectionFailed;
-
-        // Enforce per-origin connection limit
-        if (self.conns.countForOrigin(origin) >= pool.MAX_PER_ORIGIN)
-            return FetchError.ConnectionFailed;
-
-        var path_buf: [2048]u8 = undefined;
-        const path = parsed.pathWithQuery(&path_buf);
-
-        // Create TLS connection — curl handles DNS + TCP + TLS handshake internally
-        var conn = tls.TlsConn.init(
-            self.allocator,
-            parsed.host,
-            parsed.port,
-            .chrome_132,
-        ) catch return FetchError.ConnectionFailed;
-        defer conn.deinit();
-
-        conn.handshake() catch |err| switch (err) {
-            tls.TlsError.CurlImpersonateNotAvailable => return FetchError.TlsNotAvailable,
-            tls.TlsError.HandshakeFailed => return FetchError.ConnectionFailed,
-            else => return FetchError.ConnectionFailed,
-        };
-
-        // ALPN-aware protocol selection
-        return switch (conn.negotiatedProtocol()) {
-            .http2   => self.fetchHttpsH2(parsed, path, redirect_count, &conn),
-            .http1_1 => self.fetchHttpsH1(parsed, path, redirect_count, &conn),
-        };
-    }
-
-    /// H2 callback context: holds the TLS connection for C callbacks.
-    const H2TlsCtx = struct {
-        conn: *tls.TlsConn,
-    };
-
-    /// H2 send callback — bridge from h2session C API to TlsConn.
-    fn h2TlsSend(data: [*c]const u8, len: usize, user_data: ?*anyopaque) callconv(.c) c_int {
-        const ctx: *H2TlsCtx = @ptrCast(@alignCast(user_data));
-        const slice = data[0..len];
-        const n = ctx.conn.send(slice) catch return -1;
-        return @intCast(n);
-    }
-
-    /// H2 recv callback — bridge from h2session C API to TlsConn.
-    fn h2TlsRecv(buf: [*c]u8, len: usize, user_data: ?*anyopaque) callconv(.c) c_int {
-        const ctx: *H2TlsCtx = @ptrCast(@alignCast(user_data));
-        const slice = buf[0..len];
-        const n = ctx.conn.recv(slice) catch return -1;
-        if (n == 0) return 0; // EAGAIN/WOULDBLOCK
-        return @intCast(n);
-    }
-
-    /// HTTPS fetch via HTTP/2 using h2session over TlsConn.
-    fn fetchHttpsH2(
-        self: *Client,
-        parsed: Url,
-        path: []const u8,
-        redirect_count: u8,
-        conn: *tls.TlsConn,
-    ) anyerror!Response {
-        var h2_ctx = H2TlsCtx{ .conn = conn };
-
-        var session = h2.H2Session.init(h2TlsSend, h2TlsRecv, &h2_ctx) catch
-            return FetchError.ConnectionFailed;
-        defer session.deinit();
-
-        // Build null-terminated strings for h2session API
-        const method_z = "GET";
-        const scheme_z = "https";
-
-        var authority_buf: [256]u8 = undefined;
-        const authority_z = std.fmt.bufPrintZ(&authority_buf, "{s}", .{parsed.host}) catch
-            return FetchError.SendFailed;
-
-        var path_buf2: [2048]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf2, "{s}", .{path}) catch
-            return FetchError.SendFailed;
-
-        const stream_id = session.submitGet(method_z, scheme_z, authority_z.ptr, path_z.ptr) catch
-            return FetchError.SendFailed;
-
-        // Run the session to completion
-        var h2_resp = session.runUntilComplete(stream_id, 1024) catch |err| switch (err) {
-            h2.H2Error.StreamNotComplete => return FetchError.RecvFailed,
-            h2.H2Error.IoError => return FetchError.RecvFailed,
-            h2.H2Error.ResponseError => return FetchError.RecvFailed,
-            else => return FetchError.RecvFailed,
-        };
-
-        // Capture everything we need from h2_resp BEFORE freeing it
-        const h2_status = h2_resp.status;
-        const owned_body = self.allocator.dupe(u8, h2_resp.body) catch return FetchError.OutOfMemory;
-        errdefer self.allocator.free(owned_body);
-
-        var redirect_loc: ?[]const u8 = null;
-        var redirect_loc_buf: [2048]u8 = undefined;
-
-        // Parse h2 response headers for cookies and redirect location
-        var header_iter = h2_resp.headerIterator();
-        while (header_iter.next()) |hp| {
-            if (std.ascii.eqlIgnoreCase(hp.name, "set-cookie")) {
-                self.cookies.parseSetCookie(hp.value, parsed.host) catch {};
-            }
-            if (std.ascii.eqlIgnoreCase(hp.name, "location")) {
-                // Build a stable copy from the header buffer before freeing
-                if (h2_status >= 300 and h2_status < 400 and self.options.follow_redirects) {
-                    if (std.mem.startsWith(u8, hp.value, "http")) {
-                        redirect_loc = hp.value;
-                    } else {
-                        redirect_loc = std.fmt.bufPrint(&redirect_loc_buf, "{s}://{s}:{d}{s}", .{
-                            "https", parsed.host, parsed.port, hp.value,
-                        }) catch null;
-                    }
-                }
-            }
-        }
-
-        // Now free h2 response memory
-        h2_resp.deinit();
-
-        // Follow redirects
-        if (redirect_loc) |loc| {
-            if (redirect_count >= self.options.max_redirects) {
-                self.allocator.free(owned_body);
-                return FetchError.TooManyRedirects;
-            }
-            const next_url = url_mod.Url.parse(loc) catch {
-                // Can't parse — return current response
-                return Response{
-                    .status    = h2_status,
-                    .headers   = http1.HeaderList{},
-                    .body      = owned_body,
-                    .allocator = self.allocator,
-                };
-            };
-            self.allocator.free(owned_body);
-            return self.fetchUrl(next_url, redirect_count + 1);
-        }
-
-        return Response{
-            .status    = h2_status,
-            .headers   = http1.HeaderList{},
-            .body      = owned_body,
-            .allocator = self.allocator,
-        };
-    }
-
-    /// HTTPS fetch via HTTP/1.1 over TlsConn (text request/response).
-    fn fetchHttpsH1(
-        self: *Client,
-        parsed: Url,
-        path: []const u8,
-        redirect_count: u8,
-        conn: *tls.TlsConn,
-    ) anyerror!Response {
-        // Build HTTP/1.1 request
-        var req = http1.Request{
-            .method = .GET,
-            .path   = path,
-            .host   = parsed.host,
-        };
-        defer req.headers.deinit(self.allocator);
-
-        if (self.options.use_chrome_headers) {
-            req.setChrome132Defaults(self.allocator) catch return FetchError.OutOfMemory;
-        } else {
-            req.headers.append(self.allocator, "Host", parsed.host) catch return FetchError.OutOfMemory;
-            req.headers.append(self.allocator, "User-Agent", self.options.user_agent) catch return FetchError.OutOfMemory;
-            req.headers.append(self.allocator, "Connection", "keep-alive") catch return FetchError.OutOfMemory;
-        }
-
-        // Set cookies for this origin
-        const cookie_header_opt = self.cookies.getCookieHeader(
-            parsed.host,
-            path,
-            parsed.is_https,
-        ) catch null;
-        defer if (cookie_header_opt) |ch| self.allocator.free(ch);
-        if (cookie_header_opt) |ch| {
-            if (ch.len > 0) {
-                req.headers.append(self.allocator, "Cookie", ch) catch return FetchError.OutOfMemory;
-            }
-        }
-
-        // Serialize request and send via TLS
-        var req_buf: [16 * 1024]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&req_buf);
-        req.write(fbs.writer()) catch return FetchError.SendFailed;
-        const req_bytes = fbs.getWritten();
-
-        var written: usize = 0;
-        while (written < req_bytes.len) {
-            const n = conn.send(req_bytes[written..]) catch return FetchError.SendFailed;
-            written += n;
-        }
-
-        // Read response via TlsConn reader adapter
-        const TlsReader = std.io.GenericReader(*tls.TlsConn, tls.TlsError, tls.TlsConn.readFn);
-        const tls_reader = TlsReader{ .context = conn };
-        var resp = try http1.readResponse(tls_reader, self.allocator);
-        errdefer resp.deinit();
-
-        // Store Set-Cookie headers
-        for (resp.headers.items.items) |h| {
-            if (std.ascii.eqlIgnoreCase(h.name, "set-cookie")) {
-                self.cookies.parseSetCookie(h.value, parsed.host) catch {};
-            }
-        }
-
-        // Follow redirects
-        if (resp.isRedirect() and self.options.follow_redirects) {
-            if (resp.location()) |loc| {
-                if (redirect_count >= self.options.max_redirects) {
-                    resp.deinit();
-                    return FetchError.TooManyRedirects;
-                }
-                var next_url_buf: [2048]u8 = undefined;
-                const next_url_str = if (std.mem.startsWith(u8, loc, "http"))
-                    loc
-                else blk: {
-                    break :blk std.fmt.bufPrint(&next_url_buf, "{s}://{s}:{d}{s}", .{
-                        "https", parsed.host, parsed.port, loc,
-                    }) catch loc;
-                };
-                const next_url = url_mod.Url.parse(next_url_str) catch return Response{
-                    .status    = resp.status,
-                    .headers   = resp.headers,
-                    .body      = resp.body,
-                    .allocator = self.allocator,
-                };
-                resp.deinit();
-                return self.fetchUrl(next_url, redirect_count + 1);
-            }
-        }
-
-        return Response{
-            .status    = resp.status,
-            .headers   = resp.headers,
-            .body      = resp.body,
             .allocator = self.allocator,
         };
     }

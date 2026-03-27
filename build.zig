@@ -1,20 +1,12 @@
 const std = @import("std");
 
-const TlsBackend = enum { stub, std, curl_impersonate };
-
 pub fn build(b: *std.Build) void {
     const target   = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // ── TLS backend option ──────────────────────────────────────────────────
-    const tls_backend = b.option(TlsBackend, "tls-backend", "TLS implementation backend (default: stub)") orelse .stub;
-    const curl_impersonate_prefix = b.option([]const u8, "curl-impersonate-prefix", "Install prefix for curl-impersonate");
-
     // ── Build options shared with Zig modules ──────────────────────────────
-    const build_opts = b.addOptions();
-    build_opts.addOption(TlsBackend, "tls_backend", tls_backend);
-
     // Embed git short hash for `./awr --version` → "0.0.<hash>"
+    const build_opts = b.addOptions();
     const git_hash_raw = b.run(&.{ "git", "rev-parse", "--short", "HEAD" });
     const git_hash = std.mem.trimRight(u8, git_hash_raw, &[_]u8{ 0x20, 0x0a, 0x0d });
     build_opts.addOption([]const u8, "git_hash", git_hash);
@@ -48,10 +40,6 @@ pub fn build(b: *std.Build) void {
     // "zig build test-h2"     → h2session + h2 frame tests
     // "zig build test-page"   → Page type (unit + integration, requires network)
     // "zig build test-e2e"    → end-to-end integration tests (requires network)
-    //
-    // Production Phase 1 verification (requires curl-impersonate installed):
-    //   zig build test -Dtls-backend=curl_impersonate
-    //   zig build test-e2e -Dtls-backend=curl_impersonate
 
     const test_step        = b.step("test",        "Run all unit tests");
     const test_net_step    = b.step("test-net",    "Run src/net unit tests");
@@ -87,56 +75,6 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_t.step);
         test_net_step.dependOn(&run_t.step);
         if (std.mem.eql(u8, m.name, "http2")) test_h2_step.dependOn(&run_t.step);
-    }
-
-    // ── TLS module (depends on TLS backend) ────────────────────────────────
-    {
-        const tls_mod = b.createModule(.{
-            .root_source_file = b.path("src/net/tls.zig"),
-            .target   = target,
-            .optimize = optimize,
-        });
-        tls_mod.addOptions("build_opts", build_opts);
-
-        if (tls_backend == .curl_impersonate) {
-            const ci_prefix: []const u8 = curl_impersonate_prefix orelse "/usr/local";
-            const ci_include = std.Build.LazyPath{
-                .cwd_relative = b.fmt("{s}/include", .{ci_prefix}),
-            };
-            const ci_lib = std.Build.LazyPath{
-                .cwd_relative = b.fmt("{s}/lib", .{ci_prefix}),
-            };
-
-            tls_mod.addIncludePath(ci_include);
-            tls_mod.addLibraryPath(ci_lib);
-        }
-
-        const tls_test = b.addTest(.{
-            .name        = "tls",
-            .root_module = tls_mod,
-        });
-        if (tls_backend == .curl_impersonate) {
-            const ci_prefix: []const u8 = curl_impersonate_prefix orelse "/usr/local";
-            const ci_include = std.Build.LazyPath{
-                .cwd_relative = b.fmt("{s}/include", .{ci_prefix}),
-            };
-            const ci_lib = std.Build.LazyPath{
-                .cwd_relative = b.fmt("{s}/lib", .{ci_prefix}),
-            };
-
-            tls_test.linkLibC();
-            tls_test.addCSourceFile(.{
-                .file  = b.path("src/net/tls_curl_shim.c"),
-                .flags = &.{ "-std=c11", "-Wall" },
-            });
-            tls_test.addIncludePath(b.path("src/net"));
-            tls_test.addIncludePath(ci_include);
-            tls_test.addLibraryPath(ci_lib);
-            tls_test.linkSystemLibrary("curl-impersonate-chrome");
-        }
-        const run_tls = b.addRunArtifact(tls_test);
-        test_step.dependOn(&run_tls.step);
-        test_net_step.dependOn(&run_tls.step);
     }
 
     // ── tcp module (depends on libxev) ────────────────────────────────────
@@ -253,7 +191,6 @@ pub fn build(b: *std.Build) void {
         });
         // client deps
         page_mod.addImport("xev", xev_mod);
-        page_mod.addOptions("build_opts", build_opts);
         // JS engine dep
         page_mod.addImport("quickjs", qjs_mod);
 
@@ -279,7 +216,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     client_mod.addImport("xev", xev_mod);
-    client_mod.addOptions("build_opts", build_opts);
     const client_test = b.addTest(.{
         .name        = "client",
         .root_module = client_mod,
@@ -330,7 +266,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     e2e_mod.addImport("xev", xev_mod);
-    e2e_mod.addOptions("build_opts", build_opts);
     const e2e_test = b.addTest(.{
         .name        = "e2e",
         .root_module = e2e_mod,
