@@ -1,7 +1,7 @@
 # AWR Phase 2 Plan — Programmable Headless Page
 
-> **Last updated:** 2026-03-23
-> **Status:** ✅ COMPLETE — all 5 steps shipped, 419/419 tests passing as of 2026-03-26.
+> **Last updated:** 2026-03-27
+> **Status:** ✅ COMPLETE — 410/410 tests passing (30/30 build steps), all 5 steps shipped.
 
 ---
 
@@ -21,14 +21,6 @@ programmable headless page:
 | 6 | `setTimeout` / `Promise` execution (basic) | ✅ done — stubs + `drainMicrotasks` |
 | 7 | Return page title, body text, data scripts set on `window` | ✅ done — `PageResult.window_data` surfaces `window.__awrData__` JSON |
 | 8 | Integration test against a real page with inline JS | ✅ done — `Page.navigate` hits example.com; processHtml tests cover inline JS DOM reads |
-
-### Current gap (the only thing keeping Phase 2 from "done")
-
-`PageResult` exposes `title` and `body_text` but not arbitrary data set by page
-scripts.  A script can do `window.__awrData__ = { count: 3 }` and nothing in the
-public API surfaces that value without the caller resorting to `page.js.evalBool(…)`.
-There is also no `JsEngine.evalString` method, so even callers who do reach into
-`page.js` cannot easily extract string-typed JS values.
 
 ---
 
@@ -60,13 +52,13 @@ Page
 
 ---
 
-## Atomic Steps to Complete Phase 2
-
-Each step is independently committable.  Steps are ordered by dependency.
+## Atomic Steps — All ✅ DONE
 
 ---
 
-### Step 1 — `JsEngine.evalString`: extract a string value from JS
+### Step 1 ✅ — `JsEngine.evalString`: extract a string value from JS
+
+**Shipped:** `evalString(source) ![]u8` added to `JsEngine`. Evaluates a JS expression, coerces result to string via QuickJS `toCString`, returns heap-allocated copy. Returns `JsError.EvalException` on exception.
 
 **Why first:** Steps 2 and 3 depend on it.
 
@@ -106,7 +98,9 @@ the module's public surface.
 
 ---
 
-### Step 2 — Set `window.location.href` from the actual URL
+### Step 2 ✅ — Set `window.location.href` from the actual URL
+
+**Shipped:** After `installDomBridge`, a short JS snippet overwrites the stub `location` with real URL values parsed from the request URL. `window.location.href`, `origin`, `pathname`, `search`, `hash`, `hostname`, `protocol` all reflect the actual fetch URL.
 
 **Why:** Scripts that guard behaviour on `location.href` (e.g. `if (location.hostname
 === 'example.com')`) currently see an empty string.  This is a 30-minute fix that
@@ -165,7 +159,9 @@ test "Page.processHtml — window.location.href matches url arg" {
 
 ---
 
-### Step 3 — Surface `window.__awrData__` in `PageResult`
+### Step 3 ✅ — Surface `window.__awrData__` in `PageResult`
+
+**Shipped:** `PageResult.window_data: ?[]const u8` added. After `drainMicrotasks`, `processHtml` extracts `JSON.stringify(window.__awrData__)` via `evalString`. Stored as heap-allocated JSON string or null if not set.
 
 **Why:** The primary use case for a headless page engine is "run the page's JS and
 get data back."  Without this, callers must reach into `page.js` directly, bypassing
@@ -258,7 +254,9 @@ allocator leaks.
 
 ---
 
-### Step 4 — Integration test: real inline-JS page with DOM mutation
+### Step 4 ✅ — Integration test: real inline-JS page with DOM mutation
+
+**Shipped:** "Phase 2 integration" test in `src/page.zig` — inline JS reads `document.querySelectorAll('.product')`, sets `window.__awrData__` with computed values, asserts all fields present in `PageResult.window_data`.
 
 **Why:** Item 8 in the Phase 2 goal — verify the full pipeline against a page where
 inline JS *mutates* the DOM, not just reads it, and that mutation is captured in the
@@ -329,8 +327,23 @@ zig build test-page --summary all
 ```
 The integration test passes.  All existing 147+ page tests still pass.
 
-**Definition of done:** Test passes; `zig build test --summary all` shows
-406+ tests, 0 skipped.
+**Definition of done:** Test passes; `zig build test --summary all` shows 410/410 tests, 0 skipped.
+
+---
+
+### Step 5 ✅ — CLI binary: `./zig-out/bin/awr <url>` outputs JSON
+
+**Shipped:** `src/main.zig` binary. Accepts a URL argument, calls `Page.navigate`, and prints a JSON object with `url`, `status`, `title`, `body_text`, and `window_data`. `--version` flag prints `0.0.<githash>`.
+
+---
+
+## Post-Completion Fixes
+
+These were merged after the initial Phase 2 ship:
+
+- **JS context reset between navigations** — `Page.navigate` now resets the QuickJS context between calls, preventing data from a previous page from bleeding into the next
+- **`console.log` object serialization** — objects passed to `console.log` now serialize as JSON instead of `[object Object]`
+- **curl_impersonate fully removed** — `tls.zig`, `tls_curl_shim.c/h`, and all `TlsBackend` enum code deleted; HTTPS is `std.http.Client` exclusively; no build conditionals remain
 
 ---
 
@@ -342,7 +355,7 @@ The integration test passes.  All existing 147+ page tests still pass.
 - Firing event listeners (`click`, `scroll`, `input`, etc.)
 - Full DOM spec compliance (`insertAdjacentHTML`, live `NodeList`, etc.)
 - TUI / visual output or screenshot rendering
-- Phase 3 TLS fingerprinting (`curl_impersonate` / BoringSSL)
+- Phase 3 TLS fingerprinting (BoringSSL)
 - `window.location` navigation (following redirects from JS)
 - Web Workers / Service Workers
 - WebAssembly
@@ -350,27 +363,12 @@ The integration test passes.  All existing 147+ page tests still pass.
 
 ---
 
-## Phase 2 Exit Criteria
+## Phase 2 Exit Criteria (ALL MET ✅)
 
-Phase 2 is **done** when ALL of the following are true:
-
-1. `zig build test --summary all` → **0 skipped, 0 failed** (currently: 406/406 ✅)
-2. `JsEngine.evalString` exists and is tested (Step 1)
-3. `window.location.href` reflects the URL passed to `processHtml` / `navigate` (Step 2)
-4. `PageResult.window_data` surfaces JSON set on `window.__awrData__` by page scripts (Step 3)
-5. The Phase 2 integration test passes end-to-end with a multi-element DOM query (Step 4)
-6. `Page.navigate("https://example.com/")` returns a non-null title and non-empty
-   body text (existing test ✅)
-
----
-
-## Commit Convention for Remaining Steps
-
-```
-feat(phase2): add JsEngine.evalString — extract string values from JS
-feat(phase2): set window.location.href from URL in processHtml
-feat(phase2): surface window.__awrData__ as PageResult.window_data
-test(phase2): integration test — JS reads DOM, sets window.__awrData__
-```
-
-After the last commit, tag: `git tag v0.2.0`.
+1. `zig build test --summary all` → **410/410 passed, 0 skipped, 0 failed** ✅
+2. `JsEngine.evalString` exists and is tested (Step 1) ✅
+3. `window.location.href` reflects the URL passed to `processHtml` / `navigate` (Step 2) ✅
+4. `PageResult.window_data` surfaces JSON set on `window.__awrData__` by page scripts (Step 3) ✅
+5. The Phase 2 integration test passes end-to-end with a multi-element DOM query (Step 4) ✅
+6. `Page.navigate("https://example.com/")` returns a non-null title and non-empty body text ✅
+7. `./zig-out/bin/awr <url>` prints JSON output (Step 5) ✅
