@@ -6,7 +6,7 @@
 ///   - max requests per connection: 100
 ///   - max total connections: 256 across all origins
 ///
-/// NOTE: TlsConn is not imported here to keep this module testable
+/// NOTE: pool.zig is generic over connection type — no TLS import needed.
 /// without curl-impersonate. The pool stores opaque PooledConn entries;
 /// the caller provides/receives connection handles as *anyopaque pointers
 /// during the real integration. Tests use a lightweight mock.
@@ -21,7 +21,7 @@ pub const MAX_REQUESTS: u32     = 100;
 
 pub const PooledConn = struct {
     /// Opaque handle to the underlying TLS connection.
-    /// In production: *TlsConn. In tests: any pointer.
+    /// Opaque connection pointer — any connection type (HTTP, future TLS).
     handle: *anyopaque,
     in_use: bool,
     last_used_ms: i64,
