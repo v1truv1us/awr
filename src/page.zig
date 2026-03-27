@@ -71,9 +71,8 @@ fn writeJsStr(w: anytype, s: []const u8) !void {
 
 /// Top-level browser page.  Owns an HTTP client and a JS engine.
 ///
-/// The JS engine context persists across navigations; variables set by
-/// scripts in one navigation remain visible in subsequent ones.
-/// Phase 3 will add per-navigation context resets.
+/// The JS engine context is reset at the start of each `processHtml` call so
+/// that variables set by one navigation are invisible in the next.
 pub const Page = struct {
     allocator: std.mem.Allocator,
     client:    client.Client,
@@ -117,6 +116,13 @@ pub const Page = struct {
         html_src: []const u8,
     ) !PageResult {
         const gpa = self.allocator;
+
+        // ── Reset JS context to prevent state bleed between navigations ───
+        // Save the console sink (it lives inside the old host allocation),
+        // tear down the old runtime+context, then bring up a fresh one.
+        const saved_sink = self.js.host.sink;
+        self.js.deinit();
+        self.js = try engine.JsEngine.init(gpa, saved_sink);
 
         // Keep a copy of the raw HTML for PageResult.html.
         const html = try gpa.dupe(u8, html_src);
@@ -442,6 +448,26 @@ test "Phase 2 integration — JS reads DOM and surfaces data via window.__awrDat
     try std.testing.expect(std.mem.indexOf(u8, wd, "Widget A")           != null);
     try std.testing.expect(std.mem.indexOf(u8, wd, "\"title\":\"Shop\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, wd, "shop.example.com")   != null);
+}
+
+// ── Navigation isolation test ─────────────────────────────────────────────
+
+test "Page.processHtml — window_data does not bleed between navigations" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+
+    // First navigation sets __awrData__
+    var r1 = try page.processHtml("https://a.example/", 200,
+        "<html><body><script>window.__awrData__ = {page: 1};</script></body></html>");
+    defer r1.deinit();
+    try std.testing.expect(r1.window_data != null);
+
+    // Second navigation does NOT set __awrData__
+    var r2 = try page.processHtml("https://b.example/", 200,
+        "<html><body><p>no script</p></body></html>");
+    defer r2.deinit();
+    // Must be null — must not contain page 1's data
+    try std.testing.expect(r2.window_data == null);
 }
 
 // ── Integration test (requires network) ───────────────────────────────────

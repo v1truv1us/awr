@@ -245,14 +245,19 @@ pub const JsEngine = struct {
                     ctx.freeCString(s);
                 }
             } else {
-                // Objects/arrays: use JSON.stringify
-                const json_val = ctx.eval(
-                    "JSON.stringify(arguments[0])",
-                    "<console>",
-                    .{},
-                );
-                _ = json_val; // can't easily use in this context; fallback
-                _ = w.writeAll("[object]") catch {};
+                // Objects/arrays: call JS_JSONStringify directly on the value.
+                const json_val = arg.jsonStringify(ctx, qjs.Value.undefined, qjs.Value.undefined);
+                defer json_val.deinit(ctx);
+                if (!json_val.isException() and !json_val.isUndefined()) {
+                    if (json_val.toCString(ctx)) |s| {
+                        _ = w.writeAll(std.mem.span(s)) catch {};
+                        ctx.freeCString(s);
+                    } else {
+                        _ = w.writeAll("[object]") catch {};
+                    }
+                } else {
+                    _ = w.writeAll("[object]") catch {};
+                }
             }
         }
 
@@ -491,6 +496,29 @@ test "JsEngine — custom ConsoleSink captures output" {
 
     try engine.eval("console.log('hello sink');", "<test>");
     try std.testing.expectEqualStrings("hello sink", cap.buf[0..cap.len]);
+}
+
+test "JsEngine — console.log object is serialized as JSON" {
+    const Capture = struct {
+        buf: [256]u8 = undefined,
+        len: usize   = 0,
+        fn write(ptr: *anyopaque, _: ConsoleSink.Level, msg: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            const n = @min(msg.len, self.buf.len);
+            @memcpy(self.buf[0..n], msg[0..n]);
+            self.len = n;
+        }
+    };
+    var cap = Capture{};
+    const sink = ConsoleSink{ .ptr = &cap, .writeFn = Capture.write };
+    var eng = try JsEngine.init(std.testing.allocator, sink);
+    defer eng.deinit();
+    // Execute inline JS that logs an object
+    const js_inject = JsEngine.eval;
+    js_inject(&eng, "console.log({a: 1, b: 2});", "<test>") catch {};
+    // Should contain "a" and "1", not "[object]"
+    try std.testing.expect(std.mem.indexOf(u8, cap.buf[0..cap.len], "\"a\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cap.buf[0..cap.len], "[object]") == null);
 }
 
 test "JsEngine — setGlobal exposes value to JS" {
