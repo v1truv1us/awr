@@ -30,6 +30,12 @@ pub fn build(b: *std.Build) void {
     const lexbor_include = std.Build.LazyPath{ .cwd_relative = lexbor_prefix ++ "/include" };
     const lexbor_lib     = std.Build.LazyPath{ .cwd_relative = lexbor_prefix ++ "/lib" };
 
+    // ── BoringSSL paths (vendored in third_party/) ────────────────────────
+    // Pre-built static libs for macOS/arm64. See third_party/boringssl/BUILD_NOTES.md to rebuild.
+    const boringssl_include  = b.path("third_party/boringssl/include");
+    const boringssl_lib_ssl  = b.path("third_party/boringssl/lib/macos-arm64/libssl.a");
+    const boringssl_lib_crpt = b.path("third_party/boringssl/lib/macos-arm64/libcrypto.a");
+
     // ── Test steps ────────────────────────────────────────────────────────
     // "zig build test"        → run all unit tests
     // "zig build test-net"    → net layer only
@@ -49,6 +55,7 @@ pub fn build(b: *std.Build) void {
     const test_client_step = b.step("test-client", "Run src/client unit tests");
     const test_h2_step     = b.step("test-h2",     "Run h2session and HTTP/2 frame tests");
     const test_page_step   = b.step("test-page",   "Run src/page tests (unit + integration, requires network)");
+    const test_tls_step    = b.step("test-tls",    "Run BoringSSL smoke + tls_conn unit tests");
     const test_e2e_step    = b.step("test-e2e",    "Run end-to-end integration tests (requires network)");
 
     // ── Net layer modules (pure-Zig, no C deps) ───────────────────────────
@@ -257,6 +264,28 @@ pub fn build(b: *std.Build) void {
         exe.addLibraryPath(lexbor_lib);
         exe.linkSystemLibrary("lexbor");
         b.installArtifact(exe);
+    }
+
+    // ── BoringSSL smoke test (confirms libs link + headers resolve) ───────
+    {
+        const tls_smoke_mod = b.createModule(.{
+            .root_source_file = b.path("src/net/tls_smoke_test.zig"),
+            .target   = target,
+            .optimize = optimize,
+        });
+        const tls_smoke = b.addTest(.{
+            .name        = "tls",
+            .root_module = tls_smoke_mod,
+        });
+        tls_smoke.linkLibC();
+        tls_smoke.linkLibCpp(); // BoringSSL is C++ (std::variant, exceptions, vtables)
+        tls_smoke.addIncludePath(boringssl_include);
+        // Use explicit .a paths to prevent Zig from resolving to system OpenSSL
+        tls_smoke.addObjectFile(boringssl_lib_ssl);
+        tls_smoke.addObjectFile(boringssl_lib_crpt);
+        const run_tls_smoke = b.addRunArtifact(tls_smoke);
+        test_tls_step.dependOn(&run_tls_smoke.step);
+        test_step.dependOn(&run_tls_smoke.step);
     }
 
     // ── End-to-end integration tests (network required) ───────────────────
