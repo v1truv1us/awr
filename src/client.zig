@@ -101,10 +101,12 @@ pub const Client = struct {
         if (parsed.is_https) {
             var path_buf: [2048]u8 = undefined;
             const path = parsed.pathWithQuery(&path_buf);
-            var url_buf: [4096]u8 = undefined;
-            const full_url = std.fmt.bufPrint(&url_buf, "https://{s}:{d}{s}", .{
+            // Heap-allocate the URL string — stack buffers in a recursive redirect
+            // chain can overflow (observed crash on HN's HTTP→HTTPS redirect).
+            const full_url = try std.fmt.allocPrint(self.allocator, "https://{s}:{d}{s}", .{
                 parsed.host, parsed.port, path,
-            }) catch return error.OutOfMemory;
+            });
+            defer self.allocator.free(full_url);
             return self.fetchHttpsViaStd(full_url);
         }
 
@@ -185,7 +187,8 @@ pub const Client = struct {
         const TcpReader = std.io.GenericReader(*tcp.TcpConn, tcp.TcpError, tcp.TcpConn.readFn);
         const stream_reader = TcpReader{ .context = &conn };
         var resp = try http1.readResponse(stream_reader, self.allocator);
-        errdefer resp.deinit();
+        var resp_owned = true; // set false when redirect takes ownership
+        errdefer if (resp_owned) resp.deinit();
 
         // Store Set-Cookie headers
         for (resp.headers.items.items) |h| {
@@ -197,24 +200,34 @@ pub const Client = struct {
         // Follow redirects
         if (resp.isRedirect() and self.options.follow_redirects) {
             if (resp.location()) |loc| {
-                // Resolve relative redirects against current URL
-                var next_url_buf: [2048]u8 = undefined;
+                // Heap-allocate the redirect URL before resp.deinit() — loc is a
+                // slice into resp.headers which gets freed by deinit(). Using it
+                // after deinit is a use-after-free (observed crash on HN redirect).
+                // Heap-copy the redirect URL before resp.deinit() frees headers.
+                // next_url borrows slices from next_url_str, so we must NOT free
+                // next_url_str until after the recursive fetchUrl call returns.
                 const next_url_str = if (std.mem.startsWith(u8, loc, "http"))
-                    loc
+                    try self.allocator.dupe(u8, loc)
                 else blk: {
                     const scheme = if (parsed.is_https) "https" else "http";
-                    break :blk std.fmt.bufPrint(&next_url_buf, "{s}://{s}:{d}{s}", .{
+                    break :blk try std.fmt.allocPrint(self.allocator, "{s}://{s}:{d}{s}", .{
                         scheme, parsed.host, parsed.port, loc,
-                    }) catch loc;
+                    });
                 };
-                const next_url = url_mod.Url.parse(next_url_str) catch return Response{
-                    .status    = resp.status,
-                    .headers   = resp.headers,
-                    .body      = resp.body,
-                    .allocator = self.allocator,
+                const next_url = url_mod.Url.parse(next_url_str) catch {
+                    self.allocator.free(next_url_str);
+                    return Response{
+                        .status    = resp.status,
+                        .headers   = resp.headers,
+                        .body      = resp.body,
+                        .allocator = self.allocator,
+                    };
                 };
+                resp_owned = false; // prevent errdefer double-free
                 resp.deinit();
-                return self.fetchUrl(next_url, redirect_count + 1);
+                const redir_result = self.fetchUrl(next_url, redirect_count + 1);
+                self.allocator.free(next_url_str);
+                return redir_result;
             }
         }
 
@@ -230,7 +243,9 @@ pub const Client = struct {
     /// HTTPS fetch via std.http.Client (uses std.crypto.tls under the hood).
     /// TODO(Phase 3): Replace with AWR's owned BoringSSL stack + JA4+ Chrome 132 fingerprint.
     fn fetchHttpsViaStd(self: *Client, url_str: []const u8) anyerror!Response {
-        var std_client = std.http.Client{ .allocator = self.allocator };
+        // 64KB read buffer — default 8KB is too small for sites like X.com that
+        // send large numbers of headers, causing HttpHeadersOversize.
+        var std_client = std.http.Client{ .allocator = self.allocator, .read_buffer_size = 64 * 1024 };
         defer std_client.deinit();
 
         var body_writer = std.Io.Writer.Allocating.init(self.allocator);
