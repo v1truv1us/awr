@@ -199,6 +199,8 @@ awr_h2_session_t *awr_h2_session_new(awr_h2_send_cb send_cb,
     };
     nghttp2_submit_settings(s->ng, NGHTTP2_FLAG_NONE,
                              iv, sizeof(iv) / sizeof(iv[0]));
+    /* Chrome 132 connection-level WINDOW_UPDATE (increment 15663105) */
+    nghttp2_submit_window_update(s->ng, NGHTTP2_FLAG_NONE, 0, 15663105);
     return s;
 }
 

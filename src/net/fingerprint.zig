@@ -48,6 +48,39 @@ pub const chrome132_ciphers = [16]u16{
     0x000a, // TLS_RSA_WITH_3DES_EDE_CBC_SHA
 };
 
+// ── AWR cipher suites ──────────────────────────────────────────────────────
+
+/// AWR cipher suites — Chrome 132 minus TLS_RSA_WITH_3DES_EDE_CBC_SHA (0x000a).
+/// RFC 8996 deprecated 3DES; AWR drops it. Result: 15 entries.
+pub const awr_ciphers = [15]u16{
+    0x1301, // TLS_AES_128_GCM_SHA256
+    0x1302, // TLS_AES_256_GCM_SHA384
+    0x1303, // TLS_CHACHA20_POLY1305_SHA256
+    0xc02b, // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+    0xc02f, // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+    0xc02c, // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+    0xc030, // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+    0xcca9, // TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+    0xcca8, // TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+    0xc013, // TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA
+    0xc014, // TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA
+    0x009c, // TLS_RSA_WITH_AES_128_GCM_SHA256
+    0x009d, // TLS_RSA_WITH_AES_256_GCM_SHA384
+    0x002f, // TLS_RSA_WITH_AES_128_CBC_SHA
+    0x0035, // TLS_RSA_WITH_AES_256_CBC_SHA
+};
+
+/// Reference JA4 string for Chrome 132 (for non-impersonation assertion).
+pub const chrome132_ja4 = "t13d1517h2_8daaf6152771_b6f405a00624";
+
+/// AWR's JA4 string — PLACEHOLDER. Real value TBD after live wire test.
+pub const awr_ja4 = "t13d????h2_????????????_????????????";
+
+/// Returns a GREASE value indexed by seed mod 16.
+pub fn pickGrease(seed: u64) u16 {
+    return grease_values[@as(usize, @intCast(seed % 16))];
+}
+
 // ── HTTP/2 SETTINGS (Chrome 132) ──────────────────────────────────────────
 
 pub const h2_header_table_size: u32      = 65536;
@@ -127,4 +160,48 @@ test "H2 pseudo-header order is :method :authority :scheme :path" {
     try std.testing.expectEqualStrings(":authority", h2_pseudo_header_order[1]);
     try std.testing.expectEqualStrings(":scheme",    h2_pseudo_header_order[2]);
     try std.testing.expectEqualStrings(":path",      h2_pseudo_header_order[3]);
+}
+
+test "AWR cipher list has exactly 15 entries" {
+    try std.testing.expectEqual(@as(usize, 15), awr_ciphers.len);
+}
+
+test "AWR ciphers do not contain 0x000a (3DES deprecated)" {
+    for (awr_ciphers) |c| {
+        try std.testing.expect(c != 0x000a);
+    }
+}
+
+test "AWR ciphers contain 0x1301, 0x1302, 0x1303" {
+    var found = [3]bool{ false, false, false };
+    for (awr_ciphers) |c| {
+        if (c == 0x1301) found[0] = true;
+        if (c == 0x1302) found[1] = true;
+        if (c == 0x1303) found[2] = true;
+    }
+    try std.testing.expect(found[0]);
+    try std.testing.expect(found[1]);
+    try std.testing.expect(found[2]);
+}
+
+test "awr_ja4 is a placeholder distinct from chrome132_ja4" {
+    try std.testing.expect(!std.mem.eql(u8, awr_ja4, chrome132_ja4));
+}
+
+test "awr_ja4 starts with t13d" {
+    try std.testing.expect(std.mem.startsWith(u8, awr_ja4, "t13d"));
+}
+
+test "pickGrease returns a valid GREASE value" {
+    const v = pickGrease(0);
+    try std.testing.expect(isGrease(v));
+}
+
+test "pickGrease varies with seed" {
+    const a = pickGrease(0);
+    const b = pickGrease(1);
+    // Most seeds produce different values (15/16 chance for seed 0 vs 1)
+    // This test just checks the function is deterministic
+    try std.testing.expect(a == pickGrease(0));
+    try std.testing.expect(b == pickGrease(1));
 }

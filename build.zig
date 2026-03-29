@@ -288,6 +288,34 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_tls_smoke.step);
     }
 
+    // ── tls_conn module (BoringSSL Zig wrapper + shim) ────────────────────
+    {
+        const tls_conn_mod = b.createModule(.{
+            .root_source_file = b.path("src/net/tls_conn.zig"),
+            .target   = target,
+            .optimize = optimize,
+        });
+        tls_conn_mod.addIncludePath(b.path("src/net")); // for tls_awr_shim.h
+        tls_conn_mod.addIncludePath(boringssl_include);
+        const tls_conn_test = b.addTest(.{
+            .name        = "tls_conn",
+            .root_module = tls_conn_mod,
+        });
+        tls_conn_test.linkLibC();
+        tls_conn_test.linkLibCpp(); // BoringSSL requires libc++
+        tls_conn_test.addCSourceFile(.{
+            .file  = b.path("src/net/tls_awr_shim.c"),
+            .flags = &.{ "-std=c11", "-Wall", "-Wextra" },
+        });
+        tls_conn_test.addIncludePath(b.path("src/net"));
+        tls_conn_test.addIncludePath(boringssl_include);
+        tls_conn_test.addObjectFile(boringssl_lib_ssl);
+        tls_conn_test.addObjectFile(boringssl_lib_crpt);
+        const run_tls_conn = b.addRunArtifact(tls_conn_test);
+        test_tls_step.dependOn(&run_tls_conn.step);
+        test_step.dependOn(&run_tls_conn.step);
+    }
+
     // ── End-to-end integration tests (network required) ───────────────────
     const e2e_mod = b.createModule(.{
         .root_source_file = b.path("src/test_e2e.zig"),
