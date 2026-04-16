@@ -73,8 +73,9 @@ pub const awr_ciphers = [15]u16{
 /// Reference JA4 string for Chrome 132 (for non-impersonation assertion).
 pub const chrome132_ja4 = "t13d1517h2_8daaf6152771_b6f405a00624";
 
-/// AWR's JA4 string — PLACEHOLDER. Real value TBD after live wire test.
-pub const awr_ja4 = "t13d????h2_????????????_????????????";
+/// AWR JA4 captures from tls.peet.ws on 2026-03-29.
+pub const awr_ja4_h1 = "t13d1512h1_8daaf6152771_07d4c546ea27";
+pub const awr_ja4_h2 = "t13d1512h2_8daaf6152771_07d4c546ea27";
 
 /// Returns a GREASE value indexed by seed mod 16.
 pub fn pickGrease(seed: u64) u16 {
@@ -83,10 +84,10 @@ pub fn pickGrease(seed: u64) u16 {
 
 // ── HTTP/2 SETTINGS (Chrome 132) ──────────────────────────────────────────
 
-pub const h2_header_table_size: u32      = 65536;
+pub const h2_header_table_size: u32 = 65536;
 pub const h2_max_concurrent_streams: u32 = 1000;
-pub const h2_initial_window_size: u32    = 6291456;
-pub const h2_max_header_list_size: u32   = 262144;
+pub const h2_initial_window_size: u32 = 6291456;
+pub const h2_max_header_list_size: u32 = 262144;
 
 /// Connection-level WINDOW_UPDATE increment Chrome 132 sends after SETTINGS.
 pub const h2_connection_window_increment: u32 = 15663105;
@@ -145,10 +146,10 @@ test "isGrease returns false for 0x0a0b (bytes differ)" {
 }
 
 test "H2 SETTINGS values match Chrome 132 spec" {
-    try std.testing.expectEqual(@as(u32, 65536),   h2_header_table_size);
-    try std.testing.expectEqual(@as(u32, 1000),    h2_max_concurrent_streams);
+    try std.testing.expectEqual(@as(u32, 65536), h2_header_table_size);
+    try std.testing.expectEqual(@as(u32, 1000), h2_max_concurrent_streams);
     try std.testing.expectEqual(@as(u32, 6291456), h2_initial_window_size);
-    try std.testing.expectEqual(@as(u32, 262144),  h2_max_header_list_size);
+    try std.testing.expectEqual(@as(u32, 262144), h2_max_header_list_size);
 }
 
 test "H2 connection window update value is 15663105" {
@@ -156,10 +157,10 @@ test "H2 connection window update value is 15663105" {
 }
 
 test "H2 pseudo-header order is :method :authority :scheme :path" {
-    try std.testing.expectEqualStrings(":method",    h2_pseudo_header_order[0]);
+    try std.testing.expectEqualStrings(":method", h2_pseudo_header_order[0]);
     try std.testing.expectEqualStrings(":authority", h2_pseudo_header_order[1]);
-    try std.testing.expectEqualStrings(":scheme",    h2_pseudo_header_order[2]);
-    try std.testing.expectEqualStrings(":path",      h2_pseudo_header_order[3]);
+    try std.testing.expectEqualStrings(":scheme", h2_pseudo_header_order[2]);
+    try std.testing.expectEqualStrings(":path", h2_pseudo_header_order[3]);
 }
 
 test "AWR cipher list has exactly 15 entries" {
@@ -184,12 +185,20 @@ test "AWR ciphers contain 0x1301, 0x1302, 0x1303" {
     try std.testing.expect(found[2]);
 }
 
-test "awr_ja4 is a placeholder distinct from chrome132_ja4" {
-    try std.testing.expect(!std.mem.eql(u8, awr_ja4, chrome132_ja4));
+test "awr_ja4_h1 is distinct from chrome132_ja4" {
+    try std.testing.expect(!std.mem.eql(u8, awr_ja4_h1, chrome132_ja4));
 }
 
-test "awr_ja4 starts with t13d" {
-    try std.testing.expect(std.mem.startsWith(u8, awr_ja4, "t13d"));
+test "awr_ja4_h1 starts with t13d" {
+    try std.testing.expect(std.mem.startsWith(u8, awr_ja4_h1, "t13d"));
+}
+
+test "awr_ja4_h1 matches tls.peet.ws capture" {
+    try std.testing.expectEqualStrings("t13d1512h1_8daaf6152771_07d4c546ea27", awr_ja4_h1);
+}
+
+test "awr_ja4_h2 starts with t13d" {
+    try std.testing.expect(std.mem.startsWith(u8, awr_ja4_h2, "t13d"));
 }
 
 test "pickGrease returns a valid GREASE value" {

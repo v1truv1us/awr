@@ -52,6 +52,12 @@ void awr_tls_ctx_free(awr_ssl_ctx_t *ctx);
 int awr_tls_load_ca_bundle(awr_ssl_ctx_t *ctx,
                             const uint8_t *pem_data, size_t pem_len);
 
+/** awr_tls_set_alpn_http11_only — restrict ALPN to HTTP/1.1 only. Returns 1 on success. */
+int awr_tls_set_alpn_http11_only(awr_ssl_ctx_t *ctx);
+
+/** awr_tls_load_default_paths — load system default CA certificate paths. */
+int awr_tls_load_default_paths(awr_ssl_ctx_t *ctx);
+
 /* ── Connection lifecycle ───────────────────────────────────────────────── */
 
 /**
@@ -84,6 +90,9 @@ int awr_tls_conn_read(awr_ssl_t *ssl, uint8_t *buf, int len);
  * Returns bytes written (>0) or -1 on error.
  */
 int awr_tls_conn_write(awr_ssl_t *ssl, const uint8_t *buf, int len);
+
+/** awr_tls_conn_pending — return decrypted bytes already buffered by TLS. */
+int awr_tls_conn_pending(const awr_ssl_t *ssl);
 
 /* ── ALPN result ────────────────────────────────────────────────────────── */
 

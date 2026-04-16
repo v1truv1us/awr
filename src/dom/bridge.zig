@@ -30,17 +30,16 @@
 /// `installDomBridge(engine, doc, alloc)` stores a heap-allocated
 /// BridgeCtx in engine.host.extension.  Call `removeDomBridge(engine)`
 /// to free it when the Page is destroyed.
-
-const std    = @import("std");
-const qjs    = @import("quickjs");
-const dom    = @import("node.zig");
+const std = @import("std");
+const qjs = @import("quickjs");
+const dom = @import("node.zig");
 const engine = @import("../js/engine.zig");
 
 // ── BridgeCtx ─────────────────────────────────────────────────────────────
 
 /// Stored as engine.host.extension; accessed by native callbacks.
 const BridgeCtx = struct {
-    doc:       *dom.Document,
+    doc: *dom.Document,
     allocator: std.mem.Allocator,
 };
 
@@ -51,6 +50,11 @@ fn getBridge(ctx: ?*qjs.Context) ?*BridgeCtx {
     return @ptrCast(@alignCast(ext));
 }
 
+fn getHost(ctx: ?*qjs.Context) ?*engine.EngineHostData {
+    const c = ctx orelse return null;
+    return c.getOpaque(engine.EngineHostData);
+}
+
 // ── Public API ────────────────────────────────────────────────────────────
 
 pub const BridgeError = error{ AllocFailed, EvalFailed };
@@ -58,8 +62,8 @@ pub const BridgeError = error{ AllocFailed, EvalFailed };
 /// Install the DOM bridge into `eng`, backed by `doc`.
 /// The bridge is heap-allocated and freed by `removeDomBridge`.
 pub fn installDomBridge(
-    eng:   *engine.JsEngine,
-    doc:   *dom.Document,
+    eng: *engine.JsEngine,
+    doc: *dom.Document,
     alloc: std.mem.Allocator,
 ) BridgeError!void {
     const bctx = alloc.create(BridgeCtx) catch return BridgeError.AllocFailed;
@@ -78,7 +82,7 @@ pub fn installDomBridge(
 /// Free the BridgeCtx allocated by installDomBridge.
 pub fn removeDomBridge(eng: *engine.JsEngine) void {
     const host = eng.ctx.getOpaque(engine.EngineHostData) orelse return;
-    const ext  = host.extension orelse return;
+    const ext = host.extension orelse return;
     const bctx: *BridgeCtx = @ptrCast(@alignCast(ext));
     bctx.allocator.destroy(bctx);
     host.extension = null;
@@ -90,11 +94,18 @@ fn installNativeCallbacks(eng: *engine.JsEngine) !void {
     const ctx = eng.ctx;
 
     inline for (.{
-        .{ "querySelector",    querySelectorFn },
+        .{ "querySelector", querySelectorFn },
         .{ "querySelectorAll", querySelectorAllFn },
-        .{ "getElementById",   getElementByIdFn },
-        .{ "getTitle",         getTitleFn },
-        .{ "getBody",          getBodyFn },
+        .{ "elementQuerySelector", elementQuerySelectorFn },
+        .{ "elementQuerySelectorAll", elementQuerySelectorAllFn },
+        .{ "elementMatches", elementMatchesFn },
+        .{ "elementClosest", elementClosestFn },
+        .{ "getElementById", getElementByIdFn },
+        .{ "getTitle", getTitleFn },
+        .{ "getBody", getBodyFn },
+        .{ "getCookie", getCookieFn },
+        .{ "setCookie", setCookieFn },
+        .{ "cookieEnabled", cookieEnabledFn },
     }) |entry| {
         const fname: [:0]const u8 = "__awr_" ++ entry[0] ++ "__";
         const fn_val = qjs.Value.initCFunction(ctx, entry[1], fname, 1);
@@ -112,18 +123,18 @@ fn writeJsonStr(w: anytype, str: []const u8) !void {
     try w.writeByte('"');
     for (str) |c| {
         switch (c) {
-            '"'         => try w.writeAll("\\\""),
-            '\\'        => try w.writeAll("\\\\"),
-            '\n'        => try w.writeAll("\\n"),    // 0x0a
-            '\r'        => try w.writeAll("\\r"),    // 0x0d
-            '\t'        => try w.writeAll("\\t"),    // 0x09
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"), // 0x0a
+            '\r' => try w.writeAll("\\r"), // 0x0d
+            '\t' => try w.writeAll("\\t"), // 0x09
             // remaining control chars not already handled above
             0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => {
                 var esc: [6]u8 = undefined;
                 const s = std.fmt.bufPrint(&esc, "\\u{x:0>4}", .{c}) catch continue;
                 try w.writeAll(s);
             },
-            else        => try w.writeByte(c),
+            else => try w.writeByte(c),
         }
     }
     try w.writeByte('"');
@@ -132,11 +143,15 @@ fn writeJsonStr(w: anytype, str: []const u8) !void {
 /// Serialize an Element to a compact JSON object string.
 /// Writes into `buf`; returns the written slice or null on overflow.
 fn elementToJson(elem: *const dom.Element, buf: []u8) ?[]const u8 {
-    var fbs = std.io.fixedBufferStream(buf);
-    const w = fbs.writer();
+    var fbs = std.Io.Writer.fixed(buf);
+    const w = &fbs;
+    var ref_buf: [32]u8 = undefined;
+    const ref_str = std.fmt.bufPrint(&ref_buf, "{x}", .{@intFromPtr(elem)}) catch return null;
 
     w.writeAll("{\"tag\":") catch return null;
     writeJsonStr(w, elem.tag) catch return null;
+    w.writeAll(",\"ref\":") catch return null;
+    writeJsonStr(w, ref_str) catch return null;
     w.writeAll(",\"attrs\":[") catch return null;
     for (elem.attributes, 0..) |attr, i| {
         if (i > 0) w.writeByte(',') catch return null;
@@ -153,12 +168,18 @@ fn elementToJson(elem: *const dom.Element, buf: []u8) ?[]const u8 {
     writeJsonStr(w, text) catch return null;
     w.writeByte('}') catch return null;
 
-    return fbs.getWritten();
+    return fbs.buffered();
+}
+
+fn parseElementRef(ref: []const u8) ?*dom.Element {
+    const addr = std.fmt.parseUnsigned(usize, ref, 16) catch return null;
+    if (addr == 0) return null;
+    return @ptrFromInt(addr);
 }
 
 fn querySelectorFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
     const bridge = getBridge(ctx) orelse return qjs.Value.null;
-    const c      = ctx orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
     if (args.len == 0) return qjs.Value.null;
 
     const sel_val: qjs.Value = @bitCast(args[0]);
@@ -174,7 +195,7 @@ fn querySelectorFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quic
 
 fn querySelectorAllFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
     const bridge = getBridge(ctx) orelse return qjs.Value.null;
-    const c      = ctx orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
     if (args.len == 0) return qjs.Value.initStringLen(c, "[]");
 
     const sel_val: qjs.Value = @bitCast(args[0]);
@@ -186,8 +207,8 @@ fn querySelectorAllFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("q
     defer bridge.allocator.free(elems);
 
     var buf: [65536]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const w = fbs.writer();
+    var fbs = std.Io.Writer.fixed(&buf);
+    const w = &fbs;
     w.writeByte('[') catch return qjs.Value.initStringLen(c, "[]");
     for (elems, 0..) |elem, i| {
         if (i > 0) w.writeByte(',') catch break;
@@ -197,12 +218,98 @@ fn querySelectorAllFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("q
         }
     }
     w.writeByte(']') catch {};
-    return qjs.Value.initStringLen(c, fbs.getWritten());
+    return qjs.Value.initStringLen(c, fbs.buffered());
+}
+
+fn elementQuerySelectorFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.null;
+    if (args.len < 2) return qjs.Value.null;
+
+    const ref_val: qjs.Value = @bitCast(args[0]);
+    const ref_cstr = ref_val.toCString(c) orelse return qjs.Value.null;
+    defer c.freeCString(ref_cstr);
+    const elem = parseElementRef(std.mem.span(ref_cstr)) orelse return qjs.Value.null;
+
+    const sel_val: qjs.Value = @bitCast(args[1]);
+    const sel_cstr = sel_val.toCString(c) orelse return qjs.Value.null;
+    defer c.freeCString(sel_cstr);
+
+    const found = elem.querySelector(std.mem.span(sel_cstr)) orelse return qjs.Value.null;
+    var buf: [8192]u8 = undefined;
+    const json = elementToJson(found, &buf) orelse return qjs.Value.null;
+    return qjs.Value.initStringLen(c, json);
+}
+
+fn elementQuerySelectorAllFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.null;
+    const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(c, "[]");
+    if (args.len < 2) return qjs.Value.initStringLen(c, "[]");
+
+    const ref_val: qjs.Value = @bitCast(args[0]);
+    const ref_cstr = ref_val.toCString(c) orelse return qjs.Value.initStringLen(c, "[]");
+    defer c.freeCString(ref_cstr);
+    const elem = parseElementRef(std.mem.span(ref_cstr)) orelse return qjs.Value.initStringLen(c, "[]");
+
+    const sel_val: qjs.Value = @bitCast(args[1]);
+    const sel_cstr = sel_val.toCString(c) orelse return qjs.Value.initStringLen(c, "[]");
+    defer c.freeCString(sel_cstr);
+
+    const elems = elem.querySelectorAll(std.mem.span(sel_cstr), bridge.allocator) catch return qjs.Value.initStringLen(c, "[]");
+    defer bridge.allocator.free(elems);
+
+    var buf: [65536]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&buf);
+    const w = &fbs;
+    w.writeByte('[') catch return qjs.Value.initStringLen(c, "[]");
+    for (elems, 0..) |item, i| {
+        if (i > 0) w.writeByte(',') catch break;
+        var ebuf: [8192]u8 = undefined;
+        if (elementToJson(item, &ebuf)) |json| {
+            w.writeAll(json) catch break;
+        }
+    }
+    w.writeByte(']') catch {};
+    return qjs.Value.initStringLen(c, fbs.buffered());
+}
+
+fn elementMatchesFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.initInt32(0);
+    if (args.len < 2) return qjs.Value.initInt32(0);
+
+    const ref_val: qjs.Value = @bitCast(args[0]);
+    const ref_cstr = ref_val.toCString(c) orelse return qjs.Value.initInt32(0);
+    defer c.freeCString(ref_cstr);
+    const elem = parseElementRef(std.mem.span(ref_cstr)) orelse return qjs.Value.initInt32(0);
+
+    const sel_val: qjs.Value = @bitCast(args[1]);
+    const sel_cstr = sel_val.toCString(c) orelse return qjs.Value.initInt32(0);
+    defer c.freeCString(sel_cstr);
+
+    return qjs.Value.initInt32(if (elem.matches(std.mem.span(sel_cstr))) 1 else 0);
+}
+
+fn elementClosestFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.null;
+    if (args.len < 2) return qjs.Value.null;
+
+    const ref_val: qjs.Value = @bitCast(args[0]);
+    const ref_cstr = ref_val.toCString(c) orelse return qjs.Value.null;
+    defer c.freeCString(ref_cstr);
+    const elem = parseElementRef(std.mem.span(ref_cstr)) orelse return qjs.Value.null;
+
+    const sel_val: qjs.Value = @bitCast(args[1]);
+    const sel_cstr = sel_val.toCString(c) orelse return qjs.Value.null;
+    defer c.freeCString(sel_cstr);
+
+    const found = elem.closest(std.mem.span(sel_cstr)) orelse return qjs.Value.null;
+    var buf: [8192]u8 = undefined;
+    const json = elementToJson(found, &buf) orelse return qjs.Value.null;
+    return qjs.Value.initStringLen(c, json);
 }
 
 fn getElementByIdFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
     const bridge = getBridge(ctx) orelse return qjs.Value.null;
-    const c      = ctx orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
     if (args.len == 0) return qjs.Value.null;
 
     const id_val: qjs.Value = @bitCast(args[0]);
@@ -218,22 +325,50 @@ fn getElementByIdFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("qui
 
 fn getTitleFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
     const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(ctx orelse return qjs.Value.undefined, "");
-    const c      = ctx orelse return qjs.Value.undefined;
-    const html   = bridge.doc.htmlElement() orelse return qjs.Value.initStringLen(c, "");
-    const head   = html.firstChildByTag("head") orelse return qjs.Value.initStringLen(c, "");
-    const title  = head.firstChildByTag("title") orelse return qjs.Value.initStringLen(c, "");
-    const text   = title.textContent(bridge.allocator) catch return qjs.Value.initStringLen(c, "");
+    const c = ctx orelse return qjs.Value.undefined;
+    const html = bridge.doc.htmlElement() orelse return qjs.Value.initStringLen(c, "");
+    const head = html.firstChildByTag("head") orelse return qjs.Value.initStringLen(c, "");
+    const title = head.firstChildByTag("title") orelse return qjs.Value.initStringLen(c, "");
+    const text = title.textContent(bridge.allocator) catch return qjs.Value.initStringLen(c, "");
     defer bridge.allocator.free(text);
     return qjs.Value.initStringLen(c, text);
 }
 
 fn getBodyFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
     const bridge = getBridge(ctx) orelse return qjs.Value.null;
-    const c      = ctx orelse return qjs.Value.null;
-    const body   = bridge.doc.body() orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
+    const body = bridge.doc.body() orelse return qjs.Value.null;
     var buf: [8192]u8 = undefined;
     const json = elementToJson(body, &buf) orelse return qjs.Value.null;
     return qjs.Value.initStringLen(c, json);
+}
+
+fn getCookieFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.undefined;
+    const host = getHost(ctx) orelse return qjs.Value.initStringLen(c, "");
+    if (host.cookie_ctx == null or host.cookie_get_fn == null) return qjs.Value.initStringLen(c, "");
+
+    const cookie = host.cookie_get_fn.?(host.cookie_ctx.?, host.allocator) catch return qjs.Value.initStringLen(c, "");
+    defer host.allocator.free(cookie);
+    return qjs.Value.initStringLen(c, cookie);
+}
+
+fn setCookieFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.undefined;
+    const host = getHost(ctx) orelse return qjs.Value.undefined;
+    if (host.cookie_ctx == null or host.cookie_set_fn == null or args.len == 0) return qjs.Value.undefined;
+
+    const cookie_val: qjs.Value = @bitCast(args[0]);
+    const cookie_cstr = cookie_val.toCString(c) orelse return qjs.Value.undefined;
+    defer c.freeCString(cookie_cstr);
+
+    host.cookie_set_fn.?(host.cookie_ctx.?, std.mem.span(cookie_cstr)) catch {};
+    return qjs.Value.undefined;
+}
+
+fn cookieEnabledFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
+    const host = getHost(ctx) orelse return qjs.Value.initInt32(0);
+    return qjs.Value.initInt32(if (host.cookie_ctx != null and host.cookie_get_fn != null and host.cookie_set_fn != null) 1 else 0);
 }
 
 // ── JS polyfill ───────────────────────────────────────────────────────────
@@ -241,6 +376,8 @@ fn getBodyFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.J
 const BRIDGE_POLYFILL =
     \\(function() {
     \\  'use strict';
+    \\
+    \\  let documentTitle = String(__awr_getTitle__() || '');
     \\
     \\  function makeElement(data) {
     \\    if (data === null || data === undefined) return null;
@@ -252,6 +389,7 @@ const BRIDGE_POLYFILL =
     \\      nodeType: 1,
     \\      tagName: (d.tag || '').toUpperCase(),
     \\      _attrs: attrs,
+    \\      _ref: d.ref || null,
     \\      _text: d.text || '',
     \\      _children: [],
     \\      getAttribute(name) { return this._attrs[name.toLowerCase()] != null ? this._attrs[name.toLowerCase()] : null; },
@@ -283,10 +421,24 @@ const BRIDGE_POLYFILL =
     \\      removeChild(child) { this._children = this._children.filter(c => c !== child); return child; },
     \\      insertBefore(node) { this._children.unshift(node); return node; },
     \\      contains(other) { return false; },
-    \\      querySelector(sel) { return null; },
-    \\      querySelectorAll(sel) { return []; },
-    \\      matches(sel) { return false; },
-    \\      closest(sel) { return null; },
+    \\      querySelector(sel) {
+    \\        if (!this._ref) return null;
+    \\        const r = __awr_elementQuerySelector__(this._ref, String(sel));
+    \\        return r ? makeElement(r) : null;
+    \\      },
+    \\      querySelectorAll(sel) {
+    \\        if (!this._ref) return [];
+    \\        const r = __awr_elementQuerySelectorAll__(this._ref, String(sel));
+    \\        try { return (JSON.parse(r) || []).map(makeElement); } catch(e) { return []; }
+    \\      },
+    \\      matches(sel) {
+    \\        return !!(this._ref && __awr_elementMatches__(this._ref, String(sel)));
+    \\      },
+    \\      closest(sel) {
+    \\        if (!this._ref) return null;
+    \\        const r = __awr_elementClosest__(this._ref, String(sel));
+    \\        return r ? makeElement(r) : null;
+    \\      },
     \\      getBoundingClientRect() { return {top:0,left:0,bottom:0,right:0,width:0,height:0,x:0,y:0}; },
     \\      focus() {},
     \\      blur() {},
@@ -316,8 +468,8 @@ const BRIDGE_POLYFILL =
     \\    getElementById(id) { const r = __awr_getElementById__(String(id)); return r ? makeElement(r) : null; },
     \\    getElementsByClassName(cls) { return document.querySelectorAll('.' + cls); },
     \\    getElementsByTagName(tag) { return document.querySelectorAll(tag); },
-    \\    get title() { return __awr_getTitle__(); },
-    \\    set title(v) {},
+    \\    get title() { return documentTitle; },
+    \\    set title(v) { documentTitle = String(v); },
     \\    get body() { const r = __awr_getBody__(); return r ? makeElement(r) : null; },
     \\    get head() { return this.querySelector('head'); },
     \\    get documentElement() { return this.querySelector('html'); },
@@ -331,8 +483,8 @@ const BRIDGE_POLYFILL =
     \\    createEvent() { return {initEvent(){}, initCustomEvent(){}}; },
     \\    createRange() { return {selectNodeContents(){}, toString(){return '';}, getBoundingClientRect(){return {top:0,left:0,width:0,height:0};}}; },
     \\    execCommand() { return false; },
-    \\    get cookie() { return ''; },
-    \\    set cookie(v) {},
+    \\    get cookie() { return __awr_getCookie__(); },
+    \\    set cookie(v) { __awr_setCookie__(String(v)); },
     \\    get readyState() { return 'complete'; },
     \\    get visibilityState() { return 'visible'; },
     \\    get hidden() { return false; },
@@ -347,12 +499,12 @@ const BRIDGE_POLYFILL =
     \\    globalThis.navigator = {
     \\      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
     \\      language: 'en-US', languages: ['en-US', 'en'],
-    \\      cookieEnabled: false, onLine: true, hardwareConcurrency: 8,
+    \\      cookieEnabled: __awr_cookieEnabled__() !== 0, onLine: true, hardwareConcurrency: 8,
     \\      platform: 'MacIntel', vendor: 'Google Inc.', maxTouchPoints: 0,
     \\    };
     \\  }
     \\  if (!globalThis.location) {
-    \\    globalThis.location = { href: '', origin: '', pathname: '/', search: '', hash: '', hostname: '', protocol: 'https:', assign(){}, replace(){}, reload(){} };
+    \\    globalThis.location = { href: '', origin: '', pathname: '/', search: '', hash: '', hostname: '', host: '', port: '', protocol: 'https:', assign(){}, replace(){}, reload(){} };
     \\  }
     \\  globalThis.history = { length: 1, state: null, pushState(){}, replaceState(){}, back(){}, forward(){}, go(){} };
     \\  globalThis.screen  = { width: 1920, height: 1080, availWidth: 1920, availHeight: 1080, colorDepth: 24, pixelDepth: 24 };
@@ -382,12 +534,83 @@ const BRIDGE_POLYFILL =
     \\  globalThis.TouchEvent = globalThis.Event;
     \\  globalThis.FocusEvent = globalThis.Event;
     \\
-    \\  globalThis.localStorage  = { getItem(){ return null; }, setItem(){}, removeItem(){}, clear(){}, length: 0 };
-    \\  globalThis.sessionStorage = globalThis.localStorage;
+    \\  function createStorageArea() {
+    \\    const values = Object.create(null);
+    \\    return {
+    \\      key(index) {
+    \\        const keys = Object.keys(values);
+    \\        return index >= 0 && index < keys.length ? keys[index] : null;
+    \\      },
+    \\      getItem(key) {
+    \\        key = String(key);
+    \\        return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : null;
+    \\      },
+    \\      setItem(key, value) { values[String(key)] = String(value); },
+    \\      removeItem(key) { delete values[String(key)]; },
+    \\      clear() { for (const key of Object.keys(values)) delete values[key]; },
+    \\      get length() { return Object.keys(values).length; },
+    \\    };
+    \\  }
+    \\  globalThis.localStorage = createStorageArea();
+    \\  globalThis.sessionStorage = createStorageArea();
+    \\
+    \\  function dispatchXhr(target, type) {
+    \\    const event = new Event(type);
+    \\    const handler = target['on' + type];
+    \\    if (typeof handler === 'function') handler.call(target, event);
+    \\    const listeners = target._listeners[type] || [];
+    \\    for (const listener of listeners) listener.call(target, event);
+    \\  }
     \\
     \\  globalThis.XMLHttpRequest = function() {
-    \\    return { open(){}, send(){}, setRequestHeader(){}, addEventListener(){},
-    \\             readyState: 4, status: 0, responseText: '' };
+    \\    this._listeners = Object.create(null);
+    \\    this._headers = Object.create(null);
+    \\    this._method = 'GET';
+    \\    this._url = '';
+    \\    this.readyState = 0;
+    \\    this.status = 0;
+    \\    this.responseText = '';
+    \\    this.response = '';
+    \\    this.onreadystatechange = null;
+    \\    this.onload = null;
+    \\    this.onerror = null;
+    \\  };
+    \\  globalThis.XMLHttpRequest.prototype.open = function(method, url) {
+    \\    this._method = method ? String(method).toUpperCase() : 'GET';
+    \\    this._url = String(url);
+    \\    this.readyState = 1;
+    \\    dispatchXhr(this, 'readystatechange');
+    \\  };
+    \\  globalThis.XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+    \\    this._headers[String(name)] = String(value);
+    \\  };
+    \\  globalThis.XMLHttpRequest.prototype.addEventListener = function(type, listener) {
+    \\    if (!this._listeners[type]) this._listeners[type] = [];
+    \\    this._listeners[type].push(listener);
+    \\  };
+    \\  globalThis.XMLHttpRequest.prototype.removeEventListener = function(type, listener) {
+    \\    const list = this._listeners[type];
+    \\    if (!list) return;
+    \\    this._listeners[type] = list.filter((item) => item !== listener);
+    \\  };
+    \\  globalThis.XMLHttpRequest.prototype.send = function(body) {
+    \\    const self = this;
+    \\    fetch(this._url).then(function(resp) {
+    \\      self.status = resp.status;
+    \\      self.readyState = 2;
+    \\      dispatchXhr(self, 'readystatechange');
+    \\      return resp.text();
+    \\    }).then(function(text) {
+    \\      self.responseText = text;
+    \\      self.response = text;
+    \\      self.readyState = 4;
+    \\      dispatchXhr(self, 'readystatechange');
+    \\      dispatchXhr(self, 'load');
+    \\    }).catch(function() {
+    \\      self.readyState = 4;
+    \\      dispatchXhr(self, 'readystatechange');
+    \\      dispatchXhr(self, 'error');
+    \\    });
     \\  };
     \\})();
 ;
@@ -395,8 +618,7 @@ const BRIDGE_POLYFILL =
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 test "installDomBridge — basic smoke test" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><head><title>AWR Test</title></head><body><h1 id=\"title\">Hello</h1></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><head><title>AWR Test</title></head><body><h1 id=\"title\">Hello</h1></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -411,8 +633,7 @@ test "installDomBridge — basic smoke test" {
 }
 
 test "bridge — document.querySelector returns element" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><p id=\"intro\">Hello AWR</p></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><p id=\"intro\">Hello AWR</p></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -425,8 +646,7 @@ test "bridge — document.querySelector returns element" {
 }
 
 test "bridge — document.querySelector returns null for missing selector" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><p>text</p></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><p>text</p></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -439,8 +659,7 @@ test "bridge — document.querySelector returns null for missing selector" {
 }
 
 test "bridge — element.getAttribute works" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><a href=\"/page\">link</a></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><a href=\"/page\">link</a></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -453,8 +672,7 @@ test "bridge — element.getAttribute works" {
 }
 
 test "bridge — document.getElementById finds element" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><div id=\"main\">content</div></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><div id=\"main\">content</div></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -467,8 +685,7 @@ test "bridge — document.getElementById finds element" {
 }
 
 test "bridge — document.getElementById returns null for missing" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><div id=\"other\">content</div></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><div id=\"other\">content</div></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -481,8 +698,7 @@ test "bridge — document.getElementById returns null for missing" {
 }
 
 test "bridge — document.title returns page title" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><head><title>My Page</title></head><body></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><head><title>My Page</title></head><body></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -495,8 +711,7 @@ test "bridge — document.title returns page title" {
 }
 
 test "bridge — document.body is not null" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><p>text</p></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><p>text</p></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -509,8 +724,7 @@ test "bridge — document.body is not null" {
 }
 
 test "bridge — element.textContent contains text" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><p>hello world</p></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><p>hello world</p></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -523,8 +737,7 @@ test "bridge — element.textContent contains text" {
 }
 
 test "bridge — element.addEventListener does not throw" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><button id=\"btn\">click</button></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><button id=\"btn\">click</button></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -539,8 +752,7 @@ test "bridge — element.addEventListener does not throw" {
 }
 
 test "bridge — element.setAttribute mutates JS-side attr" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><div id=\"box\">text</div></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><div id=\"box\">text</div></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -557,8 +769,7 @@ test "bridge — element.setAttribute mutates JS-side attr" {
 }
 
 test "bridge — document.querySelectorAll returns array" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><p>a</p><p>b</p><p>c</p></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><p>a</p><p>b</p><p>c</p></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -567,6 +778,45 @@ test "bridge — document.querySelectorAll returns array" {
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool("document.querySelectorAll('p').length === 3");
+    try std.testing.expect(ok);
+}
+
+test "bridge — element scoped selectors work" {
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><section id=\"scope\"><p class=\"item\">a</p><div><p class=\"item\">b</p></div></section><p class=\"item\">c</p></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    const ok = try eng.evalBool("document.getElementById('scope').querySelectorAll('.item').length === 2");
+    try std.testing.expect(ok);
+}
+
+test "bridge — element matches and closest work" {
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><section class=\"shell\"><div><p id=\"leaf\" class=\"copy\">x</p></div></section></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    const ok = try eng.evalBool("document.getElementById('leaf').matches('p.copy') && document.getElementById('leaf').closest('section.shell').tagName === 'SECTION'");
+    try std.testing.expect(ok);
+}
+
+test "bridge — document.title setter is JS-visible" {
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><head><title>Before</title></head><body></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    const ok = try eng.evalBool("document.title = 'After', document.title === 'After'");
     try std.testing.expect(ok);
 }
 
@@ -621,7 +871,7 @@ test "bridge — MutationObserver is constructable" {
     try eng.eval("const mo = new MutationObserver(function(){}); mo.observe(document.body, {});", "<test>");
 }
 
-test "bridge — localStorage stub does not throw" {
+test "bridge — localStorage stores values" {
     var doc = try dom.parseDocument(std.testing.allocator, "<html><body></body></html>");
     defer doc.deinit();
 
@@ -630,5 +880,23 @@ test "bridge — localStorage stub does not throw" {
     try installDomBridge(&eng, &doc, std.testing.allocator);
     defer removeDomBridge(&eng);
 
-    try eng.eval("localStorage.setItem('key','value'); const v = localStorage.getItem('key');", "<test>");
+    const ok = try eng.evalBool(
+        "localStorage.setItem('key','value'); localStorage.length === 1 && localStorage.getItem('key') === 'value'",
+    );
+    try std.testing.expect(ok);
+}
+
+test "bridge — sessionStorage is distinct from localStorage" {
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    const ok = try eng.evalBool(
+        "localStorage.setItem('shared','local'); sessionStorage.setItem('shared','session'); localStorage.getItem('shared') === 'local' && sessionStorage.getItem('shared') === 'session'",
+    );
+    try std.testing.expect(ok);
 }

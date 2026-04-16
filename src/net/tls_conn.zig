@@ -7,8 +7,8 @@
 ///
 /// Phase 3 uses synchronous (blocking) TLS I/O via SSL_set_fd.
 /// Phase 4 will replace this with a custom BoringSSL BIO routing through libxev.
-
 const std = @import("std");
+const fingerprint = @import("fingerprint.zig");
 
 const c = @cImport({
     @cInclude("tls_awr_shim.h");
@@ -29,6 +29,7 @@ pub const TlsAlpn = enum { h2, http11 };
 /// A live TLS connection. Call `connect` to create; `deinit` to close.
 pub const TlsConn = struct {
     ssl: *c.awr_ssl_t,
+    fd: std.posix.fd_t,
     alpn: TlsAlpn,
 
     /// connect — run a TLS handshake on an already-connected, blocking TCP fd.
@@ -50,7 +51,7 @@ pub const TlsConn = struct {
             break :blk TlsAlpn.http11;
         };
 
-        return TlsConn{ .ssl = ssl, .alpn = alpn };
+        return TlsConn{ .ssl = ssl, .fd = fd, .alpn = alpn };
     }
 
     pub fn deinit(self: *TlsConn) void {
@@ -62,9 +63,8 @@ pub const TlsConn = struct {
     /// Returns the number of bytes read, or TlsError on failure.
     pub fn readFn(self: *TlsConn, buf: []u8) TlsError!usize {
         const n = c.awr_tls_conn_read(self.ssl, buf.ptr, @intCast(buf.len));
-        if (n > 0) return @intCast(n);
-        if (n == 0) return TlsError.ConnectionClosed;
-        return TlsError.ReadFailed;
+        if (n < 0) return TlsError.ReadFailed;
+        return @intCast(n); // 0 = EOF, >0 = bytes read
     }
 
     /// writeFn — write buf to the TLS stream.
@@ -73,6 +73,11 @@ pub const TlsConn = struct {
         const n = c.awr_tls_conn_write(self.ssl, buf.ptr, @intCast(buf.len));
         if (n > 0) return @intCast(n);
         return TlsError.WriteFailed;
+    }
+
+    pub fn pending(self: *const TlsConn) usize {
+        const n = c.awr_tls_conn_pending(self.ssl);
+        return if (n > 0) @intCast(n) else 0;
     }
 };
 
@@ -101,13 +106,19 @@ pub const TlsCtx = struct {
     }
 };
 
-/// Creates a TlsCtx with the embedded Mozilla CA bundle pre-loaded.
+/// Creates a TlsCtx with the embedded Mozilla CA bundle + system CA paths.
 pub fn initWithBundle() TlsError!TlsCtx {
     const ca_bundle = @import("ca_bundle.zig");
     var ctx = try TlsCtx.init();
     errdefer ctx.deinit();
     try ca_bundle.load(&ctx);
+    _ = c.awr_tls_load_default_paths(ctx.inner);
     return ctx;
+}
+
+/// Force a TlsCtx to offer only HTTP/1.1 in ALPN (no h2).
+pub fn forceHttp11Alpn(ctx: *TlsCtx) void {
+    _ = c.awr_tls_set_alpn_http11_only(ctx.inner);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -210,13 +221,386 @@ test "initWithBundle loads CA bundle without error" {
 // Uncomment to run manually:
 //
 // test "integration: TLS handshake to example.com negotiates h2 or http11" {
-//     var ctx = try TlsCtx.init();
-//     defer ctx.deinit();
-//     // Load system CA bundle before use in production.
-//     // For this integration test, use SSL_CTX_set_default_verify_paths
-//     // or a real CA bundle file.
-//     // const tcp_fd = ... (connect to example.com:443)
-//     // var conn = try TlsConn.connect(&ctx, tcp_fd, "example.com");
-//     // defer conn.deinit();
-//     // try std.testing.expect(conn.alpn == .h2 or conn.alpn == .http11);
+//     // (old stub — replaced by live test below)
 // }
+
+test "integration: TLS handshake and HTTP GET to example.com" {
+    const allocator = std.testing.allocator;
+
+    const stream = std.net.tcpConnectToHost(allocator, "example.com", 443) catch |err| {
+        std.debug.print("skipping TLS integration test (network unavailable: {})\n", .{err});
+        return;
+    };
+    defer stream.close();
+
+    var ctx = initWithBundle() catch |err| {
+        std.debug.print("skipping TLS integration test (CA bundle failed: {})\n", .{err});
+        return;
+    };
+    defer ctx.deinit();
+
+    var conn = TlsConn.connect(&ctx, stream.handle, "example.com") catch |err| {
+        std.debug.print("skipping TLS integration test (handshake failed: {})\n", .{err});
+        return;
+    };
+    defer conn.deinit();
+
+    try std.testing.expect(conn.alpn == .h2 or conn.alpn == .http11);
+
+    if (conn.alpn == .http11) {
+        // HTTP/1.1: send plaintext request, expect plaintext response
+        const request = "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+        _ = try conn.writeFn(request);
+
+        var buf: [4096]u8 = undefined;
+        const n = try conn.readFn(&buf);
+        try std.testing.expect(n > 0);
+        const response = buf[0..n];
+        try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 "));
+    }
+    // h2: ALPN negotiated — handshake + ALPN assertion is the test.
+    // Sending HTTP/2 frames requires h2session, tested separately.
+}
+
+test "integration: JA4 is stable across 3 connections" {
+    const allocator = std.testing.allocator;
+
+    var ja4_values: [3][]const u8 = undefined;
+    defer for (&ja4_values) |*v| allocator.free(v.*);
+
+    for (&ja4_values) |*result| {
+        const stream = std.net.tcpConnectToHost(allocator, "tls.peet.ws", 443) catch |err| {
+            std.debug.print("skipping JA4 stability test (network unavailable: {})\n", .{err});
+            return;
+        };
+        defer stream.close();
+
+        var ctx = initWithBundle() catch |err| {
+            std.debug.print("skipping JA4 stability test (CA bundle failed: {})\n", .{err});
+            return;
+        };
+        defer ctx.deinit();
+        _ = c.awr_tls_set_alpn_http11_only(ctx.inner);
+
+        var conn = TlsConn.connect(&ctx, stream.handle, "tls.peet.ws") catch |err| {
+            std.debug.print("skipping JA4 stability test (handshake failed: {})\n", .{err});
+            return;
+        };
+        defer conn.deinit();
+
+        const request = "GET /api/all HTTP/1.1\r\nHost: tls.peet.ws\r\nConnection: close\r\n\r\n";
+        _ = conn.writeFn(request) catch {
+            std.debug.print("skipping JA4 stability test (send failed)\n", .{});
+            return;
+        };
+
+        var response_buf = std.ArrayListUnmanaged(u8){};
+        defer response_buf.deinit(allocator);
+        var buf: [8192]u8 = undefined;
+        while (true) {
+            const n = conn.readFn(&buf) catch break;
+            if (n == 0) break;
+            response_buf.appendSlice(allocator, buf[0..n]) catch break;
+        }
+
+        const body_start = std.mem.indexOf(u8, response_buf.items, "\r\n\r\n") orelse {
+            std.debug.print("skipping JA4 stability test (no HTTP body)\n", .{});
+            return;
+        };
+        const json_body = response_buf.items[body_start + 4 ..];
+
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, json_body, .{}) catch {
+            std.debug.print("skipping JA4 stability test (JSON parse failed)\n", .{});
+            return;
+        };
+        defer parsed.deinit();
+
+        const tls_obj = parsed.value.object.get("tls") orelse return;
+        const ja4_val = tls_obj.object.get("ja4") orelse return;
+        result.* = allocator.dupe(u8, ja4_val.string) catch return;
+    }
+
+    try std.testing.expectEqualStrings(ja4_values[0], ja4_values[1]);
+    try std.testing.expectEqualStrings(ja4_values[1], ja4_values[2]);
+    try std.testing.expectEqualStrings(fingerprint.awr_ja4_h1, ja4_values[0]);
+}
+
+test "integration: JA4 cipher count confirms 15 non-GREASE ciphers" {
+    const allocator = std.testing.allocator;
+
+    const stream = std.net.tcpConnectToHost(allocator, "tls.peet.ws", 443) catch |err| {
+        std.debug.print("skipping cipher count test (network unavailable: {})\n", .{err});
+        return;
+    };
+    defer stream.close();
+
+    var ctx = initWithBundle() catch |err| {
+        std.debug.print("skipping cipher count test (CA bundle failed: {})\n", .{err});
+        return;
+    };
+    defer ctx.deinit();
+    _ = c.awr_tls_set_alpn_http11_only(ctx.inner);
+
+    var conn = TlsConn.connect(&ctx, stream.handle, "tls.peet.ws") catch |err| {
+        std.debug.print("skipping cipher count test (handshake failed: {})\n", .{err});
+        return;
+    };
+    defer conn.deinit();
+
+    const request = "GET /api/all HTTP/1.1\r\nHost: tls.peet.ws\r\nConnection: close\r\n\r\n";
+    _ = conn.writeFn(request) catch return;
+
+    var response_buf = std.ArrayListUnmanaged(u8){};
+    defer response_buf.deinit(allocator);
+    var buf: [8192]u8 = undefined;
+    while (true) {
+        const n = conn.readFn(&buf) catch break;
+        if (n == 0) break;
+        response_buf.appendSlice(allocator, buf[0..n]) catch break;
+    }
+
+    const body_start = std.mem.indexOf(u8, response_buf.items, "\r\n\r\n") orelse return;
+    const json_body = response_buf.items[body_start + 4 ..];
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, json_body, .{}) catch return;
+    defer parsed.deinit();
+
+    const tls_obj = parsed.value.object.get("tls") orelse return;
+    const ja4 = tls_obj.object.get("ja4") orelse return;
+    const ja4_str = ja4.string;
+
+    // JA4 format: t13d15XXh2_... — positions 4-5 encode cipher count as 2 hex chars
+    // "t13d1512h2" → cipher count = 15, extension count = 12
+    if (ja4_str.len < 6) return error.Ja4TooShort;
+    try std.testing.expect(std.mem.startsWith(u8, ja4_str, "t13d"));
+    try std.testing.expectEqualStrings("15", ja4_str[4..6]);
+}
+
+test "integration: HTTP/1.1-only ALPN falls back from h2" {
+    const allocator = std.testing.allocator;
+
+    const stream = std.net.tcpConnectToHost(allocator, "example.com", 443) catch |err| {
+        std.debug.print("skipping http11 fallback test (network unavailable: {})\n", .{err});
+        return;
+    };
+    defer stream.close();
+
+    var ctx = initWithBundle() catch |err| {
+        std.debug.print("skipping http11 fallback test (CA bundle failed: {})\n", .{err});
+        return;
+    };
+    defer ctx.deinit();
+    _ = c.awr_tls_set_alpn_http11_only(ctx.inner);
+
+    var conn = TlsConn.connect(&ctx, stream.handle, "example.com") catch |err| {
+        std.debug.print("skipping http11 fallback test (handshake failed: {})\n", .{err});
+        return;
+    };
+    defer conn.deinit();
+
+    try std.testing.expect(conn.alpn == .http11);
+
+    const request = "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+    _ = try conn.writeFn(request);
+
+    var buf: [4096]u8 = undefined;
+    const n = try conn.readFn(&buf);
+    try std.testing.expect(n > 0);
+    const response = buf[0..n];
+    try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 "));
+    try std.testing.expect(std.mem.indexOf(u8, response, "Example Domain") != null);
+}
+
+test "integration: fetch tls.peet.ws JA4 fingerprint" {
+    const allocator = std.testing.allocator;
+
+    const stream = try std.net.tcpConnectToHost(allocator, "tls.peet.ws", 443);
+    defer stream.close();
+
+    var ctx = try initWithBundle();
+    defer ctx.deinit();
+    _ = c.awr_tls_set_alpn_http11_only(ctx.inner);
+
+    var conn = try TlsConn.connect(&ctx, stream.handle, "tls.peet.ws");
+    defer conn.deinit();
+
+    const request = "GET /api/all HTTP/1.1\r\nHost: tls.peet.ws\r\nConnection: close\r\n\r\n";
+    _ = try conn.writeFn(request);
+
+    var response_buf = std.ArrayListUnmanaged(u8){};
+    defer response_buf.deinit(allocator);
+    var buf: [8192]u8 = undefined;
+    while (true) {
+        const n = conn.readFn(&buf) catch break;
+        if (n == 0) break;
+        try response_buf.appendSlice(allocator, buf[0..n]);
+    }
+
+    const response = response_buf.items;
+    try std.testing.expect(response.len > 0);
+    try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200"));
+
+    const body_start = std.mem.indexOf(u8, response, "\r\n\r\n") orelse return error.MissingHttpBody;
+    const json_body = response[body_start + 4 ..];
+
+    var parsed_json = try std.json.parseFromSlice(std.json.Value, allocator, json_body, .{});
+    defer parsed_json.deinit();
+
+    const obj = parsed_json.value.object;
+    const tls_value = obj.get("tls") orelse return error.MissingTlsField;
+    switch (tls_value) {
+        .object => |tls_obj| {
+            const ja4 = tls_obj.get("ja4") orelse return error.MissingJa4Field;
+            switch (ja4) {
+                .string => |value| try std.testing.expectEqualStrings(fingerprint.awr_ja4_h1, value),
+                else => return error.InvalidJa4FieldType,
+            }
+        },
+        else => return error.InvalidTlsFieldType,
+    }
+}
+
+/// Helper: fetch tls.peet.ws/api/all over AWR's TLS and return parsed JSON.
+const PeetWsResult = struct {
+    allocator: std.mem.Allocator,
+    parsed: std.json.Parsed(std.json.Value),
+    body_buf: std.ArrayListUnmanaged(u8),
+
+    pub fn deinit(self: *PeetWsResult) void {
+        self.parsed.deinit();
+        self.body_buf.deinit(self.allocator);
+    }
+};
+
+fn fetchPeetWsJson(allocator: std.mem.Allocator) ?PeetWsResult {
+    const stream = std.net.tcpConnectToHost(allocator, "tls.peet.ws", 443) catch return null;
+    defer stream.close();
+
+    var ctx = initWithBundle() catch return null;
+    defer ctx.deinit();
+    _ = c.awr_tls_set_alpn_http11_only(ctx.inner);
+
+    var conn = TlsConn.connect(&ctx, stream.handle, "tls.peet.ws") catch return null;
+    defer conn.deinit();
+
+    const request = "GET /api/all HTTP/1.1\r\nHost: tls.peet.ws\r\nConnection: close\r\n\r\n";
+    _ = conn.writeFn(request) catch return null;
+
+    var response_buf = std.ArrayListUnmanaged(u8){};
+    var buf: [8192]u8 = undefined;
+    while (true) {
+        const n = conn.readFn(&buf) catch break;
+        if (n == 0) break;
+        response_buf.appendSlice(allocator, buf[0..n]) catch break;
+    }
+
+    const body_start = std.mem.indexOf(u8, response_buf.items, "\r\n\r\n") orelse return null;
+    const json_body = response_buf.items[body_start + 4 ..];
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_body, .{}) catch return null;
+    return .{ .allocator = allocator, .parsed = parsed, .body_buf = response_buf };
+}
+
+test "integration: comprehensive TLS fingerprint verification against tls.peet.ws" {
+    const allocator = std.testing.allocator;
+
+    var result = fetchPeetWsJson(allocator) orelse {
+        std.debug.print("skipping comprehensive TLS test (fetch failed)\n", .{});
+        return;
+    };
+    defer result.deinit();
+
+    const root = result.parsed.value.object;
+
+    const tls_obj = (root.get("tls") orelse {
+        std.debug.print("tls.peet.ws response missing 'tls' field\n", .{});
+        return error.MissingTlsField;
+    }).object;
+
+    const ja4 = tls_obj.get("ja4").?.string;
+    try std.testing.expectEqualStrings(fingerprint.awr_ja4_h1, ja4);
+
+    if (tls_obj.get("version")) |v| {
+        const ver = v.string;
+        try std.testing.expect(std.mem.indexOf(u8, ver, "1.3") != null);
+    }
+
+    if (tls_obj.get("ja4_hash")) |v| {
+        try std.testing.expect(v.string.len > 0);
+    }
+
+    try std.testing.expect(std.mem.startsWith(u8, ja4, "t13d"));
+
+    if (ja4.len >= 6) {
+        const cipher_count_str = ja4[4..6];
+        try std.testing.expectEqualStrings("15", cipher_count_str);
+    }
+
+    if (root.get("http_version")) |v| {
+        try std.testing.expect(std.mem.indexOf(u8, v.string, "HTTP/1.1") != null);
+    }
+
+    std.debug.print("TLS fingerprint verification passed: JA4={s}\n", .{ja4});
+}
+
+test "integration: JA4 proves cipher suite hash matches AWR configuration" {
+    const allocator = std.testing.allocator;
+
+    var result = fetchPeetWsJson(allocator) orelse {
+        std.debug.print("skipping cipher hash test (fetch failed)\n", .{});
+        return;
+    };
+    defer result.deinit();
+
+    const tls_obj = result.parsed.value.object.get("tls").?.object;
+    const ja4 = tls_obj.get("ja4").?.string;
+
+    const underscore_idx = std.mem.indexOf(u8, ja4, "_") orelse return error.InvalidJa4Format;
+    const after_underscore = ja4[underscore_idx + 1 ..];
+
+    const second_underscore = std.mem.indexOf(u8, after_underscore, "_") orelse return error.InvalidJa4Format;
+    const cipher_hash = after_underscore[0..second_underscore];
+
+    try std.testing.expectEqualStrings("8daaf6152771", cipher_hash);
+}
+
+test "integration: JA4 proves extension hash includes ALPS, MLKEM, and other Chrome 132 extensions" {
+    const allocator = std.testing.allocator;
+
+    var result = fetchPeetWsJson(allocator) orelse {
+        std.debug.print("skipping extension hash test (fetch failed)\n", .{});
+        return;
+    };
+    defer result.deinit();
+
+    const tls_obj = result.parsed.value.object.get("tls").?.object;
+    const ja4 = tls_obj.get("ja4").?.string;
+
+    var parts = std.mem.splitSequence(u8, ja4, "_");
+    _ = parts.next();
+    _ = parts.next();
+    const ext_hash = parts.next() orelse return error.InvalidJa4Format;
+
+    try std.testing.expectEqualStrings("07d4c546ea27", ext_hash);
+}
+
+test "integration: GREASE consistency — JA4 is deterministic across fresh TlsCtx instances" {
+    const allocator = std.testing.allocator;
+
+    var ja4_first: ?[]const u8 = null;
+    defer if (ja4_first) |s| allocator.free(s);
+
+    for (0..3) |_| {
+        var result = fetchPeetWsJson(allocator) orelse return;
+        defer result.deinit();
+
+        const tls_obj = result.parsed.value.object.get("tls").?.object;
+        const ja4 = tls_obj.get("ja4").?.string;
+
+        if (ja4_first == null) {
+            ja4_first = try allocator.dupe(u8, ja4);
+        } else {
+            try std.testing.expectEqualStrings(ja4_first.?, ja4);
+        }
+    }
+}

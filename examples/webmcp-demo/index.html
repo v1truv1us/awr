@@ -1,0 +1,71 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>AWR WebMCP Demo</title>
+</head>
+<body>
+  <h1>AWR WebMCP Demo</h1>
+  <script>
+    const products = [
+      { id: "hat", name: "Agent Hat", price: 19 },
+      { id: "mug", name: "Protocol Mug", price: 12 },
+      { id: "sticker", name: "Tool Sticker", price: 4 }
+    ];
+    const cart = [];
+
+    navigator.modelContext.registerTool({
+      name: "search_products",
+      description: "Search products by query string",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string" }
+        },
+        required: ["query"]
+      },
+      handler(input) {
+        const query = String((input && input.query) || "").toLowerCase();
+        return {
+          items: products.filter((product) => product.name.toLowerCase().includes(query))
+        };
+      }
+    });
+
+    navigator.modelContext.registerTool({
+      name: "get_price",
+      description: "Get the current price for a product id",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string" }
+        },
+        required: ["id"]
+      },
+      handler(input) {
+        const product = products.find((candidate) => candidate.id === input.id);
+        if (!product) return { found: false };
+        return { found: true, id: product.id, price: product.price };
+      }
+    });
+
+    navigator.modelContext.registerTool({
+      name: "add_to_cart",
+      description: "Add a product id to the current cart",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string" }
+        },
+        required: ["id"]
+      },
+      handler(input) {
+        return Promise.resolve().then(() => {
+          cart.push(String(input.id));
+          return { ok: true, cart };
+        });
+      }
+    });
+  </script>
+</body>
+</html>

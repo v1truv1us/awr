@@ -1,5 +1,21 @@
 # Phase 1 Closure Plan
 
+> **PARTIALLY HISTORICAL** — This plan was written when AWR used `curl-impersonate`
+> and `std.http.Client` for HTTPS. The project has since moved to **direct BoringSSL
+> integration**. Many items listed as "production blockers" below have been resolved:
+>
+> | Original Blocker | Current Status |
+> |---|---|
+> | H2 pseudo-header order wrong | **Fixed** — verified by wire-capture test |
+> | Cookie path matching too permissive | **Fixed** — RFC 6265 §5.1.4 boundary check |
+> | HTTPS redirect counter reset | **Fixed** — increments correctly |
+> | Client not ALPN-aware | **Fixed** — routes h2 vs http11 based on negotiation |
+> | Pool not integrated | **Fixed** — acquire/release/close in live paths |
+> | No JA4/ALPS/GREASE verification | **Partially fixed** — JA4 live test exists; wire-level capture for cipher/GREASE/MLKEM/ALPS still needed |
+> | curl-impersonate setup | **Abandoned** — replaced by BoringSSL |
+>
+> See `PHASE1_EXIT_STATUS.md` for the current item-by-item status.
+
 This plan is the production-ready path to close Phase 1 against `awr-spec/Phase1-Networking-TLS.md:739`.
 
 ## Non-Negotiables

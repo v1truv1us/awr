@@ -1,6 +1,16 @@
 # TLS Resume Plan
 
-## Current State
+> **HISTORICAL DOCUMENT** — This plan was written when AWR's TLS strategy was
+> based on `curl-impersonate`. That approach was **abandoned** in favor of
+> direct BoringSSL integration (see `src/net/tls_conn.zig` + `src/net/tls_awr_shim.c`).
+> The curl-impersonate code was removed in commits `61b29c3` and `f2b57cd`.
+>
+> This document is retained for reference only. The current TLS implementation
+> uses vendored BoringSSL with Chrome 132 cipher/extension configuration. See
+> `spec/FINGERPRINT.md` for the captured JA4 fingerprint and `PHASE1_EXIT_STATUS.md`
+> for the current exit criteria status.
+
+## Current State (as originally written)
 
 - `src/net/tls.zig` is still a stub and returns `CurlImpersonateNotAvailable`.
 - `src/client.zig` still routes HTTPS through `std.http.Client` instead of the owned TLS path.

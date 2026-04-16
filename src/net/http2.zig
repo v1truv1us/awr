@@ -129,18 +129,18 @@ pub fn hasChromeH2PseudoOrder(header_names: []const []const u8) bool {
 
 test "SETTINGS frame header has correct type byte" {
     var buf: [128]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try encodeSettings(&chrome132_settings, fbs.writer());
-    const written = fbs.getWritten();
+    var fbs = std.Io.Writer.fixed(&buf);
+    try encodeSettings(&chrome132_settings, &fbs);
+    const written = fbs.buffered();
     // Byte 3 = frame type
     try std.testing.expectEqual(@as(u8, FRAME_SETTINGS), written[3]);
 }
 
 test "SETTINGS frame stream_id is 0" {
     var buf: [128]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try encodeSettings(&chrome132_settings, fbs.writer());
-    const written = fbs.getWritten();
+    var fbs = std.Io.Writer.fixed(&buf);
+    try encodeSettings(&chrome132_settings, &fbs);
+    const written = fbs.buffered();
     // Bytes 5-8 = stream_id (must be 0)
     try std.testing.expectEqual(@as(u8, 0), written[5]);
     try std.testing.expectEqual(@as(u8, 0), written[6]);
@@ -150,9 +150,9 @@ test "SETTINGS frame stream_id is 0" {
 
 test "SETTINGS frame payload length is 4 * 6 = 24 bytes" {
     var buf: [128]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try encodeSettings(&chrome132_settings, fbs.writer());
-    const written = fbs.getWritten();
+    var fbs = std.Io.Writer.fixed(&buf);
+    try encodeSettings(&chrome132_settings, &fbs);
+    const written = fbs.buffered();
     // Bytes 0-2 = length (big-endian u24)
     const length: u32 = (@as(u32, written[0]) << 16) |
                         (@as(u32, written[1]) << 8) |
@@ -164,9 +164,9 @@ test "SETTINGS frame payload length is 4 * 6 = 24 bytes" {
 
 test "SETTINGS frame encodes HEADER_TABLE_SIZE = 65536" {
     var buf: [128]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try encodeSettings(&chrome132_settings, fbs.writer());
-    const written = fbs.getWritten();
+    var fbs = std.Io.Writer.fixed(&buf);
+    try encodeSettings(&chrome132_settings, &fbs);
+    const written = fbs.buffered();
     // First setting starts at byte 9: id=0x0001, value=65536 (0x00010000)
     const payload = written[9..];
     try std.testing.expectEqual(@as(u8, 0x00), payload[0]); // id high
@@ -179,9 +179,9 @@ test "SETTINGS frame encodes HEADER_TABLE_SIZE = 65536" {
 
 test "SETTINGS frame encodes MAX_CONCURRENT_STREAMS = 1000" {
     var buf: [128]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try encodeSettings(&chrome132_settings, fbs.writer());
-    const written = fbs.getWritten();
+    var fbs = std.Io.Writer.fixed(&buf);
+    try encodeSettings(&chrome132_settings, &fbs);
+    const written = fbs.buffered();
     const payload = written[9..]; // skip 9-byte frame header
     // Second setting at offset 6: id=0x0003, value=1000 (0x000003E8)
     try std.testing.expectEqual(@as(u8, 0x00), payload[6]);
@@ -194,9 +194,9 @@ test "SETTINGS frame encodes MAX_CONCURRENT_STREAMS = 1000" {
 
 test "SETTINGS frame encodes INITIAL_WINDOW_SIZE = 6291456" {
     var buf: [128]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try encodeSettings(&chrome132_settings, fbs.writer());
-    const written = fbs.getWritten();
+    var fbs = std.Io.Writer.fixed(&buf);
+    try encodeSettings(&chrome132_settings, &fbs);
+    const written = fbs.buffered();
     const payload = written[9..];
     // Third setting at offset 12: id=0x0004, value=6291456 (0x00600000)
     try std.testing.expectEqual(@as(u8, 0x00), payload[12]);
@@ -209,9 +209,9 @@ test "SETTINGS frame encodes INITIAL_WINDOW_SIZE = 6291456" {
 
 test "SETTINGS frame encodes MAX_HEADER_LIST_SIZE = 262144" {
     var buf: [128]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try encodeSettings(&chrome132_settings, fbs.writer());
-    const written = fbs.getWritten();
+    var fbs = std.Io.Writer.fixed(&buf);
+    try encodeSettings(&chrome132_settings, &fbs);
+    const written = fbs.buffered();
     const payload = written[9..];
     // Fourth setting at offset 18: id=0x0006, value=262144 (0x00040000)
     try std.testing.expectEqual(@as(u8, 0x00), payload[18]);
@@ -224,17 +224,17 @@ test "SETTINGS frame encodes MAX_HEADER_LIST_SIZE = 262144" {
 
 test "WINDOW_UPDATE frame has correct type byte" {
     var buf: [64]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try encodeWindowUpdate(0, fp.h2_connection_window_increment, fbs.writer());
-    const written = fbs.getWritten();
+    var fbs = std.Io.Writer.fixed(&buf);
+    try encodeWindowUpdate(0, fp.h2_connection_window_increment, &fbs);
+    const written = fbs.buffered();
     try std.testing.expectEqual(@as(u8, FRAME_WINDOW_UPDATE), written[3]);
 }
 
 test "WINDOW_UPDATE frame length is 4" {
     var buf: [64]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try encodeWindowUpdate(0, fp.h2_connection_window_increment, fbs.writer());
-    const written = fbs.getWritten();
+    var fbs = std.Io.Writer.fixed(&buf);
+    try encodeWindowUpdate(0, fp.h2_connection_window_increment, &fbs);
+    const written = fbs.buffered();
     const length: u32 = (@as(u32, written[0]) << 16) |
                         (@as(u32, written[1]) << 8) |
                         @as(u32, written[2]);
@@ -244,9 +244,9 @@ test "WINDOW_UPDATE frame length is 4" {
 
 test "WINDOW_UPDATE frame encodes increment 15663105" {
     var buf: [64]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try encodeWindowUpdate(0, @intCast(fp.h2_connection_window_increment), fbs.writer());
-    const written = fbs.getWritten();
+    var fbs = std.Io.Writer.fixed(&buf);
+    try encodeWindowUpdate(0, @intCast(fp.h2_connection_window_increment), &fbs);
+    const written = fbs.buffered();
     // Increment at bytes 9-12: 15663105 = 0x00EF0001
     try std.testing.expectEqual(@as(u8, 0x00), written[9]);
     try std.testing.expectEqual(@as(u8, 0xef), written[10]);
@@ -256,9 +256,9 @@ test "WINDOW_UPDATE frame encodes increment 15663105" {
 
 test "WINDOW_UPDATE stream_id is 0 for connection-level" {
     var buf: [64]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try encodeWindowUpdate(0, 100, fbs.writer());
-    const written = fbs.getWritten();
+    var fbs = std.Io.Writer.fixed(&buf);
+    try encodeWindowUpdate(0, 100, &fbs);
+    const written = fbs.buffered();
     try std.testing.expectEqual(@as(u8, 0), written[5]);
     try std.testing.expectEqual(@as(u8, 0), written[6]);
     try std.testing.expectEqual(@as(u8, 0), written[7]);

@@ -21,7 +21,7 @@ extern "C" {
  *          Return bytes written (>0), or -1 on fatal error.
  *
  * recv_cb: read up to |len| bytes into |buf|.
- *          Return bytes read (>0), 0 on EAGAIN/EWOULDBLOCK, -1 on error.
+ *          Return bytes read (>0), 0 on EAGAIN/EWOULDBLOCK, -2 on EOF, -1 on error.
  */
 typedef int (*awr_h2_send_cb)(const uint8_t *data, size_t len, void *user_data);
 typedef int (*awr_h2_recv_cb)(uint8_t *buf,         size_t len, void *user_data);
@@ -44,6 +44,13 @@ typedef struct {
     char     *headers_buf;
     size_t    headers_buf_len;
 } awr_h2_response_t;
+
+typedef struct {
+    const uint8_t *name;
+    size_t         name_len;
+    const uint8_t *value;
+    size_t         value_len;
+} awr_h2_header_t;
 
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
 
@@ -68,10 +75,18 @@ void awr_h2_session_free(awr_h2_session_t *sess);
  * The caller should call awr_h2_session_run() after this to flush frames.
  */
 int32_t awr_h2_submit_get(awr_h2_session_t *sess,
-                           const char       *method,
-                           const char       *scheme,
-                           const char       *authority,
-                           const char       *path);
+                            const char       *method,
+                            const char       *scheme,
+                            const char       *authority,
+                            const char       *path);
+
+int32_t awr_h2_submit_get_ex(awr_h2_session_t     *sess,
+                              const char           *method,
+                              const char           *scheme,
+                              const char           *authority,
+                              const char           *path,
+                              const awr_h2_header_t *headers,
+                              size_t                header_count);
 
 /* ── I/O pump ─────────────────────────────────────────────────────────── */
 
@@ -93,8 +108,11 @@ int awr_h2_stream_complete(awr_h2_session_t *sess, int32_t stream_id);
  * Returns 0 on success, -1 if stream not found or not complete.
  */
 int awr_h2_get_response(awr_h2_session_t  *sess,
-                         int32_t            stream_id,
-                         awr_h2_response_t *out);
+                          int32_t            stream_id,
+                          awr_h2_response_t *out);
+
+/* Test helper: verifies the shim's pseudo-header construction order. */
+int awr_h2_pseudo_header_order_ok(void);
 
 #ifdef __cplusplus
 }

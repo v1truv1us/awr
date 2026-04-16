@@ -63,6 +63,35 @@ static stream_slot_t *alloc_slot(awr_h2_session_t *s, int32_t sid) {
     return NULL;
 }
 
+static void fill_pseudo_headers(nghttp2_nv *nva,
+                                const char *method,
+                                const char *scheme,
+                                const char *authority,
+                                const char *path) {
+    /* Chrome 132 pseudo-header order: :method, :authority, :scheme, :path */
+    nva[0].name     = (uint8_t *)":method";    nva[0].namelen  = 7;
+    nva[0].value    = (uint8_t *)method;        nva[0].valuelen = strlen(method);
+    nva[0].flags    = NGHTTP2_NV_FLAG_NONE;
+
+    nva[1].name     = (uint8_t *)":authority"; nva[1].namelen  = 10;
+    nva[1].value    = (uint8_t *)authority;     nva[1].valuelen = strlen(authority);
+    nva[1].flags    = NGHTTP2_NV_FLAG_NONE;
+
+    nva[2].name     = (uint8_t *)":scheme";    nva[2].namelen  = 7;
+    nva[2].value    = (uint8_t *)scheme;        nva[2].valuelen = strlen(scheme);
+    nva[2].flags    = NGHTTP2_NV_FLAG_NONE;
+
+    nva[3].name     = (uint8_t *)":path";      nva[3].namelen  = 5;
+    nva[3].value    = (uint8_t *)path;          nva[3].valuelen = strlen(path);
+    nva[3].flags    = NGHTTP2_NV_FLAG_NONE;
+}
+
+static int should_skip_regular_header(const awr_h2_header_t *hdr) {
+    if (!hdr || hdr->name_len == 0) return 1;
+    if (hdr->name[0] == ':') return 1;
+    return hdr->name_len == 4 && strncasecmp((const char *)hdr->name, "host", 4) == 0;
+}
+
 static int slot_append_body(stream_slot_t *sl,
                              const uint8_t *data, size_t len) {
     if (sl->body_len + len > sl->body_cap) {
@@ -115,6 +144,7 @@ static nghttp2_ssize cb_recv(nghttp2_session *session,
     (void)session; (void)flags;
     awr_h2_session_t *s = (awr_h2_session_t *)user_data;
     int n = s->recv_cb(buf, length, s->user_data);
+    if (n == -2) return NGHTTP2_ERR_EOF;
     if (n < 0) return NGHTTP2_ERR_CALLBACK_FAILURE;
     if (n == 0) return NGHTTP2_ERR_WOULDBLOCK;
     return (nghttp2_ssize)n;
@@ -214,40 +244,54 @@ void awr_h2_session_free(awr_h2_session_t *sess) {
     free(sess);
 }
 
+int32_t awr_h2_submit_get_ex(awr_h2_session_t      *sess,
+                              const char            *method,
+                              const char            *scheme,
+                              const char            *authority,
+                              const char            *path,
+                              const awr_h2_header_t *headers,
+                              size_t                 header_count) {
+    size_t regular_count = 0;
+    for (size_t i = 0; i < header_count; i++) {
+        if (!should_skip_regular_header(&headers[i])) regular_count += 1;
+    }
+
+    nghttp2_nv *nva = (nghttp2_nv *)calloc(4 + regular_count, sizeof(*nva));
+    if (!nva) return -1;
+    fill_pseudo_headers(nva, method, scheme, authority, path);
+
+    size_t out = 4;
+    for (size_t i = 0; i < header_count; i++) {
+        if (should_skip_regular_header(&headers[i])) continue;
+        nva[out].name = (uint8_t *)headers[i].name;
+        nva[out].namelen = headers[i].name_len;
+        nva[out].value = (uint8_t *)headers[i].value;
+        nva[out].valuelen = headers[i].value_len;
+        nva[out].flags = NGHTTP2_NV_FLAG_NONE;
+        out += 1;
+    }
+
+    /* alloc_slot first so the callback can find it when headers arrive */
+    int32_t sid = nghttp2_submit_request(sess->ng, NULL, nva, (size_t)out, NULL, NULL);
+    free(nva);
+    if (sid < 0) return -1;
+    if (!alloc_slot(sess, sid)) return -1;
+    return sid;
+}
+
 int32_t awr_h2_submit_get(awr_h2_session_t *sess,
                            const char *method,
                            const char *scheme,
                            const char *authority,
                            const char *path) {
-    nghttp2_nv nva[4];
-    /* Chrome 132 pseudo-header order: :method, :authority, :scheme, :path */
-    nva[0].name     = (uint8_t *)":method";    nva[0].namelen  = 7;
-    nva[0].value    = (uint8_t *)method;       nva[0].valuelen = strlen(method);
-    nva[0].flags    = NGHTTP2_NV_FLAG_NONE;
-
-    nva[1].name     = (uint8_t *)":authority"; nva[1].namelen  = 10;
-    nva[1].value    = (uint8_t *)authority;    nva[1].valuelen = strlen(authority);
-    nva[1].flags    = NGHTTP2_NV_FLAG_NONE;
-
-    nva[2].name     = (uint8_t *)":scheme";    nva[2].namelen  = 7;
-    nva[2].value    = (uint8_t *)scheme;       nva[2].valuelen = strlen(scheme);
-    nva[2].flags    = NGHTTP2_NV_FLAG_NONE;
-
-    nva[3].name     = (uint8_t *)":path";      nva[3].namelen  = 5;
-    nva[3].value    = (uint8_t *)path;         nva[3].valuelen = strlen(path);
-    nva[3].flags    = NGHTTP2_NV_FLAG_NONE;
-
-    /* alloc_slot first so the callback can find it when headers arrive */
-    int32_t sid = nghttp2_submit_request(sess->ng, NULL, nva, 4, NULL, NULL);
-    if (sid < 0) return -1;
-    if (!alloc_slot(sess, sid)) return -1;
-    return sid;
+    return awr_h2_submit_get_ex(sess, method, scheme, authority, path, NULL, 0);
 }
 
 int awr_h2_session_run(awr_h2_session_t *sess) {
     int rc = nghttp2_session_send(sess->ng);
     if (rc != 0) return rc;
     rc = nghttp2_session_recv(sess->ng);
+    if (rc == NGHTTP2_ERR_WOULDBLOCK) return 0;
     if (rc == NGHTTP2_ERR_EOF) return 0;   /* clean connection close */
     return rc;
 }
@@ -272,4 +316,13 @@ int awr_h2_get_response(awr_h2_session_t  *sess,
     sl->hdr_buf = NULL;
     sl->in_use  = 0;
     return 0;
+}
+
+int awr_h2_pseudo_header_order_ok(void) {
+    nghttp2_nv nva[4];
+    fill_pseudo_headers(nva, "GET", "https", "example.com", "/");
+    return nva[0].namelen == 7  && memcmp(nva[0].name, ":method", 7) == 0 &&
+           nva[1].namelen == 10 && memcmp(nva[1].name, ":authority", 10) == 0 &&
+           nva[2].namelen == 7  && memcmp(nva[2].name, ":scheme", 7) == 0 &&
+           nva[3].namelen == 5  && memcmp(nva[3].name, ":path", 5) == 0;
 }

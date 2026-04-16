@@ -13,7 +13,6 @@
 ///   document.querySelectorAll(sel)
 ///   element.getAttribute(name)
 ///   element.textContent              (concatenated text nodes)
-
 const std = @import("std");
 const c = @cImport({
     @cInclude("lexbor/html/html.h");
@@ -29,35 +28,35 @@ const BuildError = error{OutOfMemory};
 pub const NodeKind = enum { document, element, text, comment, other };
 
 pub const Attribute = struct {
-    name:  []const u8,
+    name: []const u8,
     value: []const u8,
 };
 
 pub const Node = union(NodeKind) {
     document: *Document,
-    element:  *Element,
-    text:     *Text,
-    comment:  *Comment,
-    other:    void,
+    element: *Element,
+    text: *Text,
+    comment: *Comment,
+    other: void,
 };
 
 pub const Text = struct {
-    data:   []const u8,
+    data: []const u8,
     parent: ?*Element = null,
 };
 
 pub const Comment = struct {
-    data:   []const u8,
+    data: []const u8,
     parent: ?*Element = null,
 };
 
 // ── Element ───────────────────────────────────────────────────────────────
 
 pub const Element = struct {
-    tag:        []const u8,
+    tag: []const u8,
     attributes: []Attribute,
-    children:   std.ArrayListUnmanaged(Node),
-    parent:     ?*Element,
+    children: std.ArrayListUnmanaged(Node),
+    parent: ?*Element,
 
     pub fn getAttribute(self: *const Element, name: []const u8) ?[]const u8 {
         for (self.attributes) |attr| {
@@ -77,9 +76,9 @@ pub const Element = struct {
     fn collectText(alloc: std.mem.Allocator, elem: *const Element, buf: *std.ArrayList(u8)) void {
         for (elem.children.items) |child| {
             switch (child) {
-                .text    => |t| buf.appendSlice(alloc, t.data) catch {},
+                .text => |t| buf.appendSlice(alloc, t.data) catch {},
                 .element => |e| collectText(alloc, e, buf),
-                else     => {},
+                else => {},
             }
         }
     }
@@ -91,19 +90,48 @@ pub const Element = struct {
         }
         return null;
     }
+
+    pub fn querySelector(self: *const Element, sel: []const u8) ?*Element {
+        for (self.children.items) |child| {
+            if (child == .element) {
+                if (findBySelectorNode(child.element, sel)) |found| return found;
+            }
+        }
+        return null;
+    }
+
+    pub fn querySelectorAll(self: *const Element, sel: []const u8, allocator: std.mem.Allocator) ![]*Element {
+        var out: std.ArrayList(*Element) = .empty;
+        for (self.children.items) |child| {
+            if (child == .element) collectBySelectorNode(allocator, child.element, sel, &out);
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn matches(self: *const Element, sel: []const u8) bool {
+        return matchesSelectorNode(self, sel);
+    }
+
+    pub fn closest(self: *const Element, sel: []const u8) ?*Element {
+        var cur: ?*const Element = self;
+        while (cur) |elem| : (cur = elem.parent) {
+            if (matchesSelectorNode(elem, sel)) return @constCast(elem);
+        }
+        return null;
+    }
 };
 
 // ── Document ──────────────────────────────────────────────────────────────
 
 pub const Document = struct {
     arena: std.heap.ArenaAllocator,
-    root:  ?*Element, // <html> element
+    root: ?*Element, // <html> element
 
     /// Build a Zig Document by walking a live Lexbor document.
     pub fn fromLexbor(gpa: std.mem.Allocator, lxb_doc: *c.lxb_html_document_t) !Document {
         var doc = Document{
             .arena = std.heap.ArenaAllocator.init(gpa),
-            .root  = null,
+            .root = null,
         };
         const alloc = doc.arena.allocator();
         const doc_node: *c.lxb_dom_node_t = @ptrCast(lxb_doc);
@@ -117,7 +145,9 @@ pub const Document = struct {
 
     // ── Accessors ────────────────────────────────────────────────────
 
-    pub fn htmlElement(self: *const Document) ?*Element { return self.root; }
+    pub fn htmlElement(self: *const Document) ?*Element {
+        return self.root;
+    }
 
     pub fn head(self: *const Document) ?*Element {
         return (self.root orelse return null).firstChildByTag("head");
@@ -130,94 +160,121 @@ pub const Document = struct {
     // ── querySelector surface ────────────────────────────────────────
 
     pub fn getElementById(self: *const Document, id: []const u8) ?*Element {
-        return findById(self.root orelse return null, id);
+        return findByIdNode(self.root orelse return null, id);
     }
 
     pub fn querySelector(self: *const Document, sel: []const u8) ?*Element {
-        return findBySelector(self.root orelse return null, sel);
+        return findBySelectorNode(self.root orelse return null, sel);
     }
 
     pub fn querySelectorAll(
-        self:      *const Document,
-        sel:       []const u8,
+        self: *const Document,
+        sel: []const u8,
         allocator: std.mem.Allocator,
     ) ![]*Element {
         var out: std.ArrayList(*Element) = .empty;
-        if (self.root) |root| collectBySelector(allocator, root, sel, &out);
+        if (self.root) |root| collectBySelectorNode(allocator, root, sel, &out);
         return out.toOwnedSlice(allocator);
     }
-
-    // ── Private search helpers ───────────────────────────────────────
-
-    fn findById(elem: *Element, id: []const u8) ?*Element {
-        if (elem.getAttribute("id")) |eid| {
-            if (std.mem.eql(u8, eid, id)) return elem;
-        }
-        for (elem.children.items) |child| {
-            if (child == .element) {
-                if (findById(child.element, id)) |found| return found;
-            }
-        }
-        return null;
-    }
-
-    fn findBySelector(elem: *Element, sel: []const u8) ?*Element {
-        if (matchesSelector(elem, sel)) return elem;
-        for (elem.children.items) |child| {
-            if (child == .element) {
-                if (findBySelector(child.element, sel)) |found| return found;
-            }
-        }
-        return null;
-    }
-
-    fn collectBySelector(alloc: std.mem.Allocator, elem: *Element, sel: []const u8, out: *std.ArrayList(*Element)) void {
-        if (matchesSelector(elem, sel)) out.append(alloc, elem) catch {};
-        for (elem.children.items) |child| {
-            if (child == .element) collectBySelector(alloc, child.element, sel, out);
-        }
-    }
-
-    /// Simple CSS selector: tag | #id | .class | tag#id | tag.class
-    fn matchesSelector(elem: *const Element, sel: []const u8) bool {
-        if (sel.len == 0) return false;
-        if (sel[0] == '#') {
-            const eid = elem.getAttribute("id") orelse return false;
-            return std.mem.eql(u8, eid, sel[1..]);
-        }
-        if (sel[0] == '.') {
-            const ecls = elem.getAttribute("class") orelse return false;
-            return classListContains(ecls, sel[1..]);
-        }
-        if (std.mem.indexOfScalar(u8, sel, '#')) |hp| {
-            if (!std.ascii.eqlIgnoreCase(elem.tag, sel[0..hp])) return false;
-            const eid = elem.getAttribute("id") orelse return false;
-            return std.mem.eql(u8, eid, sel[hp + 1..]);
-        }
-        if (std.mem.indexOfScalar(u8, sel, '.')) |dp| {
-            if (!std.ascii.eqlIgnoreCase(elem.tag, sel[0..dp])) return false;
-            const ecls = elem.getAttribute("class") orelse return false;
-            return classListContains(ecls, sel[dp + 1..]);
-        }
-        return std.ascii.eqlIgnoreCase(elem.tag, sel);
-    }
-
-    fn classListContains(class_attr: []const u8, needle: []const u8) bool {
-        var it = std.mem.splitScalar(u8, class_attr, ' ');
-        while (it.next()) |cls| {
-            if (std.mem.eql(u8, cls, needle)) return true;
-        }
-        return false;
-    }
 };
+
+fn findByIdNode(elem: *Element, id: []const u8) ?*Element {
+    if (elem.getAttribute("id")) |eid| {
+        if (std.mem.eql(u8, eid, id)) return elem;
+    }
+    for (elem.children.items) |child| {
+        if (child == .element) {
+            if (findByIdNode(child.element, id)) |found| return found;
+        }
+    }
+    return null;
+}
+
+fn findBySelectorNode(elem: *Element, sel: []const u8) ?*Element {
+    if (matchesSelectorNode(elem, sel)) return elem;
+    for (elem.children.items) |child| {
+        if (child == .element) {
+            if (findBySelectorNode(child.element, sel)) |found| return found;
+        }
+    }
+    return null;
+}
+
+fn collectBySelectorNode(alloc: std.mem.Allocator, elem: *Element, sel: []const u8, out: *std.ArrayList(*Element)) void {
+    if (matchesSelectorNode(elem, sel)) out.append(alloc, elem) catch {};
+    for (elem.children.items) |child| {
+        if (child == .element) collectBySelectorNode(alloc, child.element, sel, out);
+    }
+}
+
+fn matchesSelectorNode(elem: *const Element, sel: []const u8) bool {
+    const trimmed = std.mem.trim(u8, sel, " \t\r\n");
+    if (trimmed.len == 0) return false;
+
+    var parts_storage: [8][]const u8 = undefined;
+    var count: usize = 0;
+    var it = std.mem.tokenizeAny(u8, trimmed, " \t\r\n");
+    while (it.next()) |part| {
+        if (count >= parts_storage.len) return false;
+        parts_storage[count] = part;
+        count += 1;
+    }
+    if (count == 0) return false;
+
+    return matchesSelectorParts(elem, parts_storage[0..count], count);
+}
+
+fn matchesSelectorParts(elem: *const Element, parts: []const []const u8, len: usize) bool {
+    if (len == 0) return false;
+    if (!matchesSimpleSelector(elem, parts[len - 1])) return false;
+    if (len == 1) return true;
+
+    var cur = elem.parent;
+    while (cur) |ancestor| : (cur = ancestor.parent) {
+        if (matchesSelectorParts(ancestor, parts, len - 1)) return true;
+    }
+    return false;
+}
+
+/// Simple CSS selector: tag | #id | .class | tag#id | tag.class
+fn matchesSimpleSelector(elem: *const Element, sel: []const u8) bool {
+    if (sel.len == 0) return false;
+    if (sel[0] == '#') {
+        const eid = elem.getAttribute("id") orelse return false;
+        return std.mem.eql(u8, eid, sel[1..]);
+    }
+    if (sel[0] == '.') {
+        const ecls = elem.getAttribute("class") orelse return false;
+        return classListContains(ecls, sel[1..]);
+    }
+    if (std.mem.indexOfScalar(u8, sel, '#')) |hp| {
+        if (!std.ascii.eqlIgnoreCase(elem.tag, sel[0..hp])) return false;
+        const eid = elem.getAttribute("id") orelse return false;
+        return std.mem.eql(u8, eid, sel[hp + 1 ..]);
+    }
+    if (std.mem.indexOfScalar(u8, sel, '.')) |dp| {
+        if (!std.ascii.eqlIgnoreCase(elem.tag, sel[0..dp])) return false;
+        const ecls = elem.getAttribute("class") orelse return false;
+        return classListContains(ecls, sel[dp + 1 ..]);
+    }
+    return std.ascii.eqlIgnoreCase(elem.tag, sel);
+}
+
+fn classListContains(class_attr: []const u8, needle: []const u8) bool {
+    var it = std.mem.splitScalar(u8, class_attr, ' ');
+    while (it.next()) |cls| {
+        if (std.mem.eql(u8, cls, needle)) return true;
+    }
+    return false;
+}
 
 // ── Tree builder (Lexbor → Zig nodes) ────────────────────────────────────
 
 /// Walk sibling list starting at lxb_node, return the first Element built.
 fn buildFirstElementChild(
-    alloc:    std.mem.Allocator,
+    alloc: std.mem.Allocator,
     lxb_node: [*c]c.lxb_dom_node_t,
-    parent:   ?*Element,
+    parent: ?*Element,
 ) BuildError!?*Element {
     var cur: [*c]c.lxb_dom_node_t = lxb_node;
     while (cur != null) : (cur = cur[0].next) {
@@ -229,8 +286,8 @@ fn buildFirstElementChild(
 }
 
 fn buildElementNode(
-    alloc:  std.mem.Allocator,
-    node:   *c.lxb_dom_node_t,
+    alloc: std.mem.Allocator,
+    node: *c.lxb_dom_node_t,
     parent: ?*Element,
 ) BuildError!*Element {
     const elem = try alloc.create(Element);
@@ -244,20 +301,20 @@ fn buildElementNode(
     const tag_src: []const u8 = if (tag_ptr != null and tlen > 0) tag_ptr[0..tlen] else "unknown";
 
     elem.* = .{
-        .tag        = try alloc.dupe(u8, tag_src),
+        .tag = try alloc.dupe(u8, tag_src),
         .attributes = try buildAttributes(alloc, @as(*c.lxb_dom_element_t, @ptrCast(node))),
-        .children   = .{},
-        .parent     = parent,
+        .children = .empty,
+        .parent = parent,
     };
     try buildChildren(alloc, elem, node.first_child);
     return elem;
 }
 
 fn buildAttributes(
-    alloc:     std.mem.Allocator,
+    alloc: std.mem.Allocator,
     elem_node: *c.lxb_dom_element_t,
 ) BuildError![]Attribute {
-    var list = std.ArrayListUnmanaged(Attribute){};
+    var list = std.ArrayListUnmanaged(Attribute).empty;
     var attr: [*c]c.lxb_dom_attr_t = c.lxb_dom_element_first_attribute(elem_node);
     while (attr != null) : (attr = c.lxb_dom_element_next_attribute(attr)) {
         var nlen: usize = 0;
@@ -265,11 +322,11 @@ fn buildAttributes(
         if (name_ptr == null or nlen == 0) continue;
 
         var vlen: usize = 0;
-        const val_ptr  = c.lxb_dom_attr_value(attr, &vlen);
-        const val_src: []const u8  = if (val_ptr != null and vlen > 0) val_ptr[0..vlen] else "";
+        const val_ptr = c.lxb_dom_attr_value(attr, &vlen);
+        const val_src: []const u8 = if (val_ptr != null and vlen > 0) val_ptr[0..vlen] else "";
 
         try list.append(alloc, .{
-            .name  = try alloc.dupe(u8, name_ptr[0..nlen]),
+            .name = try alloc.dupe(u8, name_ptr[0..nlen]),
             .value = try alloc.dupe(u8, val_src),
         });
     }
@@ -277,8 +334,8 @@ fn buildAttributes(
 }
 
 fn buildChildren(
-    alloc:       std.mem.Allocator,
-    parent:      *Element,
+    alloc: std.mem.Allocator,
+    parent: *Element,
     first_child: [*c]c.lxb_dom_node_t,
 ) BuildError!void {
     var cur: [*c]c.lxb_dom_node_t = first_child;
@@ -340,8 +397,7 @@ test "parseDocument — body element tag is 'body'" {
 }
 
 test "parseDocument — head element tag is 'head'" {
-    var doc = try parseDocument(std.testing.allocator,
-        "<html><head><title>T</title></head><body></body></html>");
+    var doc = try parseDocument(std.testing.allocator, "<html><head><title>T</title></head><body></body></html>");
     defer doc.deinit();
     const head = doc.head();
     try std.testing.expect(head != null);
@@ -349,8 +405,7 @@ test "parseDocument — head element tag is 'head'" {
 }
 
 test "Document.getElementById — finds by id" {
-    var doc = try parseDocument(std.testing.allocator,
-        "<html><body><div id=\"main\">content</div></body></html>");
+    var doc = try parseDocument(std.testing.allocator, "<html><body><div id=\"main\">content</div></body></html>");
     defer doc.deinit();
     const elem = doc.getElementById("main");
     try std.testing.expect(elem != null);
@@ -358,15 +413,13 @@ test "Document.getElementById — finds by id" {
 }
 
 test "Document.getElementById — null for missing id" {
-    var doc = try parseDocument(std.testing.allocator,
-        "<html><body><div id=\"other\">content</div></body></html>");
+    var doc = try parseDocument(std.testing.allocator, "<html><body><div id=\"other\">content</div></body></html>");
     defer doc.deinit();
     try std.testing.expectEqual(@as(?*Element, null), doc.getElementById("nope"));
 }
 
 test "Document.querySelector — finds by tag" {
-    var doc = try parseDocument(std.testing.allocator,
-        "<html><body><h1>Title</h1></body></html>");
+    var doc = try parseDocument(std.testing.allocator, "<html><body><h1>Title</h1></body></html>");
     defer doc.deinit();
     const h1 = doc.querySelector("h1");
     try std.testing.expect(h1 != null);
@@ -374,8 +427,7 @@ test "Document.querySelector — finds by tag" {
 }
 
 test "Document.querySelector — finds by #id" {
-    var doc = try parseDocument(std.testing.allocator,
-        "<html><body><p id=\"intro\">text</p></body></html>");
+    var doc = try parseDocument(std.testing.allocator, "<html><body><p id=\"intro\">text</p></body></html>");
     defer doc.deinit();
     const elem = doc.querySelector("#intro");
     try std.testing.expect(elem != null);
@@ -383,8 +435,7 @@ test "Document.querySelector — finds by #id" {
 }
 
 test "Document.querySelector — finds by .class" {
-    var doc = try parseDocument(std.testing.allocator,
-        "<html><body><span class=\"highlight bold\">text</span></body></html>");
+    var doc = try parseDocument(std.testing.allocator, "<html><body><span class=\"highlight bold\">text</span></body></html>");
     defer doc.deinit();
     const elem = doc.querySelector(".highlight");
     try std.testing.expect(elem != null);
@@ -392,15 +443,13 @@ test "Document.querySelector — finds by .class" {
 }
 
 test "Document.querySelector — null when not found" {
-    var doc = try parseDocument(std.testing.allocator,
-        "<html><body><p>text</p></body></html>");
+    var doc = try parseDocument(std.testing.allocator, "<html><body><p>text</p></body></html>");
     defer doc.deinit();
     try std.testing.expectEqual(@as(?*Element, null), doc.querySelector("h2"));
 }
 
 test "Document.querySelectorAll — finds all <p> elements" {
-    var doc = try parseDocument(std.testing.allocator,
-        "<html><body><p>a</p><p>b</p><p>c</p></body></html>");
+    var doc = try parseDocument(std.testing.allocator, "<html><body><p>a</p><p>b</p><p>c</p></body></html>");
     defer doc.deinit();
     const results = try doc.querySelectorAll("p", std.testing.allocator);
     defer std.testing.allocator.free(results);
@@ -408,8 +457,7 @@ test "Document.querySelectorAll — finds all <p> elements" {
 }
 
 test "Element.getAttribute — returns value" {
-    var doc = try parseDocument(std.testing.allocator,
-        "<html><body><a href=\"/page\">link</a></body></html>");
+    var doc = try parseDocument(std.testing.allocator, "<html><body><a href=\"/page\">link</a></body></html>");
     defer doc.deinit();
     const a = doc.querySelector("a");
     try std.testing.expect(a != null);
@@ -419,8 +467,7 @@ test "Element.getAttribute — returns value" {
 }
 
 test "Element.getAttribute — case-insensitive" {
-    var doc = try parseDocument(std.testing.allocator,
-        "<html><body><input type=\"text\"/></body></html>");
+    var doc = try parseDocument(std.testing.allocator, "<html><body><input type=\"text\"/></body></html>");
     defer doc.deinit();
     const input = doc.querySelector("input");
     try std.testing.expect(input != null);
@@ -429,8 +476,7 @@ test "Element.getAttribute — case-insensitive" {
 }
 
 test "Element.getAttribute — null for missing attr" {
-    var doc = try parseDocument(std.testing.allocator,
-        "<html><body><div>hello</div></body></html>");
+    var doc = try parseDocument(std.testing.allocator, "<html><body><div>hello</div></body></html>");
     defer doc.deinit();
     const div = doc.querySelector("div");
     try std.testing.expect(div != null);
@@ -438,8 +484,7 @@ test "Element.getAttribute — null for missing attr" {
 }
 
 test "Element.textContent — contains inner text" {
-    var doc = try parseDocument(std.testing.allocator,
-        "<html><body><p>hello <strong>world</strong></p></body></html>");
+    var doc = try parseDocument(std.testing.allocator, "<html><body><p>hello <strong>world</strong></p></body></html>");
     defer doc.deinit();
     const p = doc.querySelector("p") orelse return error.SkipZigTest;
     const text = try p.textContent(std.testing.allocator);
@@ -449,10 +494,41 @@ test "Element.textContent — contains inner text" {
 }
 
 test "querySelector — tag.class compound selector" {
-    var doc = try parseDocument(std.testing.allocator,
-        "<html><body><p class=\"note\">text</p></body></html>");
+    var doc = try parseDocument(std.testing.allocator, "<html><body><p class=\"note\">text</p></body></html>");
     defer doc.deinit();
     const elem = doc.querySelector("p.note");
     try std.testing.expect(elem != null);
     try std.testing.expectEqualStrings("p", elem.?.tag);
+}
+
+test "Document.querySelector — descendant selector" {
+    var doc = try parseDocument(std.testing.allocator, "<html><body><section><div class=\"wrap\"><p id=\"target\">text</p></div></section></body></html>");
+    defer doc.deinit();
+    const elem = doc.querySelector("section p");
+    try std.testing.expect(elem != null);
+    try std.testing.expectEqualStrings("target", elem.?.getAttribute("id").?);
+}
+
+test "Element.querySelector and querySelectorAll scope to descendants" {
+    var doc = try parseDocument(std.testing.allocator, "<html><body><section id=\"a\"><p class=\"item\">one</p></section><section id=\"b\"><p class=\"item\">two</p><div><p class=\"item\">three</p></div></section></body></html>");
+    defer doc.deinit();
+
+    const scope = doc.getElementById("b") orelse return error.SkipZigTest;
+    const first = scope.querySelector(".item");
+    try std.testing.expect(first != null);
+    const all = try scope.querySelectorAll(".item", std.testing.allocator);
+    defer std.testing.allocator.free(all);
+    try std.testing.expectEqual(@as(usize, 2), all.len);
+}
+
+test "Element.matches and closest support descendant-safe slice" {
+    var doc = try parseDocument(std.testing.allocator, "<html><body><section class=\"shell\"><div><p id=\"leaf\" class=\"copy\">text</p></div></section></body></html>");
+    defer doc.deinit();
+
+    const leaf = doc.getElementById("leaf") orelse return error.SkipZigTest;
+    try std.testing.expect(leaf.matches("p.copy"));
+    try std.testing.expect(!leaf.matches("section"));
+    const closest = leaf.closest("section.shell");
+    try std.testing.expect(closest != null);
+    try std.testing.expectEqualStrings("section", closest.?.tag);
 }

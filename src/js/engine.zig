@@ -18,9 +18,35 @@
 ///     descriptive error.
 ///   - console output goes to stderr by default.  Tests that need to
 ///     capture output can pass a custom ConsoleSink.
-
 const std = @import("std");
 const qjs = @import("quickjs");
+
+pub const FetchResponse = struct {
+    status: u16,
+    body: []u8,
+};
+
+pub const FetchHandler = *const fn (
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+    url: []const u8,
+) anyerror!FetchResponse;
+
+pub const CookieGetHandler = *const fn (
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+) anyerror![]u8;
+
+pub const CookieSetHandler = *const fn (
+    ptr: *anyopaque,
+    value: []const u8,
+) anyerror!void;
+
+const TimerTask = struct {
+    id: i32,
+    callback: qjs.Value,
+    is_string: bool,
+};
 
 // ── Public error type ─────────────────────────────────────────────────────
 
@@ -51,9 +77,9 @@ pub const ConsoleSink = struct {
         const S = struct {
             fn w(_: *anyopaque, level: Level, msg: []const u8) void {
                 const prefix: []const u8 = switch (level) {
-                    .log  => "[JS]  ",
+                    .log => "[JS]  ",
                     .warn => "[JS warn] ",
-                    .err  => "[JS error] ",
+                    .err => "[JS error] ",
                 };
                 std.debug.print("{s}{s}\n", .{ prefix, msg });
             }
@@ -66,12 +92,19 @@ pub const ConsoleSink = struct {
 // ── Per-context host data stored as context opaque ───────────────────────
 
 const HostData = struct {
-    sink:      ConsoleSink,
+    sink: ConsoleSink,
     allocator: std.mem.Allocator,
     /// Optional extension pointer set by dom/bridge.zig.
     /// Allows the DOM bridge callbacks to reach the Document without
     /// a circular import dependency.
     extension: ?*anyopaque = null,
+    next_timer_id: i32 = 1,
+    timers: std.ArrayListUnmanaged(TimerTask) = .empty,
+    fetch_ctx: ?*anyopaque = null,
+    fetch_fn: ?FetchHandler = null,
+    cookie_ctx: ?*anyopaque = null,
+    cookie_get_fn: ?CookieGetHandler = null,
+    cookie_set_fn: ?CookieSetHandler = null,
 };
 
 /// Expose HostData so bridge.zig can retrieve it via ctx.getOpaque().
@@ -82,9 +115,9 @@ pub const EngineHostData = HostData;
 /// Owns a QuickJS Runtime + Context with Web APIs installed.
 /// Must outlive any JsValue references obtained from it.
 pub const JsEngine = struct {
-    rt:        *qjs.Runtime,
-    ctx:       *qjs.Context,
-    host:      *HostData,
+    rt: *qjs.Runtime,
+    ctx: *qjs.Context,
+    host: *HostData,
     allocator: std.mem.Allocator,
 
     /// Create a new JsEngine.
@@ -102,15 +135,15 @@ pub const JsEngine = struct {
         const host = allocator.create(HostData) catch return JsError.OutOfMemory;
         errdefer allocator.destroy(host);
         host.* = .{
-            .sink      = sink orelse ConsoleSink.defaultSink(),
+            .sink = sink orelse ConsoleSink.defaultSink(),
             .allocator = allocator,
         };
         ctx.setOpaque(HostData, host);
 
         var engine = JsEngine{
-            .rt        = rt,
-            .ctx       = ctx,
-            .host      = host,
+            .rt = rt,
+            .ctx = ctx,
+            .host = host,
             .allocator = allocator,
         };
         try engine.installWebApis();
@@ -118,6 +151,7 @@ pub const JsEngine = struct {
     }
 
     pub fn deinit(self: *JsEngine) void {
+        self.clearTimers();
         self.ctx.deinit();
         self.rt.deinit();
         self.allocator.destroy(self.host);
@@ -125,31 +159,38 @@ pub const JsEngine = struct {
 
     // ── Evaluation ──────────────────────────────────────────────────────
 
+    fn evalValue(self: *JsEngine, source: []const u8, filename: [:0]const u8) JsError!qjs.Value {
+        const zsrc = self.allocator.allocSentinel(u8, source.len, 0) catch return JsError.OutOfMemory;
+        defer self.allocator.free(zsrc);
+        @memcpy(zsrc[0..source.len], source);
+
+        const result = self.ctx.eval(zsrc[0..source.len], filename, .{});
+        if (result.isException()) {
+            result.deinit(self.ctx);
+            return JsError.EvalException;
+        }
+        return result;
+    }
+
     /// Evaluate a JS source string.
     /// Returns JsError.EvalException on any JS exception.
     pub fn eval(self: *JsEngine, source: []const u8, filename: [:0]const u8) JsError!void {
-        const result = self.ctx.eval(source, filename, .{});
+        const result = try self.evalValue(source, filename);
         defer result.deinit(self.ctx);
-        if (result.isException()) return JsError.EvalException;
     }
 
     /// Evaluate and return a boolean result.
     /// Caller must ensure the expression yields a boolean.
     pub fn evalBool(self: *JsEngine, source: []const u8) JsError!bool {
-        const result = self.ctx.eval(source, "<eval>", .{});
+        const result = try self.evalValue(source, "<eval>");
         defer result.deinit(self.ctx);
-        if (result.isException()) return JsError.EvalException;
         return result.toBool(self.ctx) catch false;
     }
 
     /// Evaluate and return a heap-allocated string result.
     /// Caller owns the returned slice and must free it.
     pub fn evalString(self: *JsEngine, source: []const u8) JsError![]u8 {
-        const val = self.ctx.eval(source, "<eval>", .{});
-        if (val.isException()) {
-            val.deinit(self.ctx);
-            return JsError.EvalException;
-        }
+        const val = try self.evalValue(source, "<eval>");
         defer val.deinit(self.ctx);
         const cstr = val.toCString(self.ctx) orelse return JsError.OutOfMemory;
         defer self.ctx.freeCString(cstr);
@@ -158,9 +199,66 @@ pub const JsEngine = struct {
 
     /// Drain the microtask / Promise job queue.
     pub fn drainMicrotasks(self: *JsEngine) void {
-        while (self.rt.isJobPending()) {
-            _ = self.rt.executePendingJob() catch break;
+        while (true) {
+            var progressed = false;
+            while (self.rt.isJobPending()) {
+                _ = self.rt.executePendingJob() catch break;
+                progressed = true;
+            }
+            const ran_timers = self.evalBool(
+                "typeof __awrDrainTimers === 'function' && __awrDrainTimers() > 0",
+            ) catch false;
+            if (ran_timers) progressed = true;
+            if (!progressed) break;
         }
+    }
+
+    pub fn setFetchHandler(self: *JsEngine, ctx_ptr: *anyopaque, fetch_fn: FetchHandler) void {
+        self.host.fetch_ctx = ctx_ptr;
+        self.host.fetch_fn = fetch_fn;
+    }
+
+    pub fn clearFetchHandler(self: *JsEngine) void {
+        self.host.fetch_ctx = null;
+        self.host.fetch_fn = null;
+    }
+
+    pub fn setCookieHandler(self: *JsEngine, ctx_ptr: *anyopaque, get_fn: CookieGetHandler, set_fn: CookieSetHandler) void {
+        self.host.cookie_ctx = ctx_ptr;
+        self.host.cookie_get_fn = get_fn;
+        self.host.cookie_set_fn = set_fn;
+    }
+
+    pub fn clearCookieHandler(self: *JsEngine) void {
+        self.host.cookie_ctx = null;
+        self.host.cookie_get_fn = null;
+        self.host.cookie_set_fn = null;
+    }
+
+    fn clearTimers(self: *JsEngine) void {
+        for (self.host.timers.items) |*task| {
+            task.callback.deinit(self.ctx);
+        }
+        self.host.timers.deinit(self.allocator);
+    }
+
+    fn runTimers(self: *JsEngine) bool {
+        var ran = false;
+        while (self.host.timers.items.len > 0) {
+            ran = true;
+            const task = self.host.timers.swapRemove(0);
+            defer task.callback.deinit(self.ctx);
+
+            if (task.is_string) {
+                const cstr = task.callback.toCString(self.ctx) orelse continue;
+                defer self.ctx.freeCString(cstr);
+                _ = self.ctx.eval(std.mem.span(cstr), "<timer>", .{});
+            } else {
+                const result = task.callback.call(self.ctx, qjs.Value.undefined, &.{});
+                defer result.deinit(self.ctx);
+            }
+        }
+        return ran;
     }
 
     // ── Property helpers ────────────────────────────────────────────────
@@ -187,15 +285,15 @@ pub const JsEngine = struct {
         const console = qjs.Value.initObject(ctx);
         defer console.deinit(ctx);
 
-        const logFn   = qjs.Value.initCFunction(ctx, consoleLog,   "log",   1);
-        const warnFn  = qjs.Value.initCFunction(ctx, consoleWarn,  "warn",  1);
+        const logFn = qjs.Value.initCFunction(ctx, consoleLog, "log", 1);
+        const warnFn = qjs.Value.initCFunction(ctx, consoleWarn, "warn", 1);
         const errorFn = qjs.Value.initCFunction(ctx, consoleError, "error", 1);
         defer logFn.deinit(ctx);
         defer warnFn.deinit(ctx);
         defer errorFn.deinit(ctx);
 
-        console.setPropertyStr(ctx, "log",   logFn.dup(ctx))   catch return JsError.PropertySetFailed;
-        console.setPropertyStr(ctx, "warn",  warnFn.dup(ctx))  catch return JsError.PropertySetFailed;
+        console.setPropertyStr(ctx, "log", logFn.dup(ctx)) catch return JsError.PropertySetFailed;
+        console.setPropertyStr(ctx, "warn", warnFn.dup(ctx)) catch return JsError.PropertySetFailed;
         console.setPropertyStr(ctx, "error", errorFn.dup(ctx)) catch return JsError.PropertySetFailed;
 
         try self.setGlobal("console", console.dup(ctx));
@@ -225,8 +323,8 @@ pub const JsEngine = struct {
         // Build a space-separated string from all arguments using JSON.stringify
         // for objects and direct toString for primitives.
         var buf: [4096]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
-        const w = fbs.writer();
+        var fbs = std.Io.Writer.fixed(&buf);
+        const w = &fbs;
 
         for (args, 0..) |raw_arg, i| {
             const arg: qjs.Value = @bitCast(raw_arg);
@@ -261,35 +359,59 @@ pub const JsEngine = struct {
             }
         }
 
-        host.sink.write(level, fbs.getWritten());
+        host.sink.write(level, fbs.buffered());
     }
 
     // ── timer stubs ──────────────────────────────────────────────────────
 
     fn installTimerStubs(self: *JsEngine) JsError!void {
-        const ctx = self.ctx;
-        // setTimeout(cb, delay, ...args) → returns 0 (never fires in Phase 2)
-        const setTimeoutFn    = qjs.Value.initCFunction(ctx, timerStub,   "setTimeout",    2);
-        const clearTimeoutFn  = qjs.Value.initCFunction(ctx, timerClear,  "clearTimeout",  1);
-        const setIntervalFn   = qjs.Value.initCFunction(ctx, timerStub,   "setInterval",   2);
-        const clearIntervalFn = qjs.Value.initCFunction(ctx, timerClear,  "clearInterval", 1);
-        defer setTimeoutFn.deinit(ctx);
-        defer clearTimeoutFn.deinit(ctx);
-        defer setIntervalFn.deinit(ctx);
-        defer clearIntervalFn.deinit(ctx);
-
-        try self.setGlobal("setTimeout",    setTimeoutFn.dup(ctx));
-        try self.setGlobal("clearTimeout",  clearTimeoutFn.dup(ctx));
-        try self.setGlobal("setInterval",   setIntervalFn.dup(ctx));
-        try self.setGlobal("clearInterval", clearIntervalFn.dup(ctx));
+        try self.eval(
+            \\globalThis.__awrNextTimerId = 1;
+            \\globalThis.setTimeout = function(cb, delay) {
+            \\  const id = globalThis.__awrNextTimerId++;
+            \\  if (typeof cb === 'function') cb();
+            \\  else eval(String(cb));
+            \\  return id;
+            \\};
+            \\globalThis.clearTimeout = function(id) {};
+            \\globalThis.setInterval = function(cb, delay) {
+            \\  return globalThis.setTimeout(cb, delay);
+            \\};
+            \\globalThis.clearInterval = globalThis.clearTimeout;
+        , "<timer-polyfill>");
     }
 
-    fn timerStub(_: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
-        // Phase 2 stub: return timer ID 0, never fires.
-        return qjs.Value.initInt32(0);
+    fn timerStub(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+        const c = ctx orelse return qjs.Value.initInt32(0);
+        const host = c.getOpaque(HostData) orelse return qjs.Value.initInt32(0);
+        if (args.len == 0) return qjs.Value.initInt32(0);
+
+        const callback = qjs.Value.fromCVal(args[0]);
+        const id = host.next_timer_id;
+        host.next_timer_id += 1;
+        host.timers.append(host.allocator, .{
+            .id = id,
+            .callback = callback.dup(c),
+            .is_string = callback.isString(),
+        }) catch return qjs.Value.exception;
+        return qjs.Value.initInt32(id);
     }
 
-    fn timerClear(_: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
+    fn timerClear(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+        const c = ctx orelse return qjs.Value.undefined;
+        const host = c.getOpaque(HostData) orelse return qjs.Value.undefined;
+        if (args.len == 0) return qjs.Value.undefined;
+
+        const id_val = qjs.Value.fromCVal(args[0]);
+        const id = id_val.toInt32(c) catch return qjs.Value.undefined;
+        var i: usize = 0;
+        while (i < host.timers.items.len) : (i += 1) {
+            if (host.timers.items[i].id == id) {
+                var task = host.timers.swapRemove(i);
+                task.callback.deinit(c);
+                break;
+            }
+        }
         return qjs.Value.undefined;
     }
 
@@ -302,17 +424,73 @@ pub const JsEngine = struct {
         try self.setGlobal("fetch", fetchFn.dup(ctx));
     }
 
-    fn fetchStub(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
+    fn fetchStub(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
         const c = ctx orelse return qjs.Value.undefined;
-        // Return a rejected Promise so code that does `fetch(...).then(...)` fails gracefully.
-        const result = c.eval(
-            "Promise.reject(new Error('fetch() not available in Phase 2 — use Client.fetch() at the Zig layer'))",
+        const host = c.getOpaque(HostData) orelse
+            return c.eval(
+                "Promise.reject(new Error('fetch() not available in Phase 2 — use Client.fetch() at the Zig layer'))",
+                "<fetch-stub>",
+                .{},
+            );
+        if (host.fetch_ctx == null or host.fetch_fn == null or args.len == 0) {
+            return c.eval(
+                "Promise.reject(new Error('fetch() not available in Phase 2 — use Client.fetch() at the Zig layer'))",
+                "<fetch-stub>",
+                .{},
+            );
+        }
+
+        const url_val = qjs.Value.fromCVal(args[0]);
+        const cstr = url_val.toCString(c) orelse return c.eval(
+            "Promise.reject(new Error('fetch() argument must be a string'))",
             "<fetch-stub>",
             .{},
         );
-        return result;
+        defer c.freeCString(cstr);
+
+        const fetched = host.fetch_fn.?(host.fetch_ctx.?, host.allocator, std.mem.span(cstr)) catch {
+            return c.eval(
+                "Promise.reject(new Error('fetch() failed'))",
+                "<fetch-stub>",
+                .{},
+            );
+        };
+        defer host.allocator.free(fetched.body);
+
+        var script: std.ArrayList(u8) = .empty;
+        defer script.deinit(host.allocator);
+
+        script.appendSlice(host.allocator, "Promise.resolve({status:") catch return qjs.Value.exception;
+        const status_str = std.fmt.allocPrint(host.allocator, "{d}", .{fetched.status}) catch return qjs.Value.exception;
+        defer host.allocator.free(status_str);
+        script.appendSlice(host.allocator, status_str) catch return qjs.Value.exception;
+        script.appendSlice(host.allocator, ",ok:") catch return qjs.Value.exception;
+        script.appendSlice(host.allocator, if (fetched.status >= 200 and fetched.status < 300) "true" else "false") catch return qjs.Value.exception;
+        script.appendSlice(host.allocator, ",text:function(){return Promise.resolve(") catch return qjs.Value.exception;
+        appendJsStr(&script, host.allocator, fetched.body) catch return qjs.Value.exception;
+        script.appendSlice(host.allocator, ");},json:function(){return Promise.resolve(JSON.parse(") catch return qjs.Value.exception;
+        appendJsStr(&script, host.allocator, fetched.body) catch return qjs.Value.exception;
+        script.appendSlice(host.allocator, "));}})") catch return qjs.Value.exception;
+        script.append(host.allocator, 0) catch return qjs.Value.exception;
+
+        return c.eval(script.items[0 .. script.items.len - 1], "<fetch-native>", .{});
     }
 };
+
+fn appendJsStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
+    try list.append(alloc, '\'');
+    for (s) |c| {
+        switch (c) {
+            '\'' => try list.appendSlice(alloc, "\\'"),
+            '\\' => try list.appendSlice(alloc, "\\\\"),
+            '\n' => try list.appendSlice(alloc, "\\n"),
+            '\r' => try list.appendSlice(alloc, "\\r"),
+            '\t' => try list.appendSlice(alloc, "\\t"),
+            else => try list.append(alloc, c),
+        }
+    }
+    try list.append(alloc, '\'');
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
@@ -475,7 +653,7 @@ test "JsEngine — Array.from works" {
 test "JsEngine — custom ConsoleSink captures output" {
     const Capture = struct {
         buf: [256]u8 = undefined,
-        len: usize   = 0,
+        len: usize = 0,
 
         fn write(ptr: *anyopaque, _: ConsoleSink.Level, msg: []const u8) void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -487,7 +665,7 @@ test "JsEngine — custom ConsoleSink captures output" {
 
     var cap = Capture{};
     const sink = ConsoleSink{
-        .ptr     = &cap,
+        .ptr = &cap,
         .writeFn = Capture.write,
     };
 
@@ -501,7 +679,7 @@ test "JsEngine — custom ConsoleSink captures output" {
 test "JsEngine — console.log object is serialized as JSON" {
     const Capture = struct {
         buf: [256]u8 = undefined,
-        len: usize   = 0,
+        len: usize = 0,
         fn write(ptr: *anyopaque, _: ConsoleSink.Level, msg: []const u8) void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             const n = @min(msg.len, self.buf.len);

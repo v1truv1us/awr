@@ -27,6 +27,8 @@
 #include <openssl/nid.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 /* ── AWR cipher string ───────────────────────────────────────────────────
  * 15 entries: Chrome 132 list with TLS_RSA_WITH_3DES_EDE_CBC_SHA removed.
@@ -142,6 +144,9 @@ awr_ssl_ctx_t *awr_tls_ctx_new(void) {
     /* Require server certificate verification */
     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
 
+    /* Enable BoringSSL path builder — handles cross-signed chains automatically. */
+    X509_STORE_set_flags(SSL_CTX_get_cert_store(ctx), X509_V_FLAG_PARTIAL_CHAIN);
+
     return (awr_ssl_ctx_t *)ctx;
 
 fail:
@@ -177,6 +182,15 @@ int awr_tls_load_ca_bundle(awr_ssl_ctx_t *ctx,
     return loaded > 0 ? 1 : 0;
 }
 
+int awr_tls_set_alpn_http11_only(awr_ssl_ctx_t *ctx) {
+    static const uint8_t h11[] = { 0x08, 'h','t','t','p','/','1','.','1' };
+    return SSL_CTX_set_alpn_protos((SSL_CTX *)ctx, h11, sizeof(h11)) == 0 ? 1 : 0;
+}
+
+int awr_tls_load_default_paths(awr_ssl_ctx_t *ctx) {
+    return SSL_CTX_set_default_verify_paths((SSL_CTX *)ctx);
+}
+
 /* ── Connection lifecycle ───────────────────────────────────────────────── */
 
 awr_ssl_t *awr_tls_conn_new(awr_ssl_ctx_t *ctx, int fd, const char *hostname) {
@@ -197,6 +211,13 @@ awr_ssl_t *awr_tls_conn_new(awr_ssl_ctx_t *ctx, int fd, const char *hostname) {
         if (!SSL_add_application_settings(ssl, h2_proto, sizeof(h2_proto),
                                            alps_buf, ALPS_BUF_SIZE))
             goto fail;
+    }
+
+    /* Set socket to blocking mode — libxev creates non-blocking sockets,
+     * but SSL_connect() expects blocking I/O. */
+    {
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
     }
 
     /* Attach socket and perform blocking handshake */
@@ -234,6 +255,10 @@ int awr_tls_conn_read(awr_ssl_t *ssl, uint8_t *buf, int len) {
 int awr_tls_conn_write(awr_ssl_t *ssl, const uint8_t *buf, int len) {
     int n = SSL_write((SSL *)ssl, buf, len);
     return (n > 0) ? n : -1;
+}
+
+int awr_tls_conn_pending(const awr_ssl_t *ssl) {
+    return SSL_pending((const SSL *)ssl);
 }
 
 /* ── ALPN result ────────────────────────────────────────────────────────── */

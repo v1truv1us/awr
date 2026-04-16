@@ -1,12 +1,8 @@
 /// h2session.zig — HTTP/2 session layer for AWR.
 ///
-/// STATUS: NOT YET WIRED into the active fetch path.
-/// HTTPS fetches currently go through client.zig's `fetchHttpsViaStd`
-/// (std.http.Client / std.crypto.tls), which handles HTTP/2 via OS/stdlib ALPN.
-///
-/// TODO(Phase 3): Wire h2session.zig into AWR's own BoringSSL TLS stack so that
-/// AWR fully owns the HTTP/2 connection including ALPN negotiation, stream
-/// multiplexing, and header compression.
+/// STATUS: WIRED into the owned HTTPS fetch path for single-request H2 GETs.
+/// Remaining gaps are verification depth, richer request headers, and any future
+/// multi-stream/session reuse work.
 ///
 /// Provides H2Session: a client-side HTTP/2 session that drives I/O
 /// through caller-supplied send/recv callbacks and accumulates a full
@@ -24,6 +20,7 @@
 ///   const resp = try sess.runUntilComplete(sid);
 ///   defer resp.deinit(allocator);
 const std = @import("std");
+const fingerprint = @import("fingerprint.zig");
 
 const c = @cImport({
     @cInclude("h2_shim.h");
@@ -32,15 +29,15 @@ const c = @cImport({
 // ── Public response type ────────────────────────────────────────────────
 
 pub const H2Response = struct {
-    status:  u16,
-    body:    []u8,
-    headers: []u8,   // raw name\0value\0 buffer — iterate with headerIterator()
+    status: u16,
+    body: []u8,
+    headers: []u8, // raw name\0value\0 buffer — iterate with headerIterator()
 
     /// Free memory returned from awr_h2_get_response.
     pub fn deinit(self: *H2Response) void {
-        if (self.body.len > 0)    std.c.free(self.body.ptr);
+        if (self.body.len > 0) std.c.free(self.body.ptr);
         if (self.headers.len > 0) std.c.free(self.headers.ptr);
-        self.body    = &.{};
+        self.body = &.{};
         self.headers = &.{};
     }
 
@@ -89,13 +86,14 @@ pub const H2Error = error{
 pub const H2Session = struct {
     sess: *c.awr_h2_session_t,
 
+    pub const HeaderField = c.awr_h2_header_t;
+
     pub fn init(
-        send_cb:   c.awr_h2_send_cb,
-        recv_cb:   c.awr_h2_recv_cb,
+        send_cb: c.awr_h2_send_cb,
+        recv_cb: c.awr_h2_recv_cb,
         user_data: ?*anyopaque,
     ) H2Error!H2Session {
-        const s = c.awr_h2_session_new(send_cb, recv_cb, user_data)
-            orelse return H2Error.SessionCreateFailed;
+        const s = c.awr_h2_session_new(send_cb, recv_cb, user_data) orelse return H2Error.SessionCreateFailed;
         return H2Session{ .sess = s };
     }
 
@@ -105,13 +103,25 @@ pub const H2Session = struct {
 
     /// Queue a GET request. Returns the nghttp2 stream_id.
     pub fn submitGet(
-        self:      *H2Session,
-        method:    [*:0]const u8,
-        scheme:    [*:0]const u8,
+        self: *H2Session,
+        method: [*:0]const u8,
+        scheme: [*:0]const u8,
         authority: [*:0]const u8,
-        path:      [*:0]const u8,
+        path: [*:0]const u8,
     ) H2Error!i32 {
-        const sid = c.awr_h2_submit_get(self.sess, method, scheme, authority, path);
+        return self.submitGetWithHeaders(method, scheme, authority, path, &.{});
+    }
+
+    pub fn submitGetWithHeaders(
+        self: *H2Session,
+        method: [*:0]const u8,
+        scheme: [*:0]const u8,
+        authority: [*:0]const u8,
+        path: [*:0]const u8,
+        headers: []const HeaderField,
+    ) H2Error!i32 {
+        const header_ptr = if (headers.len == 0) null else headers.ptr;
+        const sid = c.awr_h2_submit_get_ex(self.sess, method, scheme, authority, path, header_ptr, headers.len);
         if (sid < 0) return H2Error.SubmitFailed;
         return sid;
     }
@@ -136,11 +146,12 @@ pub const H2Session = struct {
             return H2Error.ResponseError;
 
         return H2Response{
-            .status  = raw.status,
-            .body    = if (raw.body != null) raw.body[0..raw.body_len] else &.{},
+            .status = raw.status,
+            .body = if (raw.body != null) raw.body[0..raw.body_len] else &.{},
             .headers = if (raw.headers_buf != null)
-                           @as([*]u8, @ptrCast(raw.headers_buf))[0..raw.headers_buf_len]
-                       else &.{},
+                @as([*]u8, @ptrCast(raw.headers_buf))[0..raw.headers_buf_len]
+            else
+                &.{},
         };
     }
 };
@@ -151,8 +162,8 @@ test "HeaderIterator parses name/value pairs" {
     // Simulate the flat name\0value\0 buffer layout
     const buf = "content-type\x00text/html\x00content-length\x0042\x00";
     const response = H2Response{
-        .status  = 200,
-        .body    = &.{},
+        .status = 200,
+        .body = &.{},
         .headers = @constCast(buf[0..buf.len]),
     };
     var it = response.headerIterator();
@@ -175,8 +186,58 @@ test "HeaderIterator returns null on empty buffer" {
 }
 
 // Minimal no-op I/O callbacks used by unit tests that don't exercise the wire.
-fn noop_send(_: [*c]const u8, _: usize, _: ?*anyopaque) callconv(.c) c_int { return 0; }
-fn noop_recv(_: [*c]u8,       _: usize, _: ?*anyopaque) callconv(.c) c_int { return 0; }
+fn noop_send(_: [*c]const u8, _: usize, _: ?*anyopaque) callconv(.c) c_int {
+    return 0;
+}
+fn noop_recv(_: [*c]u8, _: usize, _: ?*anyopaque) callconv(.c) c_int {
+    return 0;
+}
+
+const CaptureCtx = struct {
+    bytes: std.ArrayListUnmanaged(u8) = .empty,
+
+    fn deinit(self: *CaptureCtx, allocator: std.mem.Allocator) void {
+        self.bytes.deinit(allocator);
+    }
+
+    fn send(data: [*c]const u8, len: usize, ud: ?*anyopaque) callconv(.c) c_int {
+        const ctx: *@This() = @ptrCast(@alignCast(ud.?));
+        ctx.bytes.appendSlice(std.testing.allocator, data[0..len]) catch return -1;
+        return @intCast(len);
+    }
+
+    fn recv(_: [*c]u8, _: usize, _: ?*anyopaque) callconv(.c) c_int {
+        return 0;
+    }
+};
+
+const Frame = struct {
+    length: usize,
+    frame_type: u8,
+    flags: u8,
+    stream_id: u32,
+    payload: []const u8,
+    next_offset: usize,
+};
+
+fn parseFrame(bytes: []const u8, offset: usize) !Frame {
+    if (bytes.len < offset + 9) return error.TruncatedFrameHeader;
+    const length = (@as(usize, bytes[offset]) << 16) |
+        (@as(usize, bytes[offset + 1]) << 8) |
+        @as(usize, bytes[offset + 2]);
+    const end = offset + 9 + length;
+    if (bytes.len < end) return error.TruncatedFramePayload;
+
+    const stream_id = std.mem.readInt(u32, bytes[offset + 5 .. offset + 9][0..4], .big) & 0x7fffffff;
+    return .{
+        .length = length,
+        .frame_type = bytes[offset + 3],
+        .flags = bytes[offset + 4],
+        .stream_id = stream_id,
+        .payload = bytes[offset + 9 .. end],
+        .next_offset = end,
+    };
+}
 
 test "H2Session.init and deinit succeed with no-op callbacks" {
     var sess = try H2Session.init(noop_send, noop_recv, null);
@@ -191,4 +252,47 @@ test "H2Session.submitGet returns a positive stream_id" {
     // nghttp2 assigns odd stream IDs starting at 1.
     try std.testing.expect(sid > 0);
     try std.testing.expect(@rem(sid, 2) == 1);
+}
+
+test "first run sends client preface, Chrome-like SETTINGS, and connection WINDOW_UPDATE" {
+    var capture = CaptureCtx{};
+    defer capture.deinit(std.testing.allocator);
+
+    var sess = try H2Session.init(CaptureCtx.send, CaptureCtx.recv, &capture);
+    defer sess.deinit();
+
+    try std.testing.expect(!(try sess.run(1)));
+
+    const bytes = capture.bytes.items;
+    const preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    try std.testing.expect(bytes.len >= preface.len + 9);
+    try std.testing.expectEqualStrings(preface, bytes[0..preface.len]);
+
+    const settings = try parseFrame(bytes, preface.len);
+    try std.testing.expectEqual(@as(u8, 0x4), settings.frame_type);
+    try std.testing.expectEqual(@as(u8, 0x0), settings.flags);
+    try std.testing.expectEqual(@as(u32, 0), settings.stream_id);
+    try std.testing.expectEqual(@as(usize, 24), settings.length);
+
+    try std.testing.expectEqual(@as(u16, 0x1), std.mem.readInt(u16, settings.payload[0..2], .big));
+    try std.testing.expectEqual(fingerprint.h2_header_table_size, std.mem.readInt(u32, settings.payload[2..6], .big));
+    try std.testing.expectEqual(@as(u16, 0x3), std.mem.readInt(u16, settings.payload[6..8], .big));
+    try std.testing.expectEqual(fingerprint.h2_max_concurrent_streams, std.mem.readInt(u32, settings.payload[8..12], .big));
+    try std.testing.expectEqual(@as(u16, 0x4), std.mem.readInt(u16, settings.payload[12..14], .big));
+    try std.testing.expectEqual(fingerprint.h2_initial_window_size, std.mem.readInt(u32, settings.payload[14..18], .big));
+    try std.testing.expectEqual(@as(u16, 0x6), std.mem.readInt(u16, settings.payload[18..20], .big));
+    try std.testing.expectEqual(fingerprint.h2_max_header_list_size, std.mem.readInt(u32, settings.payload[20..24], .big));
+
+    const window_update = try parseFrame(bytes, settings.next_offset);
+    try std.testing.expectEqual(@as(u8, 0x8), window_update.frame_type);
+    try std.testing.expectEqual(@as(u32, 0), window_update.stream_id);
+    try std.testing.expectEqual(@as(usize, 4), window_update.length);
+    try std.testing.expectEqual(
+        fingerprint.h2_connection_window_increment,
+        std.mem.readInt(u32, window_update.payload[0..4], .big) & 0x7fffffff,
+    );
+}
+
+test "h2 shim keeps Chrome pseudo-header order" {
+    try std.testing.expectEqual(@as(c_int, 1), c.awr_h2_pseudo_header_order_ok());
 }

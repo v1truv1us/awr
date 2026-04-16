@@ -1,0 +1,43 @@
+Segmentation fault at address 0x104900028
+???:?:?: 0x181635524 in ??? (libsystem_platform.dylib)
+/opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/Io/Writer.zig:532:51: 0x10424290b in writeAll (awr)
+    while (index < bytes.len) index += try w.write(bytes[index..]);
+                                                  ^
+/opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/Io/Writer.zig:985:26: 0x10427242f in alignBuffer (awr)
+        return w.writeAll(buffer);
+                         ^
+/opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/Io/Writer.zig:1007:25: 0x10425450b in alignBufferOptions (awr)
+    return w.alignBuffer(buffer, options.width orelse buffer.len, options.alignment, options.fill);
+                        ^
+/opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/Io/Writer.zig:1123:52: 0x1042528d7 in printValue__anon_7877 (awr)
+                        return w.alignBufferOptions(slice, options);
+                                                   ^
+/opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/Io/Writer.zig:700:25: 0x1043065f3 in print__anon_24866 (awr)
+        try w.printValue(
+                        ^
+/opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/fmt.zig:614:12: 0x1042e2893 in bufPrint__anon_23909 (awr)
+    w.print(fmt, args) catch |err| switch (err) {
+           ^
+/Users/johnferguson/Github/awr/src/client.zig:105:46: 0x1042db3af in fetchUrl (awr)
+            const full_url = std.fmt.bufPrint(&url_buf, "https://{s}:{d}{s}", .{
+                                             ^
+/Users/johnferguson/Github/awr/src/client.zig:217:37: 0x1042e405f in fetchHttp (awr)
+                return self.fetchUrl(next_url, redirect_count + 1);
+                                    ^
+/Users/johnferguson/Github/awr/src/client.zig:112:30: 0x1042db2fb in fetchUrl (awr)
+        return self.fetchHttp(parsed, redirect_count);
+                             ^
+/Users/johnferguson/Github/awr/src/client.zig:93:29: 0x1042d3743 in fetch (awr)
+        return self.fetchUrl(parsed, 0);
+                            ^
+/Users/johnferguson/Github/awr/src/page.zig:104:41: 0x1042d357b in navigate (awr)
+        var resp = try self.client.fetch(url);
+                                        ^
+/Users/johnferguson/Github/awr/src/main.zig:49:28: 0x1042d53d7 in main (awr)
+    var result = p.navigate(url) catch |err| {
+                           ^
+/opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/start.zig:627:37: 0x1042d6e83 in main (awr)
+            const result = root.main() catch |err| {
+                                    ^
+???:?:?: 0x181261d53 in ??? (???)
+???:?:?: 0x0 in ??? (???)
