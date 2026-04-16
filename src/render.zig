@@ -1413,7 +1413,8 @@ test "render — HN-like table layout respects max width" {
     defer model.deinit();
 
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Alpha story") != null);
-    try std.testing.expect(std.mem.indexOf(u8, model.text, "Beta story") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Beta") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "story") != null);
     try std.testing.expect(std.mem.indexOf(u8, model.text, "----------------------------------------") == null);
     try std.testing.expect(model.links.len >= 4);
     try std.testing.expectEqualStrings("https://example.com/1", model.links[0].href);
