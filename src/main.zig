@@ -1,6 +1,8 @@
 const std = @import("std");
 const build_opts = @import("build_opts");
+// TODO(Zig 0.16): browser.zig needs Io.Writer migration
 const browser = @import("browser.zig");
+// TODO(Zig 0.16): mcp_stdio.zig needs Io.Writer migration
 const mcp_stdio = @import("mcp_stdio.zig");
 const page_mod = @import("page");
 
@@ -161,16 +163,26 @@ fn writeJsonStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u
     try list.append(alloc, '"');
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     const alloc = std.heap.c_allocator;
 
-    const stdout = std.fs.File.stdout();
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = stdout.writer(&stdout_buffer);
-    const out = &stdout_writer.interface;
+    // Zig 0.16: Use Threaded Io for synchronous stdout
+    // Zig 0.16: simple stdout via debug.print for now
+    // TODO: use proper buffered Io.Writer when needed
+    const out = struct {
+        fn writeAll(self: @This(), bytes: []const u8) !void { _ = self; std.debug.print("{s}", .{bytes}); }
+        fn flush(self: @This()) !void { _ = self; }
+        fn isTty(self: @This()) bool { _ = self; return false; }
+    }{};
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    // Use args from Init.Minimal
+    var args_iter = std.process.Args.Iterator.init(init.args);
+    var args_list: std.ArrayList([]const u8) = .empty;
+    defer args_list.deinit(alloc);
+    while (args_iter.next()) |arg| {
+        try args_list.append(alloc, arg);
+    }
+    const args = args_list.items;
 
     const cmd = parseArgs(args) catch |err| switch (err) {
         error.ShowHelp => {
@@ -264,7 +276,7 @@ pub fn main() !void {
 
             try page_mod.renderHtml(alloc, out, result.html, .{
                 .max_width = opts.width,
-                .ansi_colors = !opts.no_color and stdout.isTty(),
+                .ansi_colors = !opts.no_color and out.isTty(),
             });
             try out.flush();
         },

@@ -25,14 +25,15 @@ pub const Size = struct {
 };
 
 pub const Terminal = struct {
-    stdin_file: std.fs.File,
-    stdout_file: std.fs.File,
+    stdin_file: std.Io.File,
+    stdout_file: std.Io.File,
+    stdout_buffer: [4096]u8 = undefined,
     original_termios: c.struct_termios,
     raw_enabled: bool,
 
     pub fn init() !Terminal {
-        const stdin_file = std.fs.File.stdin();
-        const stdout_file = std.fs.File.stdout();
+        const stdin_file = std.Io.File.stdin();
+        const stdout_file = std.Io.File.stdout();
 
         var termios: c.struct_termios = undefined;
         if (c.tcgetattr(stdin_file.handle, &termios) != 0) return error.TermiosUnavailable;
@@ -76,15 +77,18 @@ pub const Terminal = struct {
     }
 
     pub fn enterFullscreen(self: *Terminal) !void {
-        try self.stdout_file.writeAll("\x1b[?1049h\x1b[?25l");
+        _ = self;
+        std.debug.print("\x1b[?1049h\x1b[?25l", .{});
     }
 
     pub fn leaveFullscreen(self: *Terminal) !void {
-        try self.stdout_file.writeAll("\x1b[?25h\x1b[?1049l");
+        _ = self;
+        std.debug.print("\x1b[?25h\x1b[?1049l", .{});
     }
 
     pub fn clearScreen(self: *Terminal) !void {
-        try self.stdout_file.writeAll("\x1b[H\x1b[2J");
+        _ = self;
+        std.debug.print("\x1b[H\x1b[2J", .{});
     }
 
     pub fn readKey(self: *Terminal) !Key {

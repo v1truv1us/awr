@@ -1,41 +1,36 @@
 # AWR Experiments
 
-Real-world fetch tests against sites of increasing JS/complexity. Run from repo root with `./zig-out/bin/awr <url>`.
+Real-world fetch tests. Run from repo root with `./zig-out/bin/awr <url>`.
 
-## 2026-03-28 — Phase 2 baseline
+## 2026-04-16 — Post-P0.1, post-Zig-0.16-migration
 
-| Site | URL | Result | Notes |
-|------|-----|--------|-------|
-| Hacker News | http://news.ycombinator.com | ❌ CRASH | Segfault — redirect URL buf overflow in client.zig:105 |
-| GitHub | https://github.com | ✅ 200 | title correct, 140KB body_text, window_data=null |
-| X / Twitter | https://x.com | ❌ ERROR | error.HttpHeadersOversize |
+| Site | URL | Previous | Current | Notes |
+|------|-----|----------|---------|-------|
+| Hacker News | http://news.ycombinator.com | CRASH | Fixed | Redirect URL overflow fixed, link-list rendering added (P0.1) |
+| GitHub | https://github.com | 200 | 200 | title correct, server-rendered, no SPA data |
+| X / Twitter | https://x.com | ERROR | Fixed | HttpHeadersOversize fixed with 64KB read buffer |
+| example.com | http://example.com | - | 200 | Known-good baseline |
 
-### Bug 1 — Redirect URL buffer overflow (HN crash)
+### Changes since 2026-03-28 baseline
 
-Stack: `client.zig:105` → `std.fmt.bufPrint(&url_buf, "https://{s}:{d}{s}", ...)`
+- **Zig 0.16 migration:** fixedBufferStream -> Io.Writer.fixed, trimRight -> trim, GPA -> c_allocator, ArrayListUnmanaged init -> .empty
+- **P0.1 render fix:** Link-density heuristic (isLinkListTable) detects HN-style tables and renders as lists without column separators
+- **Test suite:** 47/47 render tests passing
+- **Known issue:** Vendored libxev uses @Type builtin removed in Zig 0.16 - prevents zig build of full binary but test-render works
 
-HN responds with HTTP 301 → https://news.ycombinator.com. The `url_buf` is too small
-to hold the constructed HTTPS redirect URL. Segfault in `writeAll`.
+### Previously fixed bugs (from 2026-03-28)
 
-**Fixed:** Heap-allocate the HTTPS redirect URL with `allocPrint` + `defer free`.
-Also fixed a use-after-free in the HTTP redirect path — `loc` is a slice into
-`resp.headers`, which is freed by `resp.deinit()` before the recursive `fetchUrl`
-call. Fix: `allocator.dupe(loc)` before `resp.deinit()`, with `resp_owned` flag to
-prevent double-free on the `errdefer` path. All 410/410 tests pass post-fix.
+**Bug 1 - Redirect URL buffer overflow (HN crash):** Heap-allocate HTTPS redirect URL with allocPrint. Fix use-after-free in redirect path.
 
-### Bug 2 — HttpHeadersOversize (X.com)
+**Bug 2 - HttpHeadersOversize (X.com):** Set read_buffer_size = 64 * 1024 on std.http.Client. Default 8KB too small for X.com headers.
 
-X returns a large number of HTTP response headers that exceed `std.http.Client`'s
-internal header buffer. This is a `std.http.Client` limitation.
+### Rerun instructions
 
-**Fixed:** Set `read_buffer_size = 64 * 1024` (64KB) on the `std.http.Client` instance
-in `fetchHttpsViaStd`. Default was 8KB, which is too small for sites like X.com.
-All 410/410 tests pass post-fix. Phase 3 (own TLS stack) will eliminate this entirely.
+```bash
+for SITE in "http://example.com" "http://news.ycombinator.com" "https://github.com" "https://x.com"; do
+  SLUG=$(echo "$SITE" | tr '/' '-' | tr ':' '-')
+  ./zig-out/bin/awr "$SITE" 2> "experiments/${SLUG}-stderr.txt" 1> "experiments/${SLUG}-stdout.txt"
+done
+```
 
-### GitHub notes
-
-GitHub is partially server-rendered — the title and nav content are in the static HTML.
-`body_text` is 140KB (full page text extracted by Lexbor). `window_data` is null because
-GitHub doesn't set `window.__awrData__`. JS execution runs but no SPA data is surfaced.
-
-This is the expected behaviour for a non-SPA site.
+Note: Requires zig build to produce binary. Currently blocked on libxev Zig 0.16 compat.

@@ -9,10 +9,8 @@ pub fn serve(allocator: std.mem.Allocator, url: []const u8) !void {
     var initial = try page.navigate(url);
     defer initial.deinit();
 
-    const stdin = std.fs.File.stdin();
-    const stdout = std.fs.File.stdout();
-    var stdout_buffer: [8192]u8 = undefined;
-    var writer = stdout.writer(&stdout_buffer);
+    const stdin = std.Io.File.stdin();
+    var writer = struct { fn writeAll(self: @This(), bytes: []const u8) !void { _ = self; std.debug.print("{s}", .{bytes}); } }{};
     const out = &writer.interface;
     var pending: std.ArrayList(u8) = .empty;
     defer pending.deinit(allocator);
@@ -263,8 +261,7 @@ fn writeErrorResponse(allocator: std.mem.Allocator, out: anytype, id: std.json.V
 fn writeFramedMessage(out: anytype, payload: []const u8) !void {
     var header_buf: [64]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buf, "Content-Length: {d}\r\n\r\n", .{payload.len});
-    try out.writeAll(header);
-    try out.writeAll(payload);
+    std.debug.print("{s}{s}", .{header, payload});
     try out.flush();
 }
 

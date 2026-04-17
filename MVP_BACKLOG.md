@@ -1,6 +1,6 @@
 # AWR MVP — Flat Backlog
 
-Single source of truth for outstanding MVP work on the CLI-first terminal browser. Supersedes the phase-named planning docs (`PHASE1_EXIT_STATUS.md`, `PHASE1_CLOSURE_PLAN.md`, `PHASE2_START_PLAN.md`, `TLS_RESUME_PLAN.md`, `spec/Phase3-Plan.md`) — those remain as history, but priority and ordering live here.
+Single source of truth for outstanding MVP work on the CLI-first terminal browser. Supersedes the phase-named planning docs (`archive/PHASE1_EXIT_STATUS.md`, `archive/PHASE1_CLOSURE_PLAN.md`, `archive/PHASE2_START_PLAN.md`, `archive/TLS_RESUME_PLAN.md`, `spec/Fingerprint-Plan.md`) — those remain as history, but priority and ordering live here.
 
 Solo ledger: each priority block below has a corresponding `solo` task. Claim one with `solo session start <task-id> --worker <agent-id> --json` before editing.
 
@@ -64,11 +64,11 @@ Current `tests/test262_runner.zig` has 7 cases. Grow to ~20 cases. QuickJS-NG su
 
 **5. Add explicit MLKEM768 key share byte-level assertion** (solo: new)
 
-`PHASE1_EXIT_STATUS.md:60` item 4 is "partial" — JA4 covers it indirectly but no byte-level proof exists. Add an assertion in `src/net/tls_conn.zig` tests that X25519MLKEM768 key share is at `named_groups[1]` with 1216-byte payload. Verification, not implementation — code already produces correct bytes.
+`archive/PHASE1_EXIT_STATUS.md:60` item 4 is "partial" — JA4 covers it indirectly but no byte-level proof exists. Add an assertion in `src/net/tls_conn.zig` tests that X25519MLKEM768 key share is at `named_groups[1]` with 1216-byte payload. Verification, not implementation — code already produces correct bytes.
 
 **6. Add concurrent max-6-per-origin pool stress test** (solo: new)
 
-`PHASE1_EXIT_STATUS.md:132` item 11 is "partial". `src/net/pool.zig:413` has a basic thread test but doesn't exercise race conditions on acquire/release. Add a sustained-load stress test that spawns >6 concurrent requests to one origin and asserts pool never exceeds 6 connections. Reuse the local HTTP test server pattern from `src/test_e2e.zig`.
+`archive/PHASE1_EXIT_STATUS.md:132` item 11 is "partial". `src/net/pool.zig:413` has a basic thread test but doesn't exercise race conditions on acquire/release. Add a sustained-load stress test that spawns >6 concurrent requests to one origin and asserts pool never exceeds 6 connections. Reuse the local HTTP test server pattern from `src/test_e2e.zig`.
 
 ---
 
@@ -78,11 +78,11 @@ Current `tests/test262_runner.zig` has 7 cases. Grow to ~20 cases. QuickJS-NG su
 
 Fold still-relevant content into `MVP_PLAN.md` / `MVP_ROADMAP.md` / this file, then delete or archive:
 
-- `PHASE1_EXIT_STATUS.md` — fold the 10/14 verification status into `MVP_ROADMAP.md` under "Verification"
-- `PHASE1_CLOSURE_PLAN.md` — already marked "PARTIALLY HISTORICAL"; delete
-- `PHASE2_START_PLAN.md` — content is implemented; delete
-- `TLS_RESUME_PLAN.md` — already marked "HISTORICAL"; delete
-- `spec/Phase3-Plan.md` — rename to `spec/Fingerprint-Plan.md`, keep as forward-looking spec not tied to phase numbering
+- `archive/PHASE1_EXIT_STATUS.md` — fold the 10/14 verification status into `MVP_ROADMAP.md` under "Verification"
+- `archive/PHASE1_CLOSURE_PLAN.md` — already marked "PARTIALLY HISTORICAL"; delete
+- `archive/PHASE2_START_PLAN.md` — content is implemented; delete
+- `archive/TLS_RESUME_PLAN.md` — already marked "HISTORICAL"; delete
+- `spec/Fingerprint-Plan.md` — rename to `spec/Fingerprint-Plan.md`, keep as forward-looking spec not tied to phase numbering
 
 Update `AGENTS.md` / `CLAUDE.md` references if they point at deleted docs.
 
@@ -92,7 +92,7 @@ Update `AGENTS.md` / `CLAUDE.md` references if they point at deleted docs.
 
 **8. AWR's own JA4+ fingerprint (distinct from Chrome 132)** (solo: new)
 
-Described in `spec/Phase3-Plan.md`. Requires dropping `TLS_RSA_WITH_3DES_EDE_CBC_SHA` (RFC 8996 deprecated) and **invalidates the currently-verified `t13d1512h1_8daaf6152771_07d4c546ea27`** string. Recent commits `0731438` + `4918028` started the BoringSSL wrapper, but this is a fingerprint transition that breaks the live JA4 test evidence. Should land on its own branch after P0–P3 stabilize.
+Described in `spec/Fingerprint-Plan.md`. Requires dropping `TLS_RSA_WITH_3DES_EDE_CBC_SHA` (RFC 8996 deprecated) and **invalidates the currently-verified `t13d1512h1_8daaf6152771_07d4c546ea27`** string. Recent commits `0731438` + `4918028` started the BoringSSL wrapper, but this is a fingerprint transition that breaks the live JA4 test evidence. Should land on its own branch after P0–P3 stabilize.
 
 ---
 
