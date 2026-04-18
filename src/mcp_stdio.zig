@@ -2,8 +2,8 @@ const std = @import("std");
 const build_opts = @import("build_opts");
 const page_mod = @import("page");
 
-pub fn serve(allocator: std.mem.Allocator, url: []const u8) !void {
-    var page = try page_mod.Page.init(allocator);
+pub fn serve(allocator: std.mem.Allocator, io: std.Io, url: []const u8) !void {
+    var page = try page_mod.Page.init(allocator, io);
     defer page.deinit();
 
     var initial = try page.navigate(url);

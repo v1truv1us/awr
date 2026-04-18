@@ -16,7 +16,7 @@ pub const Header = struct {
 
 /// Ordered header list. Insertion order preserved — required for fingerprinting.
 pub const HeaderList = struct {
-    items: std.ArrayList(Header) = .{},
+    items: std.ArrayList(Header) = .empty,
     /// When true, deinit frees each header's name and value strings.
     /// Set for response-owned headers; leave false for request headers
     /// that reference string literals.
@@ -187,7 +187,7 @@ fn readBody(reader: anytype, headers: *const HeaderList, allocator: std.mem.Allo
 }
 
 fn readChunkedBody(reader: anytype, allocator: std.mem.Allocator) ![]u8 {
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
     var size_buf: [32]u8 = undefined;

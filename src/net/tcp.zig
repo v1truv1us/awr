@@ -61,7 +61,7 @@ pub const TcpConn = struct {
     loop:        xev.Loop,
     socket:      ?xev.TCP,
     state:       TcpState,
-    remote_addr: std.net.Address,
+    remote_addr: std.Io.net.IpAddress,
 
     /// Read / write scratch buffers (arena-allocated per connection).
     read_buf:  []u8,
@@ -71,7 +71,7 @@ pub const TcpConn = struct {
     const READ_BUF_SIZE  = 64 * 1024;
     const WRITE_BUF_SIZE = 64 * 1024;
 
-    pub fn init(allocator: std.mem.Allocator, remote_addr: std.net.Address) !TcpConn {
+    pub fn init(allocator: std.mem.Allocator, remote_addr: std.Io.net.IpAddress) !TcpConn {
         const read_buf  = try allocator.alloc(u8, READ_BUF_SIZE);
         errdefer allocator.free(read_buf);
         const write_buf = try allocator.alloc(u8, WRITE_BUF_SIZE);
@@ -216,14 +216,14 @@ fn readCb(
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 test "TcpConn.init starts in idle state" {
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 9999);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 9999);
     var conn = try TcpConn.init(std.testing.allocator, addr);
     defer conn.deinit();
     try std.testing.expectEqual(TcpState.idle, conn.state);
 }
 
 test "TcpConn.init allocates read and write buffers" {
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 9999);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 9999);
     var conn = try TcpConn.init(std.testing.allocator, addr);
     defer conn.deinit();
     try std.testing.expectEqual(@as(usize, 64 * 1024), conn.read_buf.len);
@@ -231,7 +231,7 @@ test "TcpConn.init allocates read and write buffers" {
 }
 
 test "TcpConn.write returns NotConnected when idle" {
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 9999);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 9999);
     var conn = try TcpConn.init(std.testing.allocator, addr);
     defer conn.deinit();
     const result = conn.write("hello");
@@ -239,7 +239,7 @@ test "TcpConn.write returns NotConnected when idle" {
 }
 
 test "TcpConn.read returns NotConnected when idle" {
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 9999);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 9999);
     var conn = try TcpConn.init(std.testing.allocator, addr);
     defer conn.deinit();
     var buf: [64]u8 = undefined;
@@ -248,7 +248,7 @@ test "TcpConn.read returns NotConnected when idle" {
 }
 
 test "TcpConn.connect returns ConnectionRefused for closed port" {
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 19999);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 19999);
     var conn = try TcpConn.init(std.testing.allocator, addr);
     defer conn.deinit();
     const result = conn.connect();
@@ -257,7 +257,7 @@ test "TcpConn.connect returns ConnectionRefused for closed port" {
 }
 
 test "TcpConn.close transitions to closed state" {
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 9999);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 9999);
     var conn = try TcpConn.init(std.testing.allocator, addr);
     defer conn.deinit();
     conn.close();
@@ -265,7 +265,7 @@ test "TcpConn.close transitions to closed state" {
 }
 
 test "TcpConn.close is idempotent" {
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 9999);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 9999);
     var conn = try TcpConn.init(std.testing.allocator, addr);
     defer conn.deinit();
     conn.close();
@@ -278,10 +278,10 @@ test "TcpConn.close is idempotent" {
 //   single shared xev.Loop running both sides concurrently.
 test "TcpConn connect + write + read roundtrip via local echo server" {
     const port: u16 = 18472;
-    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", port);
 
     const ServerCtx = struct {
-        addr: std.net.Address,
+        addr: std.Io.net.IpAddress,
         ready: std.Thread.Semaphore = .{},
 
         fn serve(ctx: *@This()) void {

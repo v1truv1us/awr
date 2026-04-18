@@ -116,6 +116,7 @@ fn writeJsStr(w: anytype, s: []const u8) !void {
 /// that variables set by one navigation are invisible in the next.
 pub const Page = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     client: client.Client,
     js: engine.JsEngine,
     active_doc: ?*dom.Document,
@@ -123,12 +124,13 @@ pub const Page = struct {
     active_base_url: ?[]const u8,
 
     /// Initialise a new Page with default client options.
-    pub fn init(allocator: std.mem.Allocator) !Page {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Page {
         var js_engine = try engine.JsEngine.init(allocator, null);
         errdefer js_engine.deinit();
         return Page{
             .allocator = allocator,
-            .client = client.Client.init(allocator, .{
+            .io = io,
+            .client = client.Client.init(allocator, io, .{
                 .use_chrome_headers = false, // plain headers → uncompressed body
             }),
             .js = js_engine,
@@ -764,12 +766,12 @@ const TestFetchServer = struct {
 };
 
 test "Page.init and deinit" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 }
 
 test "Page.resolveUrl — relative path resolves against containing directory" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     const resolved = try page.resolveUrl("https://example.com/dir/index.html", "app.js");
@@ -779,7 +781,7 @@ test "Page.resolveUrl — relative path resolves against containing directory" {
 }
 
 test "Page.resolveUrl — base href can override page path" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     const resolved = try page.resolveUrl("https://example.com/assets/", "app.js");
@@ -789,7 +791,7 @@ test "Page.resolveUrl — base href can override page path" {
 }
 
 test "Page.resolveUrl — dot segments are normalized" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     const resolved = try page.resolveUrl("https://example.com/a/b/index.html", "../app.js?x=1");
@@ -799,7 +801,7 @@ test "Page.resolveUrl — dot segments are normalized" {
 }
 
 test "Page.processHtml — preserves status code" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200, "<html><body></body></html>");
     defer result.deinit();
@@ -807,7 +809,7 @@ test "Page.processHtml — preserves status code" {
 }
 
 test "Page.processHtml — preserves URL" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/page", 200, "<html><body></body></html>");
     defer result.deinit();
@@ -815,7 +817,7 @@ test "Page.processHtml — preserves URL" {
 }
 
 test "Page.processHtml — extracts title" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200, "<html><head><title>Hello AWR</title></head><body></body></html>");
     defer result.deinit();
@@ -824,7 +826,7 @@ test "Page.processHtml — extracts title" {
 }
 
 test "Page.processHtml — null title when <title> absent" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200, "<html><body><p>no title here</p></body></html>");
     defer result.deinit();
@@ -832,7 +834,7 @@ test "Page.processHtml — null title when <title> absent" {
 }
 
 test "Page.processHtml — extracts body text" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200, "<html><body><p>Hello World</p></body></html>");
     defer result.deinit();
@@ -841,7 +843,7 @@ test "Page.processHtml — extracts body text" {
 
 test "Page.processHtml — html field is raw source" {
     const src = "<html><head><title>T</title></head><body></body></html>";
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200, src);
     defer result.deinit();
@@ -849,7 +851,7 @@ test "Page.processHtml — html field is raw source" {
 }
 
 test "Page.renderBrowseModel uses active document seam instead of reparsing raw html" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     var result = try page.processHtml(
@@ -871,7 +873,7 @@ test "Page.renderBrowseModel uses active document seam instead of reparsing raw 
 }
 
 test "Page.renderBrowseModel fallback still uses browse root selection" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     var result = PageResult{
@@ -896,7 +898,7 @@ test "Page.renderBrowseModel fallback still uses browse root selection" {
 }
 
 test "Page.processHtml — executes inline script, JS state persists" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200, "<html><body><script>var __awr_x__ = 42;</script></body></html>");
     defer result.deinit();
@@ -906,7 +908,7 @@ test "Page.processHtml — executes inline script, JS state persists" {
 }
 
 test "Page.processHtml — document.title accessible inside script" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200, "<html><head><title>My Page</title></head><body>" ++
         "<script>var __awr_title__ = document.title;</script>" ++
@@ -917,7 +919,7 @@ test "Page.processHtml — document.title accessible inside script" {
 }
 
 test "Page.evaluateHtml — can read document title" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     const value = try page.evaluateHtml(
@@ -932,7 +934,7 @@ test "Page.evaluateHtml — can read document title" {
 }
 
 test "Page.evaluateHtml — can query DOM after inline scripts run" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     const value = try page.evaluateHtml(
@@ -947,7 +949,7 @@ test "Page.evaluateHtml — can query DOM after inline scripts run" {
 }
 
 test "Page.processHtml — empty body gives empty body_text" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200, "<html><body></body></html>");
     defer result.deinit();
@@ -956,7 +958,7 @@ test "Page.processHtml — empty body gives empty body_text" {
 }
 
 test "Page.evaluateHtml — setTimeout callback runs" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     const value = try page.evaluateHtml(
@@ -971,7 +973,7 @@ test "Page.evaluateHtml — setTimeout callback runs" {
 }
 
 test "Page.processHtml — external script (src=) is skipped without crash" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200, "<html><body><script src=\"/app.js\">fallback</script></body></html>");
     defer result.deinit();
@@ -986,7 +988,7 @@ test "Page.navigate — external script is loaded and executed" {
     defer thread.join();
     server.ready.wait();
 
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.navigate("http://127.0.0.1:18574/dir/index.html");
     defer result.deinit();
@@ -1003,7 +1005,7 @@ test "Page.navigate — inline fetch resolves through page client" {
     defer thread.join();
     server.ready.wait();
 
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.navigate("http://127.0.0.1:18575/page.html");
     defer result.deinit();
@@ -1013,7 +1015,7 @@ test "Page.navigate — inline fetch resolves through page client" {
 }
 
 test "Page.processHtml — document.cookie exposes existing cookies" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     try page.client.cookies.parseSetCookie("session=abc123; Path=/", "example.com");
 
@@ -1030,7 +1032,7 @@ test "Page.processHtml — document.cookie exposes existing cookies" {
 }
 
 test "Page.processHtml — document.cookie setter updates cookie jar" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     var result = try page.processHtml(
@@ -1055,7 +1057,7 @@ test "Page.processHtml — XMLHttpRequest can read same-origin data" {
     defer thread.join();
     server.ready.wait();
 
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.navigate("http://127.0.0.1:18580/xhr.html");
     defer result.deinit();
@@ -1068,7 +1070,7 @@ test "Page.processHtml — XMLHttpRequest can read same-origin data" {
 // ── Step 2 tests — window.location ────────────────────────────────────────
 
 test "Page.processHtml — window.location.href matches url arg" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://example.com/path?q=1", 200, "<html><body></body></html>");
     defer result.deinit();
@@ -1077,7 +1079,7 @@ test "Page.processHtml — window.location.href matches url arg" {
 }
 
 test "Page.processHtml — window.location exposes host port and hash" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://example.com:8443/path?q=1#frag", 200, "<html><body></body></html>");
     defer result.deinit();
@@ -1088,7 +1090,7 @@ test "Page.processHtml — window.location exposes host port and hash" {
 // ── Step 3 tests — window.__awrData__ ─────────────────────────────────────
 
 test "PageResult.window_data — script sets __awrData__" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200, "<html><body><script>window.__awrData__ = {ok: true, n: 42};</script></body></html>");
     defer result.deinit();
@@ -1097,7 +1099,7 @@ test "PageResult.window_data — script sets __awrData__" {
 }
 
 test "PageResult.window_data — null when not set" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200, "<html><body></body></html>");
     defer result.deinit();
@@ -1107,7 +1109,7 @@ test "PageResult.window_data — null when not set" {
 // ── Step 4 — Phase 2 integration test ─────────────────────────────────────
 
 test "Phase 2 integration — JS reads DOM and surfaces data via window.__awrData__" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://shop.example.com/", 200,
         \\<html>
@@ -1143,7 +1145,7 @@ test "Phase 2 integration — JS reads DOM and surfaces data via window.__awrDat
 // ── Navigation isolation test ─────────────────────────────────────────────
 
 test "Page.processHtml — window_data does not bleed between navigations" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     // First navigation sets __awrData__
@@ -1159,7 +1161,7 @@ test "Page.processHtml — window_data does not bleed between navigations" {
 }
 
 test "Page.processHtml — WebMCP inline registration is discoverable" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     var result = try page.processHtml("https://mcp.example/", 200, "<html><body><script>navigator.modelContext.registerTool({name: 'ping', description: 'Ping tool', inputSchema: {type: 'object'}, handler(input) { return {pong: input.value}; }});</script></body></html>");
@@ -1174,7 +1176,7 @@ test "Page.processHtml — WebMCP inline registration is discoverable" {
 }
 
 test "Page.callWebMcpTool — async handler result is returned" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     var result = try page.processHtml("https://mcp.example/", 200, "<html><body><script>navigator.modelContext.registerTool({name: 'async-ping', description: 'Async ping', inputSchema: {type: 'object'}, handler(input) { return Promise.resolve({pong: input.value}); }});</script></body></html>");
@@ -1186,7 +1188,7 @@ test "Page.callWebMcpTool — async handler result is returned" {
 }
 
 test "Page.callWebMcpTool — DOM-backed handler works after navigation completes" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     var result = try page.processHtml(
@@ -1202,7 +1204,7 @@ test "Page.callWebMcpTool — DOM-backed handler works after navigation complete
 }
 
 test "Page.processHtml — WebMCP registry resets between navigations" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     var first = try page.processHtml("https://mcp.example/one", 200, "<html><body><script>navigator.modelContext.registerTool({name: 'first', description: 'First tool', inputSchema: null, handler() { return {ok: true}; }});</script></body></html>");
@@ -1296,7 +1298,7 @@ test "Page.navigateForMcp — external script registration is discoverable" {
     defer thread.join();
     server.ready.wait();
 
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     const tools = try page.navigateForMcp("http://127.0.0.1:18576/mcp.html");
@@ -1311,7 +1313,7 @@ test "Page.callWebMcpTool — navigates and invokes tool" {
     defer thread.join();
     server.ready.wait();
 
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     const value = try page.callWebMcpTool(
@@ -1330,7 +1332,7 @@ test "Page.callWebMcpTool — tool can fetch after navigation completes" {
     defer thread.join();
     server.ready.wait();
 
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     const value = try page.callWebMcpTool(
@@ -1345,7 +1347,7 @@ test "Page.callWebMcpTool — tool can fetch after navigation completes" {
 // ── Integration test (requires network) ───────────────────────────────────
 
 test "Page.navigate — fetches http://example.com" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.navigate("http://example.com/");
     defer result.deinit();

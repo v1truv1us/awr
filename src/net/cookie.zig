@@ -10,6 +10,7 @@
 /// NOTE: In Zig 0.15.x, std.ArrayList is the unmanaged variant.
 /// All mutating methods require an explicit allocator argument.
 const std = @import("std");
+const time_util = @import("../util/time.zig");
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -45,7 +46,7 @@ pub const Cookie = struct {
 // ── CookieJar ─────────────────────────────────────────────────────────────
 
 pub const CookieJar = struct {
-    cookies: std.ArrayList(Cookie) = .{},
+    cookies: std.ArrayList(Cookie) = .empty,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) CookieJar {
@@ -98,7 +99,7 @@ pub const CookieJar = struct {
             } else if (attrStartsWithIgnoreCase(attr, "Max-Age=", 8)) {
                 const age_str = std.mem.trim(u8, attr[8..], " ");
                 const age = std.fmt.parseInt(i64, age_str, 10) catch continue;
-                expires = std.time.timestamp() + age;
+                expires = time_util.wallClockSeconds() + age;
             }
         }
 
@@ -148,8 +149,8 @@ pub const CookieJar = struct {
         https: bool,
         ctx: CookieSendContext,
     ) ![]u8 {
-        const now = std.time.timestamp();
-        var buf: std.ArrayList(u8) = .{};
+        const now = time_util.wallClockSeconds();
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(self.allocator);
         var first = true;
 
@@ -185,7 +186,7 @@ pub const CookieJar = struct {
 
     /// Remove all cookies whose Max-Age has elapsed.
     pub fn purgeExpired(self: *CookieJar) void {
-        const now = std.time.timestamp();
+        const now = time_util.wallClockSeconds();
         var i: usize = 0;
         while (i < self.cookies.items.len) {
             const c = &self.cookies.items[i];

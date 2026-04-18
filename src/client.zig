@@ -17,6 +17,8 @@ const tcp = @import("net/tcp.zig");
 const url_mod = @import("net/url.zig");
 const tls_conn = @import("net/tls_conn.zig");
 const h2session = @import("net/h2session.zig");
+const dns = @import("util/dns.zig");
+const io_util = @import("util/io.zig");
 
 fn toStdHttpMethod(method: http1.Method) std.http.Method {
     return switch (method) {
@@ -85,6 +87,7 @@ pub const FetchError = error{
 
 pub const Client = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     cookies: cookie.CookieJar,
     conns: pool.ConnectionPool,
     options: ClientOptions,
@@ -119,9 +122,10 @@ pub const Client = struct {
         body: ?[]const u8 = null,
     };
 
-    pub fn init(allocator: std.mem.Allocator, options: ClientOptions) Client {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, options: ClientOptions) Client {
         return Client{
             .allocator = allocator,
+            .io = io,
             .cookies = cookie.CookieJar.init(allocator),
             .conns = pool.ConnectionPool.init(allocator),
             .options = options,
@@ -318,17 +322,15 @@ pub const Client = struct {
                 pooled_active = true;
                 reused_idle = true;
             } else {
-                const addr_list = std.net.getAddressList(self.allocator, parsed.host, parsed.port) catch
+                const addr = dns.resolve(self.io, parsed.host, parsed.port) catch
                     return FetchError.DnsResolutionFailed;
-                defer addr_list.deinit();
-                if (addr_list.addrs.len == 0) return FetchError.DnsResolutionFailed;
 
                 pooled_http = self.allocator.create(PooledHttpConn) catch return FetchError.OutOfMemory;
                 var needs_cleanup = true;
                 errdefer if (needs_cleanup) self.allocator.destroy(pooled_http);
                 pooled_http.* = .{
                     .allocator = self.allocator,
-                    .tcp_conn = tcp.TcpConn.init(self.allocator, addr_list.addrs[0]) catch return FetchError.ConnectionFailed,
+                    .tcp_conn = tcp.TcpConn.init(self.allocator, addr) catch return FetchError.ConnectionFailed,
                 };
                 errdefer if (needs_cleanup) pooled_http.tcp_conn.deinit();
                 pooled_http.tcp_conn.connect() catch return FetchError.ConnectionFailed;
@@ -342,17 +344,15 @@ pub const Client = struct {
                 pooled_active = true;
             }
         } else {
-            const addr_list = std.net.getAddressList(self.allocator, parsed.host, parsed.port) catch
+            const addr = dns.resolve(self.io, parsed.host, parsed.port) catch
                 return FetchError.DnsResolutionFailed;
-            defer addr_list.deinit();
-            if (addr_list.addrs.len == 0) return FetchError.DnsResolutionFailed;
 
             pooled_http = self.allocator.create(PooledHttpConn) catch return FetchError.OutOfMemory;
             var needs_cleanup = true;
             errdefer if (needs_cleanup) self.allocator.destroy(pooled_http);
             pooled_http.* = .{
                 .allocator = self.allocator,
-                .tcp_conn = tcp.TcpConn.init(self.allocator, addr_list.addrs[0]) catch return FetchError.ConnectionFailed,
+                .tcp_conn = tcp.TcpConn.init(self.allocator, addr) catch return FetchError.ConnectionFailed,
             };
             errdefer if (needs_cleanup) pooled_http.tcp_conn.deinit();
             pooled_http.tcp_conn.connect() catch return FetchError.ConnectionFailed;
@@ -398,9 +398,9 @@ pub const Client = struct {
             written += n;
         }
 
-        // Read response via a GenericReader wrapping the libxev TcpConn.
+        // Read response via a BlockingReader wrapping the libxev TcpConn.
         // TcpConn.readFn drives a single xev loop iteration per read call.
-        const TcpReader = std.io.GenericReader(*tcp.TcpConn, tcp.TcpError, tcp.TcpConn.readFn);
+        const TcpReader = io_util.BlockingReader(*tcp.TcpConn, tcp.TcpError, tcp.TcpConn.readFn);
         const stream_reader = TcpReader{ .context = conn };
         var resp = http1.readResponse(stream_reader, self.allocator) catch {
             if (reused_idle) {
@@ -483,7 +483,7 @@ pub const Client = struct {
         _ = redirect_count; // TODO(Phase 3): pass remaining budget to owned stack
         // 64KB read buffer — default 8KB is too small for sites like X.com that
         // send large numbers of headers, causing HttpHeadersOversize.
-        var std_client = std.http.Client{ .allocator = self.allocator, .read_buffer_size = 64 * 1024 };
+        var std_client = std.http.Client{ .io = self.io, .allocator = self.allocator, .read_buffer_size = 64 * 1024 };
         defer std_client.deinit();
 
         var body_writer = std.Io.Writer.Allocating.init(self.allocator);
@@ -539,10 +539,8 @@ pub const Client = struct {
             }
         }
 
-        const addr_list = std.net.getAddressList(self.allocator, parsed.host, parsed.port) catch
+        const addr = dns.resolve(self.io, parsed.host, parsed.port) catch
             return FetchError.DnsResolutionFailed;
-        defer addr_list.deinit();
-        if (addr_list.addrs.len == 0) return FetchError.DnsResolutionFailed;
 
         const pooled_https = self.allocator.create(PooledHttpsConn) catch return FetchError.OutOfMemory;
         var tcp_ready = false;
@@ -556,7 +554,7 @@ pub const Client = struct {
             }
         }
         pooled_https.allocator = self.allocator;
-        pooled_https.tcp_conn = tcp.TcpConn.init(self.allocator, addr_list.addrs[0]) catch return FetchError.ConnectionFailed;
+        pooled_https.tcp_conn = tcp.TcpConn.init(self.allocator, addr) catch return FetchError.ConnectionFailed;
         tcp_ready = true;
         pooled_https.tcp_conn.connect() catch return FetchError.ConnectionFailed;
 
@@ -756,8 +754,8 @@ pub const Client = struct {
             written += n;
         }
 
-        // Read response via GenericReader wrapping TlsConn
-        const TlsReader = std.io.GenericReader(*tls_conn.TlsConn, tls_conn.TlsError, tls_conn.TlsConn.readFn);
+        // Read response via BlockingReader wrapping TlsConn
+        const TlsReader = io_util.BlockingReader(*tls_conn.TlsConn, tls_conn.TlsError, tls_conn.TlsConn.readFn);
         const stream_reader = TlsReader{ .context = tls };
         var resp = http1.readResponse(stream_reader, self.allocator) catch return FetchError.RecvFailed;
         var resp_owned = true;
@@ -978,7 +976,7 @@ const TestRedirectServer = struct {
 };
 
 test "Client.init and deinit" {
-    var client = Client.init(std.testing.allocator, .{});
+    var client = Client.init(std.testing.allocator, std.testing.io, .{});
     defer client.deinit();
     try std.testing.expect(client.cookies.cookies.items.len == 0);
 }
@@ -1007,7 +1005,7 @@ test "formatAuthority brackets IPv6 literals" {
 
 // Integration test — requires network; uncomment to run manually
 // test "integration: fetch https://example.com" {
-//     var client = Client.init(std.testing.allocator, .{});
+//     var client = Client.init(std.testing.allocator, std.testing.io, .{});
 //     defer client.deinit();
 //     var resp = try client.fetch("https://example.com/");
 //     defer resp.deinit();
@@ -1016,14 +1014,14 @@ test "formatAuthority brackets IPv6 literals" {
 // }
 
 test "fetch returns InvalidUrl for bad URL" {
-    var client = Client.init(std.testing.allocator, .{});
+    var client = Client.init(std.testing.allocator, std.testing.io, .{});
     defer client.deinit();
     const result = client.fetch("not-a-url");
     try std.testing.expectError(FetchError.InvalidUrl, result);
 }
 
 test "fetch returns DnsResolutionFailed for invalid host" {
-    var client = Client.init(std.testing.allocator, .{});
+    var client = Client.init(std.testing.allocator, std.testing.io, .{});
     defer client.deinit();
     const result = client.fetch("http://this.host.does.not.exist.invalid/");
     try std.testing.expectError(FetchError.DnsResolutionFailed, result);
@@ -1031,7 +1029,7 @@ test "fetch returns DnsResolutionFailed for invalid host" {
 
 test "Client cookie jar is populated after fetch sets a cookie (mock)" {
     // Verify cookie jar stores cookies via parseSetCookie directly
-    var client = Client.init(std.testing.allocator, .{});
+    var client = Client.init(std.testing.allocator, std.testing.io, .{});
     defer client.deinit();
     try client.cookies.parseSetCookie("session=abc123; Path=/; HttpOnly", "example.com");
     try std.testing.expectEqual(@as(usize, 1), client.cookies.cookies.items.len);
@@ -1044,7 +1042,7 @@ test "post sends request body over HTTP/1.1" {
     defer thread.join();
     server.ready.wait();
 
-    var client = Client.init(std.testing.allocator, .{ .use_chrome_headers = false });
+    var client = Client.init(std.testing.allocator, std.testing.io, .{ .use_chrome_headers = false });
     defer client.deinit();
 
     var resp = try client.post("http://127.0.0.1:18573/", "x=1");
@@ -1089,7 +1087,7 @@ test "HTTP client reuses pooled keep-alive connection" {
     defer thread.join();
     server.ready.wait();
 
-    var client = Client.init(std.testing.allocator, .{ .use_chrome_headers = false });
+    var client = Client.init(std.testing.allocator, std.testing.io, .{ .use_chrome_headers = false });
     defer client.deinit();
 
     var resp1 = try client.fetch("http://127.0.0.1:18571/");
@@ -1126,7 +1124,7 @@ test "HTTP client removes close-delimited pooled connections from accounting" {
     defer thread.join();
     server.ready.wait();
 
-    var client = Client.init(std.testing.allocator, .{ .use_chrome_headers = false });
+    var client = Client.init(std.testing.allocator, std.testing.io, .{ .use_chrome_headers = false });
     defer client.deinit();
 
     var resp1 = try client.fetch("http://127.0.0.1:18572/");
@@ -1156,7 +1154,7 @@ test "fetch surfaces effective_url after redirect" {
     defer thread.join();
     server.ready.wait();
 
-    var client = Client.init(std.testing.allocator, .{ .use_chrome_headers = false });
+    var client = Client.init(std.testing.allocator, std.testing.io, .{ .use_chrome_headers = false });
     defer client.deinit();
 
     var resp = try client.fetch("http://127.0.0.1:18579/start");
@@ -1168,7 +1166,7 @@ test "fetch surfaces effective_url after redirect" {
 
 // Integration test — requires network access; skipped in CI
 // test "integration: fetch http://example.com" {
-//     var client = Client.init(std.testing.allocator, .{});
+//     var client = Client.init(std.testing.allocator, std.testing.io, .{});
 //     defer client.deinit();
 //     var resp = try client.fetch("http://example.com/");
 //     defer resp.deinit();

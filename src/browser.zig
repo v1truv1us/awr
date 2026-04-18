@@ -38,10 +38,10 @@ pub const BrowserSession = struct {
     status_message: ?[]u8,
     render_width: usize,
 
-    pub fn init(allocator: std.mem.Allocator) !BrowserSession {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !BrowserSession {
         return .{
             .allocator = allocator,
-            .page = try page_mod.Page.init(allocator),
+            .page = try page_mod.Page.init(allocator, io),
             .current = null,
             .history = std.ArrayList(HistoryEntry).empty,
             .history_index = 0,
@@ -377,11 +377,11 @@ pub const BrowserSession = struct {
     }
 };
 
-pub fn run(allocator: std.mem.Allocator, start_url: []const u8) !void {
+pub fn run(allocator: std.mem.Allocator, io: std.Io, start_url: []const u8) !void {
     var terminal = try tui.Terminal.init();
     defer terminal.deinit();
 
-    var session = try BrowserSession.init(allocator);
+    var session = try BrowserSession.init(allocator, io);
     defer session.deinit();
     try session.setViewportWidth(terminal.size().cols);
     try session.navigateTo(start_url);
@@ -390,7 +390,7 @@ pub fn run(allocator: std.mem.Allocator, start_url: []const u8) !void {
         const size = terminal.size();
         try session.setViewportWidth(size.cols);
         session.clampScroll(viewportHeight(size));
-        try draw(&terminal, &session);
+        try draw(&terminal, io, &session);
         const key = try terminal.readKey();
         switch (session.prompt_mode) {
             .none => switch (key) {
@@ -424,13 +424,13 @@ pub fn run(allocator: std.mem.Allocator, start_url: []const u8) !void {
     }
 }
 
-fn draw(terminal: *tui.Terminal, session: *BrowserSession) !void {
+fn draw(terminal: *tui.Terminal, io: std.Io, session: *BrowserSession) !void {
     const size = terminal.size();
     const viewport_height = viewportHeight(size);
     try terminal.clearScreen();
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = terminal.stdout_file.writer(&stdout_buffer);
+    var stdout_writer = terminal.stdout_file.writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     const model = session.screenModel();
     const url = session.currentUrl() orelse "";

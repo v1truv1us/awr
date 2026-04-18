@@ -4,8 +4,8 @@
     .version = "0.1.0",
     .dependencies = .{
         .libxev = .{
-            .url = "https://github.com/mitchellh/libxev/archive/refs/heads/main.tar.gz",
-            .hash = "libxev-0.0.0-86vtc689EwAjQWysidPm9NKkAwwUNByiE3kZTg_xu0Hp",
+            .url = "https://github.com/mitchellh/libxev/archive/a82a04eabb46b0611c72d6d0e32db2d9dcf2e745.tar.gz",
+            .hash = "libxev-0.0.0-86vtcwIRFACVrx54GaHsMFFlyC4dTi0tcVh10V7btRUc",
         },
         .quickjs_ng = .{
             .url = "https://github.com/mitchellh/zig-quickjs-ng/archive/refs/heads/main.tar.gz",

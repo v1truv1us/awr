@@ -11,6 +11,7 @@
 /// the caller provides/receives connection handles as *anyopaque pointers
 /// during the real integration. Tests use a lightweight mock.
 const std = @import("std");
+const time_util = @import("../util/time.zig");
 
 pub const MAX_PER_ORIGIN: usize = 6;
 pub const MAX_TOTAL: usize = 256;
@@ -30,7 +31,7 @@ pub const PooledConn = struct {
     close_fn: ?*const fn (*anyopaque) void = null,
 
     pub fn isHealthy(self: *const PooledConn) bool {
-        const now = std.time.milliTimestamp();
+        const now = time_util.wallClockMillis();
         return !self.in_use and
             (now - self.last_used_ms) < IDLE_TIMEOUT_MS and
             self.request_count < MAX_REQUESTS;
@@ -40,7 +41,7 @@ pub const PooledConn = struct {
 // ── OriginPool ─────────────────────────────────────────────────────────────
 
 pub const OriginPool = struct {
-    conns: std.ArrayList(PooledConn) = .{},
+    conns: std.ArrayList(PooledConn) = .empty,
 
     pub fn deinit(self: *OriginPool, allocator: std.mem.Allocator) void {
         for (self.conns.items) |*c| {
@@ -81,7 +82,7 @@ pub const OriginPool = struct {
         try self.conns.append(allocator, PooledConn{
             .handle = handle,
             .in_use = true,
-            .last_used_ms = std.time.milliTimestamp(),
+            .last_used_ms = time_util.wallClockMillis(),
             .request_count = 0,
             .close_fn = close_fn,
         });
@@ -92,7 +93,7 @@ pub const OriginPool = struct {
         for (self.conns.items) |*c| {
             if (c.handle == handle) {
                 c.in_use = false;
-                c.last_used_ms = std.time.milliTimestamp();
+                c.last_used_ms = time_util.wallClockMillis();
                 c.request_count += 1;
                 return;
             }
@@ -133,12 +134,28 @@ pub const OriginPool = struct {
     }
 };
 
+// ── PoolMutex ─────────────────────────────────────────────────────────────
+// std.Thread.Mutex was removed in Zig 0.16. std.atomic.Mutex is a spinlock
+// with only tryLock/unlock; wrap it with a blocking spin-loop here.
+
+const PoolMutex = struct {
+    inner: std.atomic.Mutex = .unlocked,
+
+    pub fn lock(self: *PoolMutex) void {
+        while (!self.inner.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    pub fn unlock(self: *PoolMutex) void {
+        self.inner.unlock();
+    }
+};
+
 // ── ConnectionPool ─────────────────────────────────────────────────────────
 
 pub const ConnectionPool = struct {
     pools: std.StringHashMap(OriginPool),
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex = .{},
+    mutex: PoolMutex = .{},
     total_count: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) ConnectionPool {
