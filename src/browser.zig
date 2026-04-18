@@ -241,7 +241,7 @@ pub const BrowserSession = struct {
         }
 
         if (self.selectedLink()) |link| {
-            try buf.writer(allocator).print("link {d}/{d}: {s}", .{
+            try buf.print(allocator, "link {d}/{d}: {s}", .{
                 link.index,
                 self.screenModel().?.links.len,
                 link.href,
@@ -251,15 +251,15 @@ pub const BrowserSession = struct {
         }
 
         if (self.search_query) |query| {
-            try buf.writer(allocator).print(" | /{s}", .{query});
+            try buf.print(allocator, " | /{s}", .{query});
             if (self.search_matches.items.len > 0) {
                 const current_match = if (self.search_index) |index| index + 1 else 0;
-                try buf.writer(allocator).print(" ({d}/{d})", .{ current_match, self.search_matches.items.len });
+                try buf.print(allocator, " ({d}/{d})", .{ current_match, self.search_matches.items.len });
             }
         }
 
         if (self.status_message) |msg| {
-            try buf.writer(allocator).print(" | {s}", .{msg});
+            try buf.print(allocator, " | {s}", .{msg});
         }
 
         return buf.toOwnedSlice(allocator);

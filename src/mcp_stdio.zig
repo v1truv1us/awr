@@ -10,16 +10,18 @@ pub fn serve(allocator: std.mem.Allocator, io: std.Io, url: []const u8) !void {
     defer initial.deinit();
 
     const stdin = std.Io.File.stdin();
-    var writer = struct { fn writeAll(self: @This(), bytes: []const u8) !void { _ = self; std.debug.print("{s}", .{bytes}); } }{};
-    const out = &writer.interface;
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+    const out = &stdout_writer.interface;
     var pending: std.ArrayList(u8) = .empty;
     defer pending.deinit(allocator);
 
     while (true) {
         var read_buf: [4096]u8 = undefined;
-        const n = try stdin.read(&read_buf);
-        if (n == 0) break;
-        try pending.appendSlice(allocator, read_buf[0..n]);
+        const n = std.posix.system.read(stdin.handle, &read_buf, read_buf.len);
+        if (n <= 0) break;
+        const n_cast = @as(usize, @intCast(n));
+        try pending.appendSlice(allocator, read_buf[0..n_cast]);
 
         while (nextMessage(pending.items)) |message| {
             const trimmed = std.mem.trim(u8, message.payload, " \t\r");

@@ -165,17 +165,16 @@ fn writeJsonStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u
 
 pub fn main(init: std.process.Init.Minimal) !void {
     const alloc = std.heap.c_allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
-    // Zig 0.16: Use Threaded Io for synchronous stdout
-    // Zig 0.16: simple stdout via debug.print for now
-    // TODO: use proper buffered Io.Writer when needed
-    const out = struct {
-        fn writeAll(self: @This(), bytes: []const u8) !void { _ = self; std.debug.print("{s}", .{bytes}); }
-        fn flush(self: @This()) !void { _ = self; }
-        fn isTty(self: @This()) bool { _ = self; return false; }
-    }{};
+    var stdout_buf: [4096]u8 = undefined;
+    var file_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+    const out = &file_writer.interface;
+    const stdout_file = std.Io.File.stdout();
+    const is_tty = stdout_file.isTty(io) catch false;
 
-    // Use args from Init.Minimal
     var args_iter = std.process.Args.Iterator.init(init.args);
     var args_list: std.ArrayList([]const u8) = .empty;
     defer args_list.deinit(alloc);
@@ -209,14 +208,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     switch (cmd) {
         .browse => |url| {
-            browser.run(alloc, url) catch |err| {
+            browser.run(alloc, io, url) catch |err| {
                 std.debug.print("error browsing {s}: {any}\n", .{ url, err });
                 std.process.exit(1);
             };
         },
         .fetch => |opts| {
             const url = opts.url.?;
-            var p = try page_mod.Page.init(alloc);
+            var p = try page_mod.Page.init(alloc, io);
             defer p.deinit();
 
             if (opts.mcp) {
@@ -276,12 +275,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
             try page_mod.renderHtml(alloc, out, result.html, .{
                 .max_width = opts.width,
-                .ansi_colors = !opts.no_color and out.isTty(),
+                .ansi_colors = !opts.no_color and is_tty,
             });
             try out.flush();
         },
         .post => |opts| {
-            var http_client = page_mod.Client.init(alloc, .{ .use_chrome_headers = false });
+            var http_client = page_mod.Client.init(alloc, io, .{ .use_chrome_headers = false });
             defer http_client.deinit();
 
             var resp = http_client.post(opts.url, opts.data) catch |err| {
@@ -297,7 +296,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             try out.flush();
         },
         .eval_expr => |opts| {
-            var p = try page_mod.Page.init(alloc);
+            var p = try page_mod.Page.init(alloc, io);
             defer p.deinit();
 
             const value = p.evaluate(opts.url, opts.expr) catch {
@@ -311,7 +310,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             try out.flush();
         },
         .mcp_call => |opts| {
-            var p = try page_mod.Page.init(alloc);
+            var p = try page_mod.Page.init(alloc, io);
             defer p.deinit();
 
             const value = p.callWebMcpTool(opts.url, opts.tool_name, opts.input_json) catch |err| {
@@ -325,7 +324,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             try out.flush();
         },
         .mcp_stdio => |url| {
-            mcp_stdio.serve(alloc, url) catch |err| {
+            mcp_stdio.serve(alloc, io, url) catch |err| {
                 std.debug.print("error serving MCP stdio for {s}: {any}\n", .{ url, err });
                 std.process.exit(1);
             };

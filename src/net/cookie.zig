@@ -305,7 +305,7 @@ test "parse cookie with Max-Age sets future expiry" {
     try jar.parseSetCookie("id=1; Max-Age=3600", "example.com");
     const c = jar.cookies.items[0];
     try std.testing.expect(c.expires != null);
-    try std.testing.expect(c.expires.? > std.time.timestamp());
+    try std.testing.expect(c.expires.? > time_util.wallClockSeconds());
 }
 
 test "session cookie has null expires" {
@@ -419,7 +419,7 @@ test "purgeExpired removes expired cookies" {
     var jar = CookieJar.init(std.testing.allocator);
     defer jar.deinit();
     try jar.parseSetCookie("old=1; Max-Age=3600", "example.com");
-    jar.cookies.items[0].expires = std.time.timestamp() - 1;
+    jar.cookies.items[0].expires = time_util.wallClockSeconds() - 1;
     try jar.parseSetCookie("fresh=2; Max-Age=3600", "example.com");
     jar.purgeExpired();
     try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);

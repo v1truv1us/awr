@@ -118,8 +118,8 @@ pub const Terminal = struct {
 
     fn readByte(self: *Terminal) !u8 {
         var buf: [1]u8 = undefined;
-        const n = try self.stdin_file.read(&buf);
-        if (n == 0) return error.EndOfStream;
+        const n = std.posix.system.read(self.stdin_file.handle, &buf, 1);
+        if (n != 1) return error.EndOfStream;
         return buf[0];
     }
 

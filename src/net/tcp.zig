@@ -89,7 +89,7 @@ pub const TcpConn = struct {
     }
 
     pub fn deinit(self: *TcpConn) void {
-        if (self.socket) |s| posix.close(s.fd);
+        if (self.socket) |s| _ = std.c.close(s.fd);
         self.socket = null;
         self.loop.deinit();
         self.allocator.free(self.read_buf);
@@ -114,12 +114,12 @@ pub const TcpConn = struct {
         sock.connect(&self.loop, &c, self.remote_addr, ConnCtx, &ctx, connectCb);
         self.loop.run(.until_done) catch {
             self.state = .closed;
-            posix.close(sock.fd);
+            _ = std.c.close(sock.fd);
             return TcpError.ConnectionRefused;
         };
         if (ctx.err != null) {
             self.state = .closed;
-            posix.close(sock.fd);
+            _ = std.c.close(sock.fd);
             return TcpError.ConnectionRefused;
         }
 

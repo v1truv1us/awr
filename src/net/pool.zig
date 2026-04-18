@@ -117,7 +117,7 @@ pub const OriginPool = struct {
     /// Remove connections idle for longer than `older_than_ms` milliseconds.
     pub fn evictIdle(self: *OriginPool, allocator: std.mem.Allocator, older_than_ms: i64) usize {
         _ = allocator;
-        const now = std.time.milliTimestamp();
+        const now = time_util.wallClockMillis();
         var i: usize = 0;
         var evicted: usize = 0;
         while (i < self.conns.items.len) {

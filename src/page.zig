@@ -131,7 +131,7 @@ pub const Page = struct {
             .allocator = allocator,
             .io = io,
             .client = client.Client.init(allocator, io, .{
-                .use_chrome_headers = false, // plain headers → uncompressed body
+                .use_chrome_headers = false,
             }),
             .js = js_engine,
             .active_doc = null,
