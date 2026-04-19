@@ -1,2 +1,13 @@
 .zig-cache/
 zig-out/
+
+# Locally-cloned lexbor source (build from source per
+# third_party/lexbor/BUILD_NOTES.md; the compiled static lib goes to
+# /usr/local/lib and is linked by build.zig on Linux).
+third_party/lexbor/*
+!third_party/lexbor/BUILD_NOTES.md
+
+# Local Zig package cache. The patched copy of quickjs_ng/build.zig lives
+# here (see DEV_NOTES.md #1); re-apply after any `zig fetch` refresh until
+# the upstream PR lands or we vendor quickjs_ng under third_party/.
+zig-pkg/

@@ -246,7 +246,7 @@ fn buildElementNode(
     elem.* = .{
         .tag        = try alloc.dupe(u8, tag_src),
         .attributes = try buildAttributes(alloc, @as(*c.lxb_dom_element_t, @ptrCast(node))),
-        .children   = .{},
+        .children   = .empty,
         .parent     = parent,
     };
     try buildChildren(alloc, elem, node.first_child);
@@ -257,7 +257,7 @@ fn buildAttributes(
     alloc:     std.mem.Allocator,
     elem_node: *c.lxb_dom_element_t,
 ) BuildError![]Attribute {
-    var list = std.ArrayListUnmanaged(Attribute){};
+    var list: std.ArrayListUnmanaged(Attribute) = .empty;
     var attr: [*c]c.lxb_dom_attr_t = c.lxb_dom_element_first_attribute(elem_node);
     while (attr != null) : (attr = c.lxb_dom_element_next_attribute(attr)) {
         var nlen: usize = 0;

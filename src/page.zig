@@ -36,6 +36,11 @@ pub const PageResult = struct {
     /// JSON-serialised value of window.__awrData__ after script execution,
     /// or null if the variable was not set.
     window_data: ?[]const u8 = null,
+    /// JSON array of tool descriptors registered via
+    /// `navigator.modelContext.registerTool()` during script execution.
+    /// `null` only if the bridge failed to initialise — an empty array
+    /// ("[]") is returned when the page registered no tools.
+    tools_json: ?[]const u8 = null,
 
     allocator: std.mem.Allocator,
 
@@ -45,6 +50,7 @@ pub const PageResult = struct {
         self.allocator.free(self.body_text);
         self.allocator.free(self.html);
         if (self.window_data) |wd| self.allocator.free(wd);
+        if (self.tools_json) |tj| self.allocator.free(tj);
     }
 };
 
@@ -162,6 +168,12 @@ pub const Page = struct {
         };
         errdefer if (window_data) |wd| gpa.free(wd);
 
+        // ── Extract tools registered via navigator.modelContext.registerTool ─
+        const tools_json: ?[]const u8 = self.js.evalString(
+            "(typeof __awr_getToolsJson__ === 'function') ? __awr_getToolsJson__() : '[]'",
+        ) catch null;
+        errdefer if (tools_json) |tj| gpa.free(tj);
+
         // ── Extract title ─────────────────────────────────────────────────
         const title: ?[]const u8 = blk: {
             const head = zig_doc.head() orelse break :blk null;
@@ -188,8 +200,74 @@ pub const Page = struct {
             .body_text   = body_text,
             .html        = html,
             .window_data = window_data,
+            .tools_json  = tools_json,
             .allocator   = gpa,
         };
+    }
+
+    // ── WebMCP tool invocation ───────────────────────────────────────────
+
+    /// Call a tool registered on this Page via navigator.modelContext.
+    /// `args_json` must be a valid JSON value (object/array/scalar) — use
+    /// "{}" when the tool takes no arguments.
+    ///
+    /// Returns a freshly-allocated JSON string. The envelope is:
+    ///   {"ok": true,  "value": <tool result>}
+    ///   {"ok": false, "error": "<kind>", "message": "<msg>"}
+    ///
+    /// Async handlers (those returning Promises) are resolved by draining
+    /// microtasks between the initial call and the resolve step. Caller
+    /// owns the returned buffer; free it with `page.allocator.free`.
+    ///
+    /// Requires a prior processHtml()/navigate() call on this Page so the
+    /// bridge polyfill is loaded. Calling it on a fresh Page with no page
+    /// loaded returns `{"ok":false,"error":"BridgeNotLoaded"}`.
+    pub fn callTool(
+        self: *Page,
+        name: []const u8,
+        args_json: []const u8,
+    ) ![]u8 {
+        const gpa = self.allocator;
+
+        const bridge_ok = self.js.evalBool(
+            "typeof __awr_callToolJson__ === 'function'",
+        ) catch false;
+        if (!bridge_ok) {
+            return try gpa.dupe(u8, "{\"ok\":false,\"error\":\"BridgeNotLoaded\"}");
+        }
+
+        // Build: __awr_callToolJson__('<name>', '<args_json>')
+        // Both strings are written as JS single-quoted literals via writeJsStr.
+        var buf = std.mem.zeroes([65536]u8);
+        var w = std.Io.Writer.fixed(&buf);
+        try w.writeAll("__awr_callToolJson__(");
+        try writeJsStr(&w, name);
+        try w.writeByte(',');
+        try writeJsStr(&w, args_json);
+        try w.writeByte(')');
+
+        const first = try self.js.evalString(w.buffered());
+        // `first` is JSON. If it has "pending", drain microtasks and resolve.
+        if (std.mem.indexOf(u8, first, "\"pending\":") == null) {
+            return first;
+        }
+        defer gpa.free(first);
+
+        // Parse out the pending id — simple string scan avoids pulling in
+        // the full JSON parser for a single integer.
+        const pending_id = parsePendingId(first) orelse {
+            return try gpa.dupe(u8, "{\"ok\":false,\"error\":\"BadPendingEnvelope\"}");
+        };
+
+        self.js.drainMicrotasks();
+
+        var resolve_buf: [128]u8 = undefined;
+        const resolve_expr = try std.fmt.bufPrint(
+            &resolve_buf,
+            "__awr_resolveToolJson__({d})",
+            .{pending_id},
+        );
+        return try self.js.evalString(resolve_expr);
     }
 
     // ── URL → window.location ────────────────────────────────────────────
@@ -203,8 +281,7 @@ pub const Page = struct {
         // JS_Eval requires input[input_len] == '\0' even though it also
         // takes an explicit length (see quickjs.c line ~34952 comment).
         var buf = std.mem.zeroes([16384]u8);
-        var fbs = std.io.fixedBufferStream(&buf);
-        const w = fbs.writer();
+        var w = std.Io.Writer.fixed(&buf);
 
         // Compute origin: scheme://host (or scheme://host:port for non-default).
         const default_port: u16 = if (u.is_https) 443 else 80;
@@ -226,29 +303,29 @@ pub const Page = struct {
             "";
 
         w.writeAll("window.location.href=") catch return;
-        writeJsStr(w, raw_url) catch return;
+        writeJsStr(&w, raw_url) catch return;
         w.writeByte(';') catch return;
         w.writeAll("window.location.hostname=") catch return;
-        writeJsStr(w, u.host) catch return;
+        writeJsStr(&w, u.host) catch return;
         w.writeByte(';') catch return;
         w.writeAll("window.location.pathname=") catch return;
-        writeJsStr(w, u.path) catch return;
+        writeJsStr(&w, u.path) catch return;
         w.writeByte(';') catch return;
         w.writeAll("window.location.protocol=") catch return;
-        writeJsStr(w, proto) catch return;
+        writeJsStr(&w, proto) catch return;
         w.writeByte(';') catch return;
         w.writeAll("window.location.origin=") catch return;
-        writeJsStr(w, origin) catch return;
+        writeJsStr(&w, origin) catch return;
         w.writeByte(';') catch return;
         w.writeAll("window.location.search=") catch return;
-        writeJsStr(w, search) catch return;
+        writeJsStr(&w, search) catch return;
         w.writeByte(';') catch return;
 
         // Call JsEngine.eval via an indirected function reference so the token
         // "eval(" does not appear here (the security hook pattern-matches on it
         // and would produce a false positive for this legitimate internal call).
         const js_inject = engine.JsEngine.eval;
-        js_inject(&self.js, fbs.getWritten(), "location-init") catch {};
+        js_inject(&self.js, w.buffered(), "location-init") catch {};
     }
 
     // ── Script execution ─────────────────────────────────────────────────
@@ -274,6 +351,22 @@ pub const Page = struct {
         }
     }
 };
+
+/// Extract the integer value following `"pending":` in a JSON string.
+/// Returns null if the key is missing or the value is not a positive integer.
+fn parsePendingId(json: []const u8) ?u64 {
+    const key = "\"pending\":";
+    const idx = std.mem.indexOf(u8, json, key) orelse return null;
+    var i = idx + key.len;
+    while (i < json.len and (json[i] == ' ' or json[i] == '\t')) : (i += 1) {}
+    var n: u64 = 0;
+    var had_digit = false;
+    while (i < json.len and json[i] >= '0' and json[i] <= '9') : (i += 1) {
+        n = n * 10 + (json[i] - '0');
+        had_digit = true;
+    }
+    return if (had_digit) n else null;
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
@@ -468,6 +561,173 @@ test "Page.processHtml — window_data does not bleed between navigations" {
     defer r2.deinit();
     // Must be null — must not contain page 1's data
     try std.testing.expect(r2.window_data == null);
+}
+
+// ── WebMCP integration tests ──────────────────────────────────────────────
+
+test "WebMCP — empty page reports empty tool list" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("https://x.com/", 200,
+        "<html><body></body></html>");
+    defer result.deinit();
+    try std.testing.expect(result.tools_json != null);
+    try std.testing.expectEqualStrings("[]", result.tools_json.?);
+}
+
+test "WebMCP — registered tool appears in tools_json" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("https://x.com/", 200,
+        \\<html><body><script>
+        \\  navigator.modelContext.registerTool(
+        \\    { name: 'echo', description: 'echo input' },
+        \\    function (a) { return a; }
+        \\  );
+        \\</script></body></html>
+    );
+    defer result.deinit();
+    try std.testing.expect(result.tools_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.tools_json.?, "\"name\":\"echo\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.tools_json.?, "\"description\":\"echo input\"") != null);
+}
+
+test "WebMCP — sync tool callTool returns value" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("https://x.com/", 200,
+        \\<html><body><script>
+        \\  navigator.modelContext.registerTool(
+        \\    { name: 'add', description: 'add a+b' },
+        \\    function (args) { return { sum: (args.a|0) + (args.b|0) }; }
+        \\  );
+        \\</script></body></html>
+    );
+    defer result.deinit();
+
+    const out = try page.callTool("add", "{\"a\":2,\"b\":3}");
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"sum\":5") != null);
+}
+
+test "WebMCP — unknown tool returns ToolNotFound" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("https://x.com/", 200,
+        "<html><body></body></html>");
+    defer result.deinit();
+
+    const out = try page.callTool("does_not_exist", "{}");
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"ok\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"error\":\"ToolNotFound\"") != null);
+}
+
+test "WebMCP — async tool resolves via drainMicrotasks" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("https://x.com/", 200,
+        \\<html><body><script>
+        \\  navigator.modelContext.registerTool(
+        \\    { name: 'later', description: 'resolves to {ready:true}' },
+        \\    function () { return Promise.resolve().then(function () { return { ready: true }; }); }
+        \\  );
+        \\</script></body></html>
+    );
+    defer result.deinit();
+
+    const out = try page.callTool("later", "{}");
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"ready\":true") != null);
+}
+
+test "WebMCP — tool handler that throws returns ToolThrew" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("https://x.com/", 200,
+        \\<html><body><script>
+        \\  navigator.modelContext.registerTool(
+        \\    { name: 'boom', description: 'always throws' },
+        \\    function () { throw new Error('nope'); }
+        \\  );
+        \\</script></body></html>
+    );
+    defer result.deinit();
+
+    const out = try page.callTool("boom", "{}");
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"ok\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"error\":\"ToolThrew\"") != null);
+}
+
+test "WebMCP end-to-end — mock shop page with three tools" {
+    var page = try Page.init(std.testing.allocator);
+    defer page.deinit();
+    var result = try page.processHtml("https://shop.example.com/", 200,
+        \\<html><body>
+        \\<ul id="catalog">
+        \\  <li data-sku="w-001" data-price="9.99">Widget A</li>
+        \\  <li data-sku="w-002" data-price="14.99">Widget B</li>
+        \\</ul>
+        \\<script>
+        \\  const catalog = Array.from(document.querySelectorAll('#catalog li')).map(li => ({
+        \\    sku: li.getAttribute('data-sku'),
+        \\    name: li.textContent.trim(),
+        \\    price: Number(li.getAttribute('data-price')),
+        \\  }));
+        \\  navigator.modelContext.registerTool(
+        \\    { name: 'search_products', description: 'search by substring' },
+        \\    function (a) {
+        \\      const q = String((a && a.q) || '').toLowerCase();
+        \\      return catalog.filter(p => p.name.toLowerCase().includes(q));
+        \\    }
+        \\  );
+        \\  navigator.modelContext.registerTool(
+        \\    { name: 'get_price', description: 'price by sku' },
+        \\    function (a) {
+        \\      const p = catalog.find(x => x.sku === a.sku);
+        \\      if (!p) throw new Error('not found');
+        \\      return { sku: p.sku, price: p.price };
+        \\    }
+        \\  );
+        \\  navigator.modelContext.registerTool(
+        \\    { name: 'add_to_cart', description: 'async cart add' },
+        \\    function (a) {
+        \\      return Promise.resolve({ added: a.sku, qty: a.qty || 1 });
+        \\    }
+        \\  );
+        \\</script>
+        \\</body></html>
+    );
+    defer result.deinit();
+
+    // Discovery: 3 tools present.
+    try std.testing.expect(result.tools_json != null);
+    const tj = result.tools_json.?;
+    try std.testing.expect(std.mem.indexOf(u8, tj, "search_products") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tj, "get_price") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tj, "add_to_cart") != null);
+
+    // Invoke sync tool.
+    const s = try page.callTool("search_products", "{\"q\":\"widget\"}");
+    defer std.testing.allocator.free(s);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "w-001") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "w-002") != null);
+
+    // Invoke sync tool with lookup.
+    const g = try page.callTool("get_price", "{\"sku\":\"w-002\"}");
+    defer std.testing.allocator.free(g);
+    try std.testing.expect(std.mem.indexOf(u8, g, "\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, g, "14.99") != null);
+
+    // Invoke async tool.
+    const a = try page.callTool("add_to_cart", "{\"sku\":\"w-001\",\"qty\":2}");
+    defer std.testing.allocator.free(a);
+    try std.testing.expect(std.mem.indexOf(u8, a, "\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "w-001") != null);
 }
 
 // ── Integration test (requires network) ───────────────────────────────────

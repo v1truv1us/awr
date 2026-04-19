@@ -225,8 +225,7 @@ pub const JsEngine = struct {
         // Build a space-separated string from all arguments using JSON.stringify
         // for objects and direct toString for primitives.
         var buf: [4096]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
-        const w = fbs.writer();
+        var w = std.Io.Writer.fixed(&buf);
 
         for (args, 0..) |raw_arg, i| {
             const arg: qjs.Value = @bitCast(raw_arg);
@@ -261,7 +260,7 @@ pub const JsEngine = struct {
             }
         }
 
-        host.sink.write(level, fbs.getWritten());
+        host.sink.write(level, w.buffered());
     }
 
     // ── timer stubs ──────────────────────────────────────────────────────

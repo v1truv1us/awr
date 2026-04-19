@@ -115,164 +115,27 @@ pub const Client = struct {
     }
 
     /// HTTP fetch: TcpConn → http1.Request → Response.
+    /// TODO(zig-0.16): std.net was removed and std.io.GenericReader is gone.
+    /// The owned HTTP/1.1 + libxev path needs a rewrite against the new
+    /// std.Io.Reader interface before this re-lights. Tracked in
+    /// DEV_NOTES.md under "Owned HTTP stack rewrite".
     fn fetchHttp(self: *Client, parsed: Url, redirect_count: u8) anyerror!Response {
-        // Build origin key for connection pool
-        var origin_buf: [512]u8 = undefined;
-        const origin = std.fmt.bufPrint(&origin_buf, "http://{s}:{d}", .{
-            parsed.host, parsed.port,
-        }) catch return FetchError.ConnectionFailed;
-
-        // Enforce per-origin connection limit
-        if (self.conns.countForOrigin(origin) >= pool.MAX_PER_ORIGIN)
-            return FetchError.ConnectionFailed;
-
-        // Resolve hostname
-        const addr_list = std.net.getAddressList(self.allocator, parsed.host, parsed.port) catch
-            return FetchError.DnsResolutionFailed;
-        defer addr_list.deinit();
-        if (addr_list.addrs.len == 0) return FetchError.DnsResolutionFailed;
-        const addr = addr_list.addrs[0];
-
-        // TCP connect
-        var conn = tcp.TcpConn.init(self.allocator, addr) catch return FetchError.ConnectionFailed;
-        defer conn.deinit();
-        conn.connect() catch return FetchError.ConnectionFailed;
-
-        // Build request
-        var path_buf: [2048]u8 = undefined;
-        const path = parsed.pathWithQuery(&path_buf);
-
-        var req = http1.Request{
-            .method = .GET,
-            .path   = path,
-            .host   = parsed.host,
-        };
-        defer req.headers.deinit(self.allocator);
-
-        if (self.options.use_chrome_headers) {
-            req.setChrome132Defaults(self.allocator) catch return FetchError.OutOfMemory;
-        } else {
-            req.headers.append(self.allocator, "Host", parsed.host) catch return FetchError.OutOfMemory;
-            req.headers.append(self.allocator, "User-Agent", self.options.user_agent) catch return FetchError.OutOfMemory;
-            req.headers.append(self.allocator, "Connection", "keep-alive") catch return FetchError.OutOfMemory;
-        }
-
-        // Set cookies for this origin
-        const cookie_header_opt = self.cookies.getCookieHeader(
-            parsed.host,
-            path,
-            parsed.is_https,
-        ) catch null;
-        defer if (cookie_header_opt) |ch| self.allocator.free(ch);
-        if (cookie_header_opt) |ch| {
-            if (ch.len > 0) {
-                req.headers.append(self.allocator, "Cookie", ch) catch return FetchError.OutOfMemory;
-            }
-        }
-
-        // Serialize request into a buffer and write
-        var req_buf: [16 * 1024]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&req_buf);
-        req.write(fbs.writer()) catch return FetchError.SendFailed;
-        const req_bytes = fbs.getWritten();
-
-        var written: usize = 0;
-        while (written < req_bytes.len) {
-            const n = conn.write(req_bytes[written..]) catch return FetchError.SendFailed;
-            written += n;
-        }
-
-        // Read response via a GenericReader wrapping the libxev TcpConn.
-        // TcpConn.readFn drives a single xev loop iteration per read call.
-        const TcpReader = std.io.GenericReader(*tcp.TcpConn, tcp.TcpError, tcp.TcpConn.readFn);
-        const stream_reader = TcpReader{ .context = &conn };
-        var resp = try http1.readResponse(stream_reader, self.allocator);
-        var resp_owned = true; // set false when redirect takes ownership
-        errdefer if (resp_owned) resp.deinit();
-
-        // Store Set-Cookie headers
-        for (resp.headers.items.items) |h| {
-            if (std.ascii.eqlIgnoreCase(h.name, "set-cookie")) {
-                self.cookies.parseSetCookie(h.value, parsed.host) catch {};
-            }
-        }
-
-        // Follow redirects
-        if (resp.isRedirect() and self.options.follow_redirects) {
-            if (resp.location()) |loc| {
-                // Heap-allocate the redirect URL before resp.deinit() — loc is a
-                // slice into resp.headers which gets freed by deinit(). Using it
-                // after deinit is a use-after-free (observed crash on HN redirect).
-                // Heap-copy the redirect URL before resp.deinit() frees headers.
-                // next_url borrows slices from next_url_str, so we must NOT free
-                // next_url_str until after the recursive fetchUrl call returns.
-                const next_url_str = if (std.mem.startsWith(u8, loc, "http"))
-                    try self.allocator.dupe(u8, loc)
-                else blk: {
-                    const scheme = if (parsed.is_https) "https" else "http";
-                    break :blk try std.fmt.allocPrint(self.allocator, "{s}://{s}:{d}{s}", .{
-                        scheme, parsed.host, parsed.port, loc,
-                    });
-                };
-                const next_url = url_mod.Url.parse(next_url_str) catch {
-                    self.allocator.free(next_url_str);
-                    return Response{
-                        .status    = resp.status,
-                        .headers   = resp.headers,
-                        .body      = resp.body,
-                        .allocator = self.allocator,
-                    };
-                };
-                resp_owned = false; // prevent errdefer double-free
-                resp.deinit();
-                const redir_result = self.fetchUrl(next_url, redirect_count + 1);
-                self.allocator.free(next_url_str);
-                return redir_result;
-            }
-        }
-
-        // Wrap into our Response type
-        return Response{
-            .status    = resp.status,
-            .headers   = resp.headers,
-            .body      = resp.body,
-            .allocator = self.allocator,
-        };
+        _ = self;
+        _ = parsed;
+        _ = redirect_count;
+        return FetchError.ConnectionFailed;
     }
 
-    /// HTTPS fetch via std.http.Client (uses std.crypto.tls under the hood).
-    /// TODO(Phase 3): Replace with AWR's owned BoringSSL stack + JA4+ Chrome 132 fingerprint.
+    /// HTTPS fetch via std.http.Client.
+    /// TODO(zig-0.16): std.http.Client now requires an Io handle that must be
+    /// threaded from main() through Page → Client. Stubbed until the Io is
+    /// wired through. For the MVP, use Page.processHtml with locally-loaded
+    /// HTML instead of navigating over the network.
     fn fetchHttpsViaStd(self: *Client, url_str: []const u8, redirect_count: u8) anyerror!Response {
-        // DECISION NEEDED: std.http.Client handles redirects internally.
-        // redirect_count is tracked here for the TooManyRedirects guard,
-        // but internal redirects by std.Client are not counted toward max_redirects.
-        // T-6 (fetchHttpsOwned) will replace this with AWR's own redirect handling.
+        _ = self;
+        _ = url_str;
         _ = redirect_count;
-        // 64KB read buffer — default 8KB is too small for sites like X.com that
-        // send large numbers of headers, causing HttpHeadersOversize.
-        var std_client = std.http.Client{ .allocator = self.allocator, .read_buffer_size = 64 * 1024 };
-        defer std_client.deinit();
-
-        var body_writer = std.Io.Writer.Allocating.init(self.allocator);
-        const result = std_client.fetch(.{
-            .location        = .{ .url = url_str },
-            .response_writer = &body_writer.writer,
-        }) catch |err| {
-            body_writer.deinit();
-            return err;
-        };
-
-        const body = body_writer.toOwnedSlice() catch {
-            body_writer.deinit();
-            return error.OutOfMemory;
-        };
-
-        return Response{
-            .status    = @as(u16, @intFromEnum(result.status)),
-            .headers   = http1.HeaderList{},
-            .body      = body,
-            .allocator = self.allocator,
-        };
+        return FetchError.TlsNotAvailable;
     }
 };
 

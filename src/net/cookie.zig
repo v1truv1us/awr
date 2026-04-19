@@ -11,6 +11,16 @@
 /// All mutating methods require an explicit allocator argument.
 const std = @import("std");
 
+// Zig 0.16 removed unixTimestamp(); read CLOCK_REALTIME directly for
+// cookie expiry arithmetic.
+// TODO(durable): migrate to an explicit Io clock parameter once cookie APIs
+// thread an Io (matches the 0.16 std design, tracked in DEV_NOTES.md).
+fn unixTimestamp() i64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
+    return @intCast(ts.sec);
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────
 
 pub const SameSite = enum { strict, lax, none };
@@ -45,7 +55,7 @@ pub const Cookie = struct {
 // ── CookieJar ─────────────────────────────────────────────────────────────
 
 pub const CookieJar = struct {
-    cookies: std.ArrayList(Cookie) = .{},
+    cookies: std.ArrayList(Cookie) = .empty,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) CookieJar {
@@ -98,7 +108,7 @@ pub const CookieJar = struct {
             } else if (attrStartsWithIgnoreCase(attr, "Max-Age=", 8)) {
                 const age_str = std.mem.trim(u8, attr[8..], " ");
                 const age = std.fmt.parseInt(i64, age_str, 10) catch continue;
-                expires = std.time.timestamp() + age;
+                expires = unixTimestamp() + age;
             }
         }
 
@@ -148,8 +158,8 @@ pub const CookieJar = struct {
         https: bool,
         ctx: CookieSendContext,
     ) ![]u8 {
-        const now = std.time.timestamp();
-        var buf: std.ArrayList(u8) = .{};
+        const now = unixTimestamp();
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(self.allocator);
         var first = true;
 
@@ -185,7 +195,7 @@ pub const CookieJar = struct {
 
     /// Remove all cookies whose Max-Age has elapsed.
     pub fn purgeExpired(self: *CookieJar) void {
-        const now = std.time.timestamp();
+        const now = unixTimestamp();
         var i: usize = 0;
         while (i < self.cookies.items.len) {
             const c = &self.cookies.items[i];
@@ -304,7 +314,7 @@ test "parse cookie with Max-Age sets future expiry" {
     try jar.parseSetCookie("id=1; Max-Age=3600", "example.com");
     const c = jar.cookies.items[0];
     try std.testing.expect(c.expires != null);
-    try std.testing.expect(c.expires.? > std.time.timestamp());
+    try std.testing.expect(c.expires.? > unixTimestamp());
 }
 
 test "session cookie has null expires" {
@@ -418,7 +428,7 @@ test "purgeExpired removes expired cookies" {
     var jar = CookieJar.init(std.testing.allocator);
     defer jar.deinit();
     try jar.parseSetCookie("old=1; Max-Age=3600", "example.com");
-    jar.cookies.items[0].expires = std.time.timestamp() - 1;
+    jar.cookies.items[0].expires = unixTimestamp() - 1;
     try jar.parseSetCookie("fresh=2; Max-Age=3600", "example.com");
     jar.purgeExpired();
     try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);

@@ -132,28 +132,27 @@ fn writeJsonStr(w: anytype, str: []const u8) !void {
 /// Serialize an Element to a compact JSON object string.
 /// Writes into `buf`; returns the written slice or null on overflow.
 fn elementToJson(elem: *const dom.Element, buf: []u8) ?[]const u8 {
-    var fbs = std.io.fixedBufferStream(buf);
-    const w = fbs.writer();
+    var w = std.Io.Writer.fixed(buf);
 
     w.writeAll("{\"tag\":") catch return null;
-    writeJsonStr(w, elem.tag) catch return null;
+    writeJsonStr(&w, elem.tag) catch return null;
     w.writeAll(",\"attrs\":[") catch return null;
     for (elem.attributes, 0..) |attr, i| {
         if (i > 0) w.writeByte(',') catch return null;
         w.writeAll("{\"name\":") catch return null;
-        writeJsonStr(w, attr.name) catch return null;
+        writeJsonStr(&w, attr.name) catch return null;
         w.writeAll(",\"value\":") catch return null;
-        writeJsonStr(w, attr.value) catch return null;
+        writeJsonStr(&w, attr.value) catch return null;
         w.writeByte('}') catch return null;
     }
     w.writeAll("],\"text\":") catch return null;
     var tbuf: [2048]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&tbuf);
     const text = elem.textContent(fba.allocator()) catch "";
-    writeJsonStr(w, text) catch return null;
+    writeJsonStr(&w, text) catch return null;
     w.writeByte('}') catch return null;
 
-    return fbs.getWritten();
+    return w.buffered();
 }
 
 fn querySelectorFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
@@ -186,8 +185,7 @@ fn querySelectorAllFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("q
     defer bridge.allocator.free(elems);
 
     var buf: [65536]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const w = fbs.writer();
+    var w = std.Io.Writer.fixed(&buf);
     w.writeByte('[') catch return qjs.Value.initStringLen(c, "[]");
     for (elems, 0..) |elem, i| {
         if (i > 0) w.writeByte(',') catch break;
@@ -197,7 +195,7 @@ fn querySelectorAllFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("q
         }
     }
     w.writeByte(']') catch {};
-    return qjs.Value.initStringLen(c, fbs.getWritten());
+    return qjs.Value.initStringLen(c, w.buffered());
 }
 
 fn getElementByIdFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
@@ -389,6 +387,95 @@ const BRIDGE_POLYFILL =
     \\    return { open(){}, send(){}, setRequestHeader(){}, addEventListener(){},
     \\             readyState: 4, status: 0, responseText: '' };
     \\  };
+    \\
+    \\  // ── WebMCP (navigator.modelContext) ────────────────────────────────
+    \\  // W3C Web Model Context spec — Chrome 146+ ships registerTool/getTools/
+    \\  // callTool.  AWR implements the tool-registration API so agentic pages
+    \\  // can expose themselves to the runtime; the runtime invokes tools
+    \\  // through __awr_callToolJson__/__awr_resolveToolJson__.
+    \\  const __awr_tools__ = Object.create(null);
+    \\  const __awr_pending__ = Object.create(null);
+    \\  let __awr_next_call__ = 1;
+    \\
+    \\  function __awr_clone_descriptor__(d) {
+    \\    // Return a JSON-safe copy of the descriptor (name, description, inputSchema).
+    \\    const out = { name: String(d.name) };
+    \\    if (d.description != null) out.description = String(d.description);
+    \\    if (d.inputSchema != null) {
+    \\      try { out.inputSchema = JSON.parse(JSON.stringify(d.inputSchema)); } catch (e) {}
+    \\    }
+    \\    return out;
+    \\  }
+    \\
+    \\  globalThis.__awr_getToolsJson__ = function() {
+    \\    const list = [];
+    \\    for (const name in __awr_tools__) list.push(__awr_tools__[name].descriptor);
+    \\    try { return JSON.stringify(list); } catch (e) { return '[]'; }
+    \\  };
+    \\
+    \\  globalThis.__awr_callToolJson__ = function(name, argsJson) {
+    \\    const entry = __awr_tools__[String(name)];
+    \\    if (!entry) {
+    \\      return JSON.stringify({ ok: false, error: 'ToolNotFound', message: 'No tool registered with name ' + name });
+    \\    }
+    \\    let args;
+    \\    try { args = argsJson ? JSON.parse(argsJson) : {}; }
+    \\    catch (e) { return JSON.stringify({ ok: false, error: 'InvalidArgs', message: String(e) }); }
+    \\    try {
+    \\      const result = entry.handler(args);
+    \\      if (result && typeof result.then === 'function') {
+    \\        const id = __awr_next_call__++;
+    \\        const slot = { settled: false, value: undefined };
+    \\        __awr_pending__[id] = slot;
+    \\        result.then(
+    \\          v => { slot.settled = true; slot.value = { ok: true, value: v }; },
+    \\          e => { slot.settled = true; slot.value = { ok: false, error: 'ToolRejected', message: (e && e.message) || String(e) }; }
+    \\        );
+    \\        return JSON.stringify({ ok: true, pending: id });
+    \\      }
+    \\      return JSON.stringify({ ok: true, value: result });
+    \\    } catch (e) {
+    \\      return JSON.stringify({ ok: false, error: 'ToolThrew', message: (e && e.message) || String(e) });
+    \\    }
+    \\  };
+    \\
+    \\  // After drainMicrotasks, Zig calls this to fetch resolved async results.
+    \\  globalThis.__awr_resolveToolJson__ = function(id) {
+    \\    const slot = __awr_pending__[id];
+    \\    if (!slot) return JSON.stringify({ ok: false, error: 'UnknownPendingId' });
+    \\    delete __awr_pending__[id];
+    \\    if (!slot.settled) return JSON.stringify({ ok: false, error: 'NotSettled' });
+    \\    try { return JSON.stringify(slot.value); }
+    \\    catch (e) { return JSON.stringify({ ok: false, error: 'NotSerializable', message: String(e) }); }
+    \\  };
+    \\
+    \\  const modelContext = {
+    \\    registerTool(descriptor, handler) {
+    \\      if (!descriptor || typeof descriptor.name !== 'string' || !descriptor.name) {
+    \\        throw new TypeError('registerTool: descriptor.name is required');
+    \\      }
+    \\      if (typeof handler !== 'function') {
+    \\        throw new TypeError('registerTool: handler must be a function');
+    \\      }
+    \\      const clone = __awr_clone_descriptor__(descriptor);
+    \\      __awr_tools__[clone.name] = { descriptor: clone, handler };
+    \\      return { unregister() { delete __awr_tools__[clone.name]; } };
+    \\    },
+    \\    unregisterTool(name) { delete __awr_tools__[String(name)]; },
+    \\    getTools() {
+    \\      const out = [];
+    \\      for (const name in __awr_tools__) out.push(__awr_clone_descriptor__(__awr_tools__[name].descriptor));
+    \\      return out;
+    \\    },
+    \\    callTool(name, args) {
+    \\      const entry = __awr_tools__[String(name)];
+    \\      if (!entry) return Promise.reject(new Error('No tool registered with name ' + name));
+    \\      try { return Promise.resolve(entry.handler(args || {})); }
+    \\      catch (e) { return Promise.reject(e); }
+    \\    },
+    \\  };
+    \\
+    \\  globalThis.navigator.modelContext = modelContext;
     \\})();
 ;
 

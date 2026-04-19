@@ -17,6 +17,23 @@ pub const MAX_TOTAL: usize      = 256;
 pub const IDLE_TIMEOUT_MS: i64  = 30_000;
 pub const MAX_REQUESTS: u32     = 100;
 
+// Zig 0.16: std.time.milliTimestamp and std.Thread.Mutex moved. The pool is
+// only touched synchronously from Client.fetch today, so use a no-op mutex
+// stub and a direct CLOCK_REALTIME read.
+// TODO(durable): thread a proper Io through the pool and use Io.Mutex once
+// the client is fully async (tracked in DEV_NOTES.md).
+fn milliTimestamp() i64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
+    return @as(i64, @intCast(ts.sec)) * 1000 +
+           @as(i64, @intCast(@divTrunc(ts.nsec, std.time.ns_per_ms)));
+}
+
+const NoopMutex = struct {
+    pub fn lock(_: *NoopMutex) void {}
+    pub fn unlock(_: *NoopMutex) void {}
+};
+
 // ── PooledConn ─────────────────────────────────────────────────────────────
 
 pub const PooledConn = struct {
@@ -28,7 +45,7 @@ pub const PooledConn = struct {
     request_count: u32,
 
     pub fn isHealthy(self: *const PooledConn) bool {
-        const now = std.time.milliTimestamp();
+        const now = milliTimestamp();
         return !self.in_use and
                (now - self.last_used_ms) < IDLE_TIMEOUT_MS and
                self.request_count < MAX_REQUESTS;
@@ -38,7 +55,7 @@ pub const PooledConn = struct {
 // ── OriginPool ─────────────────────────────────────────────────────────────
 
 pub const OriginPool = struct {
-    conns: std.ArrayList(PooledConn) = .{},
+    conns: std.ArrayList(PooledConn) = .empty,
 
     pub fn deinit(self: *OriginPool, allocator: std.mem.Allocator) void {
         self.conns.deinit(allocator);
@@ -76,7 +93,7 @@ pub const OriginPool = struct {
         try self.conns.append(allocator, PooledConn{
             .handle       = handle,
             .in_use       = true,
-            .last_used_ms = std.time.milliTimestamp(),
+            .last_used_ms = milliTimestamp(),
             .request_count = 0,
         });
     }
@@ -86,7 +103,7 @@ pub const OriginPool = struct {
         for (self.conns.items) |*c| {
             if (c.handle == handle) {
                 c.in_use = false;
-                c.last_used_ms = std.time.milliTimestamp();
+                c.last_used_ms = milliTimestamp();
                 c.request_count += 1;
                 return;
             }
@@ -95,7 +112,7 @@ pub const OriginPool = struct {
 
     /// Remove connections idle for longer than `older_than_ms` milliseconds.
     pub fn evictIdle(self: *OriginPool, allocator: std.mem.Allocator, older_than_ms: i64) void {
-        const now = std.time.milliTimestamp();
+        const now = milliTimestamp();
         var i: usize = 0;
         while (i < self.conns.items.len) {
             const c = &self.conns.items[i];
@@ -114,7 +131,7 @@ pub const OriginPool = struct {
 pub const ConnectionPool = struct {
     pools: std.StringHashMap(OriginPool),
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex = .{},
+    mutex: NoopMutex = .{},
     total_count: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) ConnectionPool {
@@ -257,7 +274,7 @@ test "OriginPool evicts idle connections older than threshold" {
     // evictIdle with 30s threshold — but we can't call allocator.destroy on a non-heap
     // pointer so we just manipulate the list directly in this unit test:
     // Remove the entry manually to simulate eviction
-    const now = std.time.milliTimestamp();
+    const now = milliTimestamp();
     var i: usize = 0;
     while (i < pool.conns.items.len) {
         const c = &pool.conns.items[i];
