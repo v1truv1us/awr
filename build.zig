@@ -5,11 +5,19 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // ── Build options shared with Zig modules ──────────────────────────────
-    // Embed git short hash for `./awr --version` → "0.0.<hash>"
-    const build_opts = b.addOptions();
-    const git_hash_raw = b.run(&.{ "git", "rev-parse", "--short", "HEAD" });
-    const git_hash = std.mem.trimEnd(u8, git_hash_raw, &[_]u8{ 0x20, 0x0a, 0x0d });
-    build_opts.addOption([]const u8, "git_hash", git_hash);
+    // Historically we built this via `b.addOptions()` + git rev-parse, but
+    // that path goes through atomic_file.link → renameat2(RENAME_NOREPLACE),
+    // which v9fs (gVisor's 9p FS) rejects with EINVAL. The static module at
+    // src/build_opts.zig serves the same role with no runtime fs gymnastics;
+    // update the hash literal in that file at release time.
+    // TODO(platform): restore addOptions() once the container FS supports
+    // renameat2 flags, or add a `-Dgit-hash=<hash>` cli option as an
+    // ergonomic alternative for CI builds.
+    const opts_mod = b.createModule(.{
+        .root_source_file = b.path("src/build_opts.zig"),
+        .target   = target,
+        .optimize = optimize,
+    });
 
     // ── libxev dependency ─────────────────────────────────────────────────
     const xev_dep = b.dependency("libxev", .{ .target = target, .optimize = optimize });
@@ -237,7 +245,6 @@ pub fn build(b: *std.Build) void {
     // ── AWR executable ───────────────────────────────────────────────────────
     {
         // Share one options module instance to avoid "file exists in two modules" error
-        const opts_mod = build_opts.createModule();
 
         const exe_page_mod = b.createModule(.{
             .root_source_file = b.path("src/page.zig"),

@@ -238,6 +238,8 @@ pub const Page = struct {
 
         // Build: __awr_callToolJson__('<name>', '<args_json>')
         // Both strings are written as JS single-quoted literals via writeJsStr.
+        // Zero-init so JS_Eval gets a '\0' at buf[script.len] (QuickJS requires
+        // input[input_len] == 0 even though length is passed explicitly).
         var buf = std.mem.zeroes([65536]u8);
         var w = std.Io.Writer.fixed(&buf);
         try w.writeAll("__awr_callToolJson__(");
@@ -261,7 +263,7 @@ pub const Page = struct {
 
         self.js.drainMicrotasks();
 
-        var resolve_buf: [128]u8 = undefined;
+        var resolve_buf = std.mem.zeroes([128]u8);
         const resolve_expr = try std.fmt.bufPrint(
             &resolve_buf,
             "__awr_resolveToolJson__({d})",
@@ -332,6 +334,11 @@ pub const Page = struct {
 
     /// Walk the DOM subtree depth-first and eval each inline <script> in
     /// document order.  External scripts (src=) are skipped — Phase 3.
+    ///
+    /// JS_Eval requires the input byte at `input[input_len]` to be 0 (see
+    /// the comment in third_party/quickjs-ng/quickjs.c near JS_Eval). Plain
+    /// slices from textContent/trim do not guarantee that, so we copy the
+    /// trimmed source into a sentinel-terminated buffer before calling eval.
     fn executeScriptsInElement(self: *Page, elem: *const dom.Element) void {
         if (std.ascii.eqlIgnoreCase(elem.tag, "script")) {
             if (elem.getAttribute("src") == null) {
@@ -339,9 +346,12 @@ pub const Page = struct {
                 defer self.allocator.free(src);
                 const trimmed = std.mem.trim(u8, src, " \t\r\n");
                 if (trimmed.len > 0) {
+                    const buf = self.allocator.allocSentinel(u8, trimmed.len, 0) catch return;
+                    defer self.allocator.free(buf);
+                    @memcpy(buf, trimmed);
                     // Silently ignore JS exceptions — consistent with browser
                     // error semantics (script errors don't halt page loading).
-                    self.js.eval(trimmed, "<inline-script>") catch {};
+                    self.js.eval(buf, "<inline-script>") catch {};
                 }
             }
             return; // never recurse into <script> contents

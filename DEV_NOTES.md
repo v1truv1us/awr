@@ -108,3 +108,37 @@ filesystem) rejects that flag with `EINVAL`. Specific build steps
 install path.
 
 **Durable fix:** same environment caveat as #7 — disappears off v9fs.
+
+### 9. JS_Eval input must be null-terminated
+
+QuickJS-NG's `JS_Eval(ctx, input, input_len, …)` reads `input[input_len]`
+during UTF-8 validation and will throw `SyntaxError: invalid UTF-8 sequence`
+if that byte is not `0`, even when `input_len` is correct. Slices produced
+by `std.mem.trim`, `bufPrint` into an uninitialised stack buffer, or any
+view over a larger buffer do *not* guarantee that property.
+
+Inside AWR this bit us in two places (both fixed):
+
+- `src/page.zig::executeScriptsInElement` — the trimmed script source is
+  now copied into `allocSentinel(u8, …, 0)` before `js.eval`.
+- `src/page.zig::callTool` — `resolve_buf` is now `std.mem.zeroes([128]u8)`
+  so the byte after the formatted expression is 0.
+
+**Durable fix:** expose a `evalOwned(source: [:0]const u8, …)` helper in
+`src/js/engine.zig` so the type system enforces the sentinel, and migrate
+all callers. Until then, any new caller that `eval`s a sliced buffer needs
+to zero-init or copy to a sentinel slice.
+
+### 10. `querySelector`/`querySelectorAll` supports descendant combinator
+
+`src/dom/node.zig::matchesSelector` originally only handled
+`tag`/`#id`/`.class`/`tag#id`/`tag.class`. The WebMCP mock uses
+`document.querySelectorAll('#catalog li')`, which requires the descendant
+combinator. `Document.querySelectorAll` now detects whitespace in the
+selector string and delegates to `collectCompound`, which splits on
+whitespace and applies each term to children of the previous match-set.
+
+**Limitations:** attribute selectors, `:not()`, `~`/`+`/`>` combinators,
+and multi-class selectors (`li.foo.bar`) are still unsupported. A durable
+fix is to swap in a real CSS-selector parser (e.g. call into lexbor's own
+selector engine) once Phase 3 work on the DOM layer lands.

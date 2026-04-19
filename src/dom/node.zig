@@ -134,7 +134,15 @@ pub const Document = struct {
     }
 
     pub fn querySelector(self: *const Document, sel: []const u8) ?*Element {
-        return findBySelector(self.root orelse return null, sel);
+        const root = self.root orelse return null;
+        const trimmed = std.mem.trim(u8, sel, " \t\n\r");
+        if (std.mem.indexOfAny(u8, trimmed, " \t")) |_| {
+            var out: std.ArrayList(*Element) = .empty;
+            defer out.deinit(std.heap.page_allocator);
+            collectCompound(std.heap.page_allocator, root, trimmed, &out);
+            return if (out.items.len > 0) out.items[0] else null;
+        }
+        return findBySelector(root, trimmed);
     }
 
     pub fn querySelectorAll(
@@ -143,8 +151,45 @@ pub const Document = struct {
         allocator: std.mem.Allocator,
     ) ![]*Element {
         var out: std.ArrayList(*Element) = .empty;
-        if (self.root) |root| collectBySelector(allocator, root, sel, &out);
+        const trimmed = std.mem.trim(u8, sel, " \t\n\r");
+        if (self.root) |root| {
+            if (std.mem.indexOfAny(u8, trimmed, " \t")) |_| {
+                collectCompound(allocator, root, trimmed, &out);
+            } else {
+                collectBySelector(allocator, root, trimmed, &out);
+            }
+        }
         return out.toOwnedSlice(allocator);
+    }
+
+    /// Handle descendant combinator: "A B C" matches elements matching C
+    /// that have an ancestor matching B that has an ancestor matching A.
+    /// Split by whitespace; resolve left-to-right.
+    fn collectCompound(
+        alloc: std.mem.Allocator,
+        root:  *Element,
+        sel:   []const u8,
+        out:   *std.ArrayList(*Element),
+    ) void {
+        var it = std.mem.tokenizeAny(u8, sel, " \t");
+        const first = it.next() orelse return;
+
+        var current: std.ArrayList(*Element) = .empty;
+        defer current.deinit(alloc);
+        collectBySelector(alloc, root, first, &current);
+
+        while (it.next()) |next_sel| {
+            var next_set: std.ArrayList(*Element) = .empty;
+            defer next_set.deinit(alloc);
+            for (current.items) |ancestor| {
+                for (ancestor.children.items) |child| {
+                    if (child == .element) collectBySelector(alloc, child.element, next_sel, &next_set);
+                }
+            }
+            current.deinit(alloc);
+            current = next_set.clone(alloc) catch .empty;
+        }
+        for (current.items) |e| out.append(alloc, e) catch {};
     }
 
     // ── Private search helpers ───────────────────────────────────────
