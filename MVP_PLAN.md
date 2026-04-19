@@ -4,13 +4,15 @@
 > demo showing AWR load a page, discover registered tools, and execute a tool
 > with typed JSON results.
 >
-> **Branch:** `claude/complete-mvp-X2DcT`
+> **Branch:** `claude/complete-mvp-X2DcT` (merged to `main` at commit `499fff4`)
 >
 > **Phases status:**
 > - Phase 1 (Networking): shipped with `std.http.Client`/`std.crypto.tls`; strict
 >   JA4 milestone moved to Phase 3 per `spec/PRD.md:128`.
 > - Phase 2 (JS env): ✅ complete per `spec/Phase2-Plan.md`.
-> - Phase 4 MVP (WebMCP): not started — this plan.
+> - Phase 4 MVP (WebMCP): ✅ **SHIPPED** — all seven steps below are
+>   marked ✅; end-to-end demo verified against
+>   `experiments/webmcp_mock.html`.
 >
 > Phase 3 fingerprinting and TUI are deliberately out of scope for the MVP
 > per `spec/PRD.md:194` ("requires no real bot detection, no real TUI, no real
@@ -31,7 +33,7 @@ Per PRD:
 
 ## Atomic steps
 
-### Step 1 — `navigator.modelContext` in the DOM bridge polyfill ⬜
+### Step 1 — `navigator.modelContext` in the DOM bridge polyfill ✅
 
 Add a WebMCP host to `src/dom/bridge.zig`'s `BRIDGE_POLYFILL`. The polyfill
 holds a per-context tool registry in JS:
@@ -54,7 +56,7 @@ Plus three internal hooks Zig calls via `evalString`:
 - `callTool` returns a Promise that resolves through `drainMicrotasks`
 - unknown tool → rejected promise / `{ok:false, error: ...}`
 
-### Step 2 — Surface registered tools in `PageResult` ⬜
+### Step 2 — Surface registered tools in `PageResult` ✅
 
 In `src/page.zig`:
 
@@ -67,7 +69,7 @@ In `src/page.zig`:
 **Tests:** JS that calls `registerTool` on a single tool → `tools_json`
 contains the name.  JS that doesn't → `tools_json == null`.
 
-### Step 3 — `Page.callTool(name, args_json) → []u8` ⬜
+### Step 3 — `Page.callTool(name, args_json) → []u8` ✅
 
 Add a method to `Page` that:
 
@@ -79,7 +81,7 @@ Add a method to `Page` that:
 
 **Tests:** sync tool, async tool, unknown tool, exception in `execute`.
 
-### Step 4 — CLI subcommands ⬜
+### Step 4 — CLI subcommands ✅
 
 Extend `src/main.zig`:
 
@@ -89,22 +91,27 @@ Extend `src/main.zig`:
 - `awr call <url> <tool> <argsJson>`: loads the page, invokes the tool,
   prints the call result JSON.
 
-### Step 5 — Mock WebMCP page fixture ⬜
+### Step 5 — Mock WebMCP page fixture ✅
 
 Add `experiments/webmcp_mock.html` registering 2-3 demo tools
 (`search_products`, `add_to_cart`, `get_price`). The fixture is consumable
 via `awr tools file://…` (if file:// is wired) **or** by feeding the HTML
 directly into `Page.processHtml` from a test.
 
-### Step 6 — End-to-end MVP integration test ⬜
+### Step 6 — End-to-end MVP integration test ✅
 
 One test in `src/page.zig` that loads the fixture HTML via `processHtml`,
 asserts all three tool descriptors surface in `PageResult.tools_json`, calls
 `get_price`, and asserts the typed JSON result.
 
-### Step 7 — Commit + push ⬜
+### Step 7 — Commit + push ✅
 
-Push `claude/complete-mvp-X2DcT`.
+Shipped on `claude/complete-mvp-X2DcT`, fast-forward merged to `main` at
+commit `499fff4`. Root-cause fixes for two silent-failure bugs landed in
+the same branch:
+- `JS_Eval` input null-termination (`src/page.zig::executeScriptsInElement`,
+  `src/page.zig::callTool`).
+- Descendant CSS combinator support in `src/dom/node.zig::collectCompound`.
 
 ---
 

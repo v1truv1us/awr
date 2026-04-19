@@ -181,13 +181,25 @@ libvaxis is the canonical Zig terminal library. Provides sixel graphics support 
 **Milestone**: Claude Code and Aider, pointed at a WebMCP mock server, successfully discover tools via `navigator.modelContext.getTools()` and execute them. Results are returned as typed JSON.
 
 **Deliverables**:
+
+*MVP scope:*
 - `navigator.modelContext` implementation
 - `registerTool()` / `getTools()` / `callTool()` JS API
 - WebMCP tool schema serialization (JSON Schema)
+- WebMCP mock server (standalone test target, served via `file://` is
+  sufficient for MVP)
+- CLI surface: `awr tools <url>` and `awr call <url> <tool> <json>` —
+  output is MCP-compatible JSON so any agent can shell out to it
+- Documentation: agent integration guide (how to wire AWR into an
+  agent's existing tool-use loop; Claude Code's Bash tool is the
+  reference integration)
+
+*MVP+1 (post-MVP, same phase):*
 - Agent API: stdin/stdout JSON protocol for headless agent use
-- MCP server mode: AWR as a tool server for Claude Code / agent frameworks
-- WebMCP mock server (standalone test target)
-- Documentation: agent integration guide
+- MCP stdio server mode: AWR as a native MCP tool server for Claude
+  Code / Aider / agent frameworks
+- Local HTTP server for the mock page (`awr mock`) so the demo can
+  exercise the real-URL path once HTTPS is unstubbed
 
 ---
 
@@ -195,12 +207,24 @@ libvaxis is the canonical Zig terminal library. Provides sixel graphics support 
 
 **WebMCP Mock Server Demo** — a self-contained demo showing:
 
-1. A local web server serving a page that calls `navigator.modelContext.registerTool()` with 2–3 tools (e.g., `search_products`, `add_to_cart`, `get_price`)
-2. AWR loads the page, discovers the tools, and exposes them to the agent
-3. Claude Code (or Aider, via MCP) receives the tool list, calls a tool, and gets a typed JSON response
-4. The interaction is logged to a shareable terminal session
+1. A local page (served via `file://` or a local HTTP server) calls
+   `navigator.modelContext.registerTool()` with 2–3 tools (e.g.,
+   `search_products`, `add_to_cart`, `get_price`)
+2. AWR loads the page, discovers the tools, and exposes them to an agent
+3. An agent (Claude Code via its Bash tool, or any wrapper script)
+   receives the tool list from `awr tools` and invokes one via
+   `awr call`, getting a typed JSON response
+4. The interaction is reproducible from a terminal transcript
 
-This demo requires no real bot detection, no real TUI, no real fingerprinting — just the WebMCP plumbing working end-to-end. It is the proof that the architecture is correct before we invest in the hard parts.
+This demo requires no real bot detection, no real TUI, no real
+fingerprinting, and **no MCP stdio server** — just the WebMCP plumbing
+working end-to-end plus the CLI surface. It is the proof that the
+architecture is correct before we invest in the hard parts.
+
+A dedicated stdio MCP server wrapper is an **MVP+1** deliverable
+(tracked in `MVP_PLAN.md:111-126`); the JSON envelope returned by
+`awr call` is already MCP-compatible, so any agent framework can wrap
+the CLI today.
 
 MVP is achievable within the Phase 4 timeline. It is not a separate track.
 
