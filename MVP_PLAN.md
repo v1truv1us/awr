@@ -1,8 +1,14 @@
 # AWR MVP Plan — WebMCP Mock Server Demo
 
-> **Target:** the MVP defined in `spec/PRD.md:194` — a self-contained WebMCP
-> demo showing AWR load a page, discover registered tools, and execute a tool
-> with typed JSON results.
+> **Authoritative MVP contract:** `spec/MVP.md` is the fully qualified
+> definition (functional requirements, acceptance tests, stub-closure
+> checklist). This plan describes the **v1 slice** — the in-page WebMCP
+> plumbing — which is ✅ shipped. The production bar (`v2`, "no stubs")
+> lives in `spec/MVP.md` §5/§6.
+>
+> **Target (v1):** the MVP defined in `spec/PRD.md:194` — a self-contained
+> WebMCP demo showing AWR load a page, discover registered tools, and
+> execute a tool with typed JSON results.
 >
 > **Branch:** `claude/complete-mvp-X2DcT` (merged to `main` at commit `499fff4`)
 >
