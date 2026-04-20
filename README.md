@@ -214,7 +214,8 @@ experiments/
 docs/
   agent-integration.md   How to wire AWR into an agent
 spec/
-  PRD.md            Product spec; MVP definition at :194
+  PRD.md            Product spec (MVP definition defers to spec/MVP.md)
+  MVP.md            Authoritative MVP contract: FRs, acceptance tests, stub-closure checklist
   Phase1-Networking-TLS.md
   Phase2-Plan.md
 third_party/lexbor/       Build notes for lexbor dependency
