@@ -1,10 +1,10 @@
 # AWR MVP — Fully Qualified Definition
 
 > **Single source of truth.** Supersedes the informal MVP scope that
-> shipped as `v1` (the in-page WebMCP plumbing alone, commit `ed1ebf3`
-> on `main`). `spec/PRD.md` and `MVP_PLAN.md` defer to this file for
-> the acceptance bar. MVP is declared done when every row in §5 is ✅
-> and every acceptance test in §3 passes on a clean
+> shipped as the initial `v1` slice (the in-page WebMCP plumbing alone).
+> `spec/PRD.md` and `MVP_PLAN.md` defer to this file for the acceptance
+> bar. MVP is declared done when every row in §5 is ✅ and every
+> acceptance test in §3 passes on a clean
 > `zig build -Doptimize=ReleaseSafe`.
 
 ---
