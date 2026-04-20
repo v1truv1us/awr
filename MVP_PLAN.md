@@ -6,23 +6,25 @@
 > plumbing — which is ✅ shipped. The production bar (`v2`, "no stubs")
 > lives in `spec/MVP.md` §5/§6.
 >
-> **Target (v1):** the MVP defined in `spec/PRD.md:194` — a self-contained
-> WebMCP demo showing AWR load a page, discover registered tools, and
-> execute a tool with typed JSON results.
+> **Target (v1):** the WebMCP Mock Server Demo defined by `spec/MVP.md`
+> (and summarised in the "## MVP Definition" section of `spec/PRD.md`) —
+> a self-contained demo showing AWR load a page, discover registered
+> tools, and execute a tool with typed JSON results.
 >
 > **Branch:** `claude/complete-mvp-X2DcT` (merged to `main` at commit `499fff4`)
 >
 > **Phases status:**
 > - Phase 1 (Networking): shipped with `std.http.Client`/`std.crypto.tls`; strict
->   JA4 milestone moved to Phase 3 per `spec/PRD.md:128`.
+>   JA4 milestone moved to Phase 3 per `spec/PRD.md`.
 > - Phase 2 (JS env): ✅ complete per `spec/Phase2-Plan.md`.
 > - Phase 4 MVP (WebMCP): ✅ **SHIPPED** — all seven steps below are
 >   marked ✅; end-to-end demo verified against
 >   `experiments/webmcp_mock.html`.
 >
-> Phase 3 fingerprinting and TUI are deliberately out of scope for the MVP
-> per `spec/PRD.md:194` ("requires no real bot detection, no real TUI, no real
-> fingerprinting — just the WebMCP plumbing working end-to-end").
+> Phase 3 fingerprinting and TUI are deliberately out of scope for the
+> v1 slice per `spec/MVP.md` §4 ("requires no real bot detection, no
+> real TUI, no real fingerprinting — just the WebMCP plumbing working
+> end-to-end").
 
 ---
 
