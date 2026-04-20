@@ -5,10 +5,11 @@ JavaScript, and exposes any WebMCP tools the page registers
 (`navigator.modelContext.registerTool(...)`) as a CLI surface so an
 agent can discover and invoke them.
 
-**Status: MVP shipped** (commit [`950d954`](../../commit/950d954) on
-`main`). See `spec/PRD.md:194` for the MVP contract and `MVP_PLAN.md`
-for the 7-step slice — all seven steps are ✅ and the end-to-end demo
-verified against `experiments/webmcp_mock.html`.
+**Status: v1 slice shipped** (commit [`950d954`](../../commit/950d954)
+on `main`). The authoritative MVP contract lives in `spec/MVP.md`;
+`MVP_PLAN.md` tracks the 7-step implementation slice. All seven steps
+are ✅, and the end-to-end demo is verified against
+`experiments/webmcp_mock.html`.
 
 ---
 
