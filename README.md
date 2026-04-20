@@ -18,7 +18,7 @@ are ✅, and the end-to-end demo is verified against
 ```bash
 zig build -Doptimize=ReleaseSafe       # produces zig-out/bin/awr (~9.9 MB)
 
-./zig-out/bin/awr --version            # e.g. 0.0.950d954
+./zig-out/bin/awr --version            # prints 0.0.<git-hash>
 ./zig-out/bin/awr tools experiments/webmcp_mock.html
 ./zig-out/bin/awr call  experiments/webmcp_mock.html \
     search_products '{"q":"Widget"}'
