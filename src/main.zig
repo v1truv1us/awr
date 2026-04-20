@@ -68,10 +68,33 @@ fn loadPage(
     return p.processHtml(synthetic_url, 200, html);
 }
 
-pub fn main(init: std.process.Init) !void {
-    const alloc = init.gpa;
-    const io = init.io;
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
+// We accept `Init.Minimal` instead of the richer `Init` so that Zig's
+// startup code in `std/start.zig` skips its own `DebugAllocator` setup.
+// That allocator captures a stack trace on every allocation, which in Zig
+// 0.16 panics with `integer overflow` inside
+// `std/debug/SelfInfo/Elf.zig:{460,472}` — the VDSO's `phdr.vaddr =
+// 0xffffffffff700000` is added to `info.addr` without wrapping arithmetic.
+// The buggy code path runs before `main`, so instrumenting here is too
+// late; the only in-repo fix is to never take that path. Upstream needs
+// `info.addr +% phdr.vaddr` on those two lines (line 497 already does
+// this for the .LOAD case).
+pub fn main(minimal: std.process.Init.Minimal) !void {
+    // `c_allocator` because build.zig links libc; this matches what
+    // `std/start.zig` does in ReleaseSafe/Fast and keeps the CLI well away
+    // from the `DebugAllocator` path above.
+    const alloc = std.heap.c_allocator;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena_state.deinit();
+
+    var threaded: std.Io.Threaded = .init(alloc, .{
+        .argv0 = .init(minimal.args),
+        .environ = minimal.environ,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const args = try minimal.args.toSlice(arena_state.allocator());
 
     if (args.len < 2) {
         try stdoutWrite(io, USAGE);
