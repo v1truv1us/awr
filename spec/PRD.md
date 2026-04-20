@@ -205,6 +205,10 @@ libvaxis is the canonical Zig terminal library. Provides sixel graphics support 
 
 ## MVP Definition
 
+> **Authoritative contract:** `spec/MVP.md` is the fully qualified MVP
+> definition (functional requirements, acceptance tests, stub-closure
+> checklist). The summary below is narrative; `spec/MVP.md` is the bar.
+
 **WebMCP Mock Server Demo** — a self-contained demo showing:
 
 1. A local page (served via `file://` or a local HTTP server) calls

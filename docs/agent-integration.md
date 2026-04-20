@@ -170,6 +170,9 @@ chain completes before the envelope is emitted.
 
 ## Related specs
 
-- `spec/PRD.md:194-220` — MVP definition and deliverables.
-- `MVP_PLAN.md` — the 7-step slice this MVP shipped.
+- `spec/MVP.md` — authoritative MVP contract (FRs, acceptance tests,
+  stub-closure checklist).
+- `spec/PRD.md` — product spec; the "## MVP Definition" section defers
+  to `spec/MVP.md`.
+- `MVP_PLAN.md` — the 7-step v1 slice this MVP shipped.
 - `DEV_NOTES.md` — patch-debt items and durable-fix plans.
