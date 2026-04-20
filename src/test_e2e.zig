@@ -17,7 +17,7 @@ const client = @import("client.zig");
 /// arrives uncompressed.  Chrome headers send `accept-encoding: gzip, …`
 /// which would give a compressed body we cannot parse here.
 fn getPlain(allocator: std.mem.Allocator, url: []const u8) !client.Response {
-    var c = client.Client.init(allocator, .{
+    var c = client.Client.init(allocator, std.testing.io, .{
         .follow_redirects   = true,
         .max_redirects      = 5,
         .use_chrome_headers = false,
@@ -28,7 +28,7 @@ fn getPlain(allocator: std.mem.Allocator, url: []const u8) !client.Response {
 
 /// Make a GET with Chrome-132 headers (compressed response — body not checked).
 fn getChrome(allocator: std.mem.Allocator, url: []const u8) !client.Response {
-    var c = client.Client.init(allocator, .{
+    var c = client.Client.init(allocator, std.testing.io, .{
         .follow_redirects   = true,
         .max_redirects      = 5,
         .use_chrome_headers = true,
@@ -81,7 +81,7 @@ test "e2e: Chrome-132 headers yield 200 from example.com" {
 
 test "e2e: invalid host returns DnsResolutionFailed" {
     const allocator = std.testing.allocator;
-    var c = client.Client.init(allocator, .{});
+    var c = client.Client.init(allocator, std.testing.io, .{});
     defer c.deinit();
     const result = c.fetch("http://this-host-definitely-does-not-exist.invalid/");
     try std.testing.expectError(client.FetchError.DnsResolutionFailed, result);
@@ -91,7 +91,7 @@ test "e2e: invalid host returns DnsResolutionFailed" {
 
 test "e2e: HTTPS fetch succeeds (std.http.Client)" {
     const allocator = std.testing.allocator;
-    var c = client.Client.init(allocator, .{});
+    var c = client.Client.init(allocator, std.testing.io, .{});
     defer c.deinit();
     var resp = try c.fetch("https://example.com/");
     defer resp.deinit();

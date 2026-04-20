@@ -91,7 +91,7 @@ pub fn main(init: std.process.Init) !void {
             try stdoutWrite(io, "usage: awr tools <url>\n");
             std.process.exit(1);
         }
-        var p = try page_mod.Page.init(alloc);
+        var p = try page_mod.Page.init(alloc, io);
         defer p.deinit();
         var result = loadPage(&p, alloc, io, args[2]) catch |err| {
             std.process.fatal("error loading {s}: {t}", .{ args[2], err });
@@ -109,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
             try stdoutWrite(io, "usage: awr call <url> <tool-name> <json-args>\n");
             std.process.exit(1);
         }
-        var p = try page_mod.Page.init(alloc);
+        var p = try page_mod.Page.init(alloc, io);
         defer p.deinit();
         var result = loadPage(&p, alloc, io, args[2]) catch |err| {
             std.process.fatal("error loading {s}: {t}", .{ args[2], err });
@@ -124,7 +124,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Default: treat arg as a URL/path and print the full JSON envelope.
     const url = args[1];
-    var p = try page_mod.Page.init(alloc);
+    var p = try page_mod.Page.init(alloc, io);
     defer p.deinit();
 
     var result = loadPage(&p, alloc, io, url) catch |err| {

@@ -6,7 +6,7 @@
 ///   drainMicrotasks → extract title + body_text → PageResult
 ///
 /// Usage:
-///   var page = try Page.init(allocator);
+///   var page = try Page.init(allocator, io);
 ///   defer page.deinit();
 ///   var result = try page.navigate("http://example.com/");
 ///   defer result.deinit();
@@ -85,12 +85,13 @@ pub const Page = struct {
     js:        engine.JsEngine,
 
     /// Initialise a new Page with default client options.
-    pub fn init(allocator: std.mem.Allocator) !Page {
+    /// `io` is threaded through to the HTTP client for all network fetches.
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Page {
         var js_engine = try engine.JsEngine.init(allocator, null);
         errdefer js_engine.deinit();
         return Page{
             .allocator = allocator,
-            .client    = client.Client.init(allocator, .{
+            .client    = client.Client.init(allocator, io, .{
                 .use_chrome_headers = false, // plain headers → uncompressed body
             }),
             .js = js_engine,
@@ -381,12 +382,12 @@ fn parsePendingId(json: []const u8) ?u64 {
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 test "Page.init and deinit" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 }
 
 test "Page.processHtml — preserves status code" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><body></body></html>");
@@ -395,7 +396,7 @@ test "Page.processHtml — preserves status code" {
 }
 
 test "Page.processHtml — preserves URL" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/page", 200,
         "<html><body></body></html>");
@@ -404,7 +405,7 @@ test "Page.processHtml — preserves URL" {
 }
 
 test "Page.processHtml — extracts title" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><head><title>Hello AWR</title></head><body></body></html>");
@@ -414,7 +415,7 @@ test "Page.processHtml — extracts title" {
 }
 
 test "Page.processHtml — null title when <title> absent" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><body><p>no title here</p></body></html>");
@@ -423,7 +424,7 @@ test "Page.processHtml — null title when <title> absent" {
 }
 
 test "Page.processHtml — extracts body text" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><body><p>Hello World</p></body></html>");
@@ -433,7 +434,7 @@ test "Page.processHtml — extracts body text" {
 
 test "Page.processHtml — html field is raw source" {
     const src = "<html><head><title>T</title></head><body></body></html>";
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200, src);
     defer result.deinit();
@@ -441,7 +442,7 @@ test "Page.processHtml — html field is raw source" {
 }
 
 test "Page.processHtml — executes inline script, JS state persists" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><body><script>var __awr_x__ = 42;</script></body></html>");
@@ -452,7 +453,7 @@ test "Page.processHtml — executes inline script, JS state persists" {
 }
 
 test "Page.processHtml — document.title accessible inside script" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><head><title>My Page</title></head><body>" ++
@@ -464,7 +465,7 @@ test "Page.processHtml — document.title accessible inside script" {
 }
 
 test "Page.processHtml — empty body gives empty body_text" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><body></body></html>");
@@ -474,7 +475,7 @@ test "Page.processHtml — empty body gives empty body_text" {
 }
 
 test "Page.processHtml — external script (src=) is skipped without crash" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><body><script src=\"/app.js\">fallback</script></body></html>");
@@ -486,7 +487,7 @@ test "Page.processHtml — external script (src=) is skipped without crash" {
 // ── Step 2 tests — window.location ────────────────────────────────────────
 
 test "Page.processHtml — window.location.href matches url arg" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml(
         "https://example.com/path?q=1", 200, "<html><body></body></html>");
@@ -499,7 +500,7 @@ test "Page.processHtml — window.location.href matches url arg" {
 // ── Step 3 tests — window.__awrData__ ─────────────────────────────────────
 
 test "PageResult.window_data — script sets __awrData__" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         "<html><body><script>window.__awrData__ = {ok: true, n: 42};</script></body></html>");
@@ -509,7 +510,7 @@ test "PageResult.window_data — script sets __awrData__" {
 }
 
 test "PageResult.window_data — null when not set" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         "<html><body></body></html>");
@@ -520,7 +521,7 @@ test "PageResult.window_data — null when not set" {
 // ── Step 4 — Phase 2 integration test ─────────────────────────────────────
 
 test "Phase 2 integration — JS reads DOM and surfaces data via window.__awrData__" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://shop.example.com/", 200,
         \\<html>
@@ -556,7 +557,7 @@ test "Phase 2 integration — JS reads DOM and surfaces data via window.__awrDat
 // ── Navigation isolation test ─────────────────────────────────────────────
 
 test "Page.processHtml — window_data does not bleed between navigations" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     // First navigation sets __awrData__
@@ -576,7 +577,7 @@ test "Page.processHtml — window_data does not bleed between navigations" {
 // ── WebMCP integration tests ──────────────────────────────────────────────
 
 test "WebMCP — empty page reports empty tool list" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         "<html><body></body></html>");
@@ -586,7 +587,7 @@ test "WebMCP — empty page reports empty tool list" {
 }
 
 test "WebMCP — registered tool appears in tools_json" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         \\<html><body><script>
@@ -603,7 +604,7 @@ test "WebMCP — registered tool appears in tools_json" {
 }
 
 test "WebMCP — sync tool callTool returns value" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         \\<html><body><script>
@@ -622,7 +623,7 @@ test "WebMCP — sync tool callTool returns value" {
 }
 
 test "WebMCP — unknown tool returns ToolNotFound" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         "<html><body></body></html>");
@@ -635,7 +636,7 @@ test "WebMCP — unknown tool returns ToolNotFound" {
 }
 
 test "WebMCP — async tool resolves via drainMicrotasks" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         \\<html><body><script>
@@ -654,7 +655,7 @@ test "WebMCP — async tool resolves via drainMicrotasks" {
 }
 
 test "WebMCP — tool handler that throws returns ToolThrew" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         \\<html><body><script>
@@ -673,7 +674,7 @@ test "WebMCP — tool handler that throws returns ToolThrew" {
 }
 
 test "WebMCP end-to-end — mock shop page with three tools" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://shop.example.com/", 200,
         \\<html><body>
@@ -743,7 +744,7 @@ test "WebMCP end-to-end — mock shop page with three tools" {
 // ── Integration test (requires network) ───────────────────────────────────
 
 test "Page.navigate — fetches http://example.com" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.navigate("http://example.com/");
     defer result.deinit();
