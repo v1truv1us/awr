@@ -200,7 +200,7 @@ These stay deferred — listed here so we never silently expand scope:
 ## 5. Stub Closure Checklist
 
 Every row must be ✅ before MVP is declared done. Paths refer to the
-current `main` (commit `ed1ebf3`).
+current `main`; line numbers may drift as implementation evolves.
 
 | # | Stub | Location | Unblocks | Status |
 |---|------|----------|----------|--------|
