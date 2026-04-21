@@ -1,6 +1,7 @@
 const std = @import("std");
 const build_opts = @import("build_opts");
 const page_mod = @import("page");
+const mock_mod = @import("mock.zig");
 
 fn writeJsonStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
     try list.append(alloc, '"');
@@ -29,6 +30,7 @@ const USAGE =
     \\  awr <url>                    Load URL/path, print JSON {url, status, title, body_text, window_data, tools}
     \\  awr tools <url>              Load URL/path, print the JSON array of registered WebMCP tools
     \\  awr call <url> <name> <json> Load URL/path, invoke tool <name> with <json> args, print result envelope
+    \\  awr mock [--port N]          Serve experiments/ over HTTP (default: 127.0.0.1:7777)
     \\  awr --version                Print version and exit
     \\
     \\<url> may be an http(s):// URL, a file:// URL, or a local filesystem path.
@@ -113,13 +115,35 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         return;
     }
 
+    // Subcommand: awr mock [--port N] [--root DIR]
+    if (std.mem.eql(u8, args[1], "mock")) {
+        var port: u16 = 7777;
+        var root: []const u8 = "experiments";
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--port") and i + 1 < args.len) {
+                port = std.fmt.parseInt(u16, args[i + 1], 10) catch {
+                    std.process.fatal("mock: --port expects a u16, got '{s}'", .{args[i + 1]});
+                };
+                i += 1;
+            } else if (std.mem.eql(u8, args[i], "--root") and i + 1 < args.len) {
+                root = args[i + 1];
+                i += 1;
+            } else {
+                std.process.fatal("mock: unknown arg '{s}'", .{args[i]});
+            }
+        }
+        try mock_mod.run(alloc, io, "127.0.0.1", port, root);
+        return;
+    }
+
     // Subcommand: awr tools <url>
     if (std.mem.eql(u8, args[1], "tools")) {
         if (args.len < 3) {
             try stdoutWrite(io, "usage: awr tools <url>\n");
             std.process.exit(1);
         }
-        var p = try page_mod.Page.init(alloc);
+        var p = try page_mod.Page.init(alloc, io);
         defer p.deinit();
         var result = loadPage(&p, alloc, io, args[2]) catch |err| {
             std.process.fatal("error loading {s}: {t}", .{ args[2], err });
@@ -137,7 +161,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
             try stdoutWrite(io, "usage: awr call <url> <tool-name> <json-args>\n");
             std.process.exit(1);
         }
-        var p = try page_mod.Page.init(alloc);
+        var p = try page_mod.Page.init(alloc, io);
         defer p.deinit();
         var result = loadPage(&p, alloc, io, args[2]) catch |err| {
             std.process.fatal("error loading {s}: {t}", .{ args[2], err });
@@ -152,7 +176,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
 
     // Default: treat arg as a URL/path and print the full JSON envelope.
     const url = args[1];
-    var p = try page_mod.Page.init(alloc);
+    var p = try page_mod.Page.init(alloc, io);
     defer p.deinit();
 
     var result = loadPage(&p, alloc, io, url) catch |err| {

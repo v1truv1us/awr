@@ -1,19 +1,19 @@
 /// client.zig — AWR HTTP client.
 ///
-/// Wires together all Phase 1 net modules into a single fetch() call:
-///   URL parser → TcpConn → HTTP/1.1 request → Response
-///   URL parser → std.http.Client (HTTPS) → Response
+/// Wraps `std.http.Client` (which uses `std.crypto.tls` for HTTPS) and
+/// exposes the minimal fetch surface AWR needs: one-shot GET, follow
+/// redirects, return `{status, headers, body}`. JA4+ fingerprint
+/// matching / BoringSSL / H2 multiplexing live in Phase 3; this module
+/// is the MVP network path.
 ///
-/// HTTPS uses std.http.Client (backed by std.crypto.tls).
-/// TODO(Phase 3): Replace with AWR's owned BoringSSL stack + JA4+ Chrome 132 fingerprint.
-///
-/// TCP is synchronous via libxev (Phase 2 will bring full async).
+/// Threading: the caller owns an `std.Io` (typically from
+/// `std.process.Init.io` or `std.testing.io`) and passes it at
+/// `Client.init` time. It's re-used by every fetch.
 const std = @import("std");
 
 const http1   = @import("net/http1.zig");
 const cookie  = @import("net/cookie.zig");
 const pool    = @import("net/pool.zig");
-const tcp     = @import("net/tcp.zig");
 const url_mod = @import("net/url.zig");
 
 pub const Url = url_mod.Url;
@@ -69,13 +69,15 @@ pub const FetchError = error{
 
 pub const Client = struct {
     allocator: std.mem.Allocator,
+    io:        std.Io,
     cookies:   cookie.CookieJar,
     conns:     pool.ConnectionPool,
     options:   ClientOptions,
 
-    pub fn init(allocator: std.mem.Allocator, options: ClientOptions) Client {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, options: ClientOptions) Client {
         return Client{
             .allocator = allocator,
+            .io        = io,
             .cookies   = cookie.CookieJar.init(allocator),
             .conns     = pool.ConnectionPool.init(allocator),
             .options   = options,
@@ -89,60 +91,139 @@ pub const Client = struct {
 
     /// Fetch a URL. Caller must call response.deinit() on success.
     pub fn fetch(self: *Client, url_str: []const u8) anyerror!Response {
-        const parsed = url_mod.Url.parse(url_str) catch return FetchError.InvalidUrl;
-        return self.fetchUrl(parsed, 0);
-    }
+        // Validate via our own URL parser so bad inputs surface as InvalidUrl
+        // before std.http.Client parses and returns its own error.
+        _ = url_mod.Url.parse(url_str) catch return FetchError.InvalidUrl;
 
-    fn fetchUrl(self: *Client, parsed: Url, redirect_count: u8) anyerror!Response {
-        if (redirect_count > self.options.max_redirects) return FetchError.TooManyRedirects;
+        var std_client: std.http.Client = .{
+            .allocator = self.allocator,
+            .io        = self.io,
+        };
+        defer std_client.deinit();
 
-        // HTTPS: delegate to std.http.Client (std.crypto.tls under the hood).
-        // TODO(Phase 3): Replace with AWR's owned BoringSSL stack.
-        if (parsed.is_https) {
-            var path_buf: [2048]u8 = undefined;
-            const path = parsed.pathWithQuery(&path_buf);
-            // Heap-allocate the URL string — stack buffers in a recursive redirect
-            // chain can overflow (observed crash on HN's HTTP→HTTPS redirect).
-            const full_url = try std.fmt.allocPrint(self.allocator, "https://{s}:{d}{s}", .{
-                parsed.host, parsed.port, path,
-            });
-            defer self.allocator.free(full_url);
-            return self.fetchHttpsViaStd(full_url, redirect_count);
+        var body_buf: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer body_buf.deinit();
+
+        const redirect_behavior: std.http.Client.Request.RedirectBehavior =
+            if (self.options.follow_redirects)
+                @enumFromInt(self.options.max_redirects)
+            else
+                .unhandled;
+
+        const effective_user_agent =
+            if (self.options.user_agent.len != 0)
+                self.options.user_agent
+            else if (self.options.use_chrome_headers)
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+            else
+                "awr";
+
+        var extra_headers: [10]std.http.Header = undefined;
+        var extra_header_count: usize = 0;
+
+        extra_headers[extra_header_count] = .{ .name = "user-agent", .value = effective_user_agent };
+        extra_header_count += 1;
+
+        if (self.options.use_chrome_headers) {
+            extra_headers[extra_header_count] = .{ .name = "accept", .value = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,*/*;q=0.8" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "accept-language", .value = "en-US,en;q=0.9" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "cache-control", .value = "max-age=0" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "pragma", .value = "no-cache" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "sec-fetch-dest", .value = "document" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "sec-fetch-mode", .value = "navigate" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "sec-fetch-site", .value = "none" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "sec-fetch-user", .value = "?1" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "upgrade-insecure-requests", .value = "1" };
+            extra_header_count += 1;
         }
 
-        // HTTP path — resolve hostname, connect TCP, build request, read response
-        return self.fetchHttp(parsed, redirect_count);
-    }
+        const result = std_client.fetch(.{
+            .location = .{ .url = url_str },
+            .response_writer = &body_buf.writer,
+            .redirect_behavior = redirect_behavior,
+            .extra_headers = extra_headers[0..extra_header_count],
+            .timeout_ms = self.options.timeout_ms,
+        }) catch |err| return mapFetchError(err);
 
-    /// HTTP fetch: TcpConn → http1.Request → Response.
-    /// TODO(zig-0.16): std.net was removed and std.io.GenericReader is gone.
-    /// The owned HTTP/1.1 + libxev path needs a rewrite against the new
-    /// std.Io.Reader interface before this re-lights. Tracked in
-    /// DEV_NOTES.md under "Owned HTTP stack rewrite".
-    fn fetchHttp(self: *Client, parsed: Url, redirect_count: u8) anyerror!Response {
-        _ = self;
-        _ = parsed;
-        _ = redirect_count;
-        return FetchError.ConnectionFailed;
-    }
+        var body_list = body_buf.toArrayList();
+        errdefer body_list.deinit(self.allocator);
+        const body = try body_list.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(body);
 
-    /// HTTPS fetch via std.http.Client.
-    /// TODO(zig-0.16): std.http.Client now requires an Io handle that must be
-    /// threaded from main() through Page → Client. Stubbed until the Io is
-    /// wired through. For the MVP, use Page.processHtml with locally-loaded
-    /// HTML instead of navigating over the network.
-    fn fetchHttpsViaStd(self: *Client, url_str: []const u8, redirect_count: u8) anyerror!Response {
-        _ = self;
-        _ = url_str;
-        _ = redirect_count;
-        return FetchError.TlsNotAvailable;
+        const headers = try cloneFetchHeaders(self.allocator, result.headers);
+        errdefer headers.deinit(self.allocator);
+
+        return Response{
+            .status    = @intFromEnum(result.status),
+            .headers   = headers,
+            .body      = body,
+            .allocator = self.allocator,
+        };
     }
 };
+
+fn cloneFetchHeaders(allocator: std.mem.Allocator, src_headers: anytype) !http1.HeaderList {
+    var headers: http1.HeaderList = .{};
+    errdefer headers.deinit(allocator);
+
+    for (src_headers) |header| {
+        try headers.append(allocator, .{
+            .name = try allocator.dupe(u8, header.name),
+            .value = try allocator.dupe(u8, header.value),
+        });
+    }
+
+    headers.owns_strings = true;
+    return headers;
+}
+/// Translate `std.http.Client.FetchError` into our stable `FetchError`
+/// surface. Anything we can't map falls through as the original error.
+fn mapFetchError(err: anyerror) anyerror {
+    return switch (err) {
+        error.UnknownHostName,
+        error.NameServerFailure,
+        error.TemporaryNameServerFailure,
+        error.HostLacksNetworkAddresses,
+        error.NoAddressReturned,
+        error.NoAddressesResolved,
+        error.InvalidHostName,
+        => FetchError.DnsResolutionFailed,
+
+        error.ConnectionRefused,
+        error.NetworkUnreachable,
+        error.ConnectionTimedOut,
+        error.ConnectionResetByPeer,
+        => FetchError.ConnectionFailed,
+
+        error.TlsInitializationFailed,
+        error.TlsAlert,
+        error.TlsFailure,
+        => FetchError.TlsNotAvailable,
+
+        error.TooManyHttpRedirects => FetchError.TooManyRedirects,
+
+        error.UnsupportedUriScheme,
+        error.UriMissingHost,
+        => FetchError.InvalidUrl,
+
+        error.OutOfMemory => FetchError.OutOfMemory,
+
+        else => err,
+    };
+}
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 test "Client.init and deinit" {
-    var client = Client.init(std.testing.allocator, .{});
+    var client = Client.init(std.testing.allocator, std.testing.io, .{});
     defer client.deinit();
     try std.testing.expect(client.cookies.cookies.items.len == 0);
 }
@@ -155,25 +236,15 @@ test "Client options defaults" {
     try std.testing.expect(opts.use_chrome_headers);
 }
 
-// Integration test — requires network; uncomment to run manually
-// test "integration: fetch https://example.com" {
-//     var client = Client.init(std.testing.allocator, .{});
-//     defer client.deinit();
-//     var resp = try client.fetch("https://example.com/");
-//     defer resp.deinit();
-//     try std.testing.expectEqual(@as(u16, 200), resp.status);
-//     try std.testing.expect(std.mem.indexOf(u8, resp.body, "Example Domain") != null);
-// }
-
 test "fetch returns InvalidUrl for bad URL" {
-    var client = Client.init(std.testing.allocator, .{});
+    var client = Client.init(std.testing.allocator, std.testing.io, .{});
     defer client.deinit();
     const result = client.fetch("not-a-url");
     try std.testing.expectError(FetchError.InvalidUrl, result);
 }
 
 test "fetch returns DnsResolutionFailed for invalid host" {
-    var client = Client.init(std.testing.allocator, .{});
+    var client = Client.init(std.testing.allocator, std.testing.io, .{});
     defer client.deinit();
     const result = client.fetch("http://this.host.does.not.exist.invalid/");
     try std.testing.expectError(FetchError.DnsResolutionFailed, result);
@@ -181,7 +252,7 @@ test "fetch returns DnsResolutionFailed for invalid host" {
 
 test "Client cookie jar is populated after fetch sets a cookie (mock)" {
     // Verify cookie jar stores cookies via parseSetCookie directly
-    var client = Client.init(std.testing.allocator, .{});
+    var client = Client.init(std.testing.allocator, std.testing.io, .{});
     defer client.deinit();
     try client.cookies.parseSetCookie("session=abc123; Path=/; HttpOnly", "example.com");
     try std.testing.expectEqual(@as(usize, 1), client.cookies.cookies.items.len);
@@ -193,27 +264,3 @@ test "fetch TooManyRedirects when max_redirects is 0" {
     const opts = ClientOptions{ .max_redirects = 0 };
     try std.testing.expectEqual(@as(u8, 0), opts.max_redirects);
 }
-
-test "HTTPS fetch respects redirect_count guard at fetchUrl entry" {
-    // redirect_count > max_redirects → TooManyRedirects before any network call.
-    // With max_redirects=0, the guard at fetchUrl line 97 fires first:
-    // redirect_count(0) > max_redirects(0) → false, so it proceeds to DNS
-    // which fails with DnsResolutionFailed (not TooManyRedirects).
-    // This test validates the guard boundary logic.
-    const opts = ClientOptions{ .max_redirects = 0 };
-    try std.testing.expectEqual(@as(u8, 0), opts.max_redirects);
-
-    // Verify a higher redirect count triggers TooManyRedirects
-    const opts2 = ClientOptions{ .max_redirects = 0 };
-    try std.testing.expectEqual(@as(u8, 0), opts2.max_redirects);
-}
-
-// Integration test — requires network access; skipped in CI
-// test "integration: fetch http://example.com" {
-//     var client = Client.init(std.testing.allocator, .{});
-//     defer client.deinit();
-//     var resp = try client.fetch("http://example.com/");
-//     defer resp.deinit();
-//     try std.testing.expectEqual(@as(u16, 200), resp.status);
-//     try std.testing.expect(resp.body.len > 0);
-// }

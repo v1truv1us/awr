@@ -6,7 +6,7 @@
 ///   drainMicrotasks → extract title + body_text → PageResult
 ///
 /// Usage:
-///   var page = try Page.init(allocator);
+///   var page = try Page.init(allocator, io);
 ///   defer page.deinit();
 ///   var result = try page.navigate("http://example.com/");
 ///   defer result.deinit();
@@ -75,31 +75,120 @@ fn writeJsStr(w: anytype, s: []const u8) !void {
 
 // ── Page ──────────────────────────────────────────────────────────────────
 
-/// Top-level browser page.  Owns an HTTP client and a JS engine.
+/// Top-level browser page.  Owns an HTTP client, a JS engine, and the
+/// libxev-backed event loop that drives `setTimeout`/`setInterval`/`fetch`.
 ///
-/// The JS engine context is reset at the start of each `processHtml` call so
-/// that variables set by one navigation are invisible in the next.
+/// The JS engine context is reset at the start of each `processHtml` call
+/// so that variables set by one navigation are invisible in the next. The
+/// event loop's timer registry is cleared at the same time.
 pub const Page = struct {
-    allocator: std.mem.Allocator,
-    client:    client.Client,
-    js:        engine.JsEngine,
+    allocator:  std.mem.Allocator,
+    io:         std.Io,
+    client:     client.Client,
+    js:         engine.JsEngine,
+    event_loop: engine.EventLoop,
+    base_url:   []u8,  // duped, may be replaced on each processHtml
 
     /// Initialise a new Page with default client options.
-    pub fn init(allocator: std.mem.Allocator) !Page {
+    /// `io` is threaded through to the HTTP client for all network fetches
+    /// and to `std.Io.Dir.readFileAlloc` for `file://` external scripts.
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Page {
         var js_engine = try engine.JsEngine.init(allocator, null);
         errdefer js_engine.deinit();
-        return Page{
-            .allocator = allocator,
-            .client    = client.Client.init(allocator, .{
+
+        var el = try engine.EventLoop.init(allocator, js_engine.ctx);
+        errdefer el.deinit();
+
+        const base_url = try allocator.dupe(u8, "");
+
+        var page = Page{
+            .allocator  = allocator,
+            .io         = io,
+            .client     = client.Client.init(allocator, io, .{
                 .use_chrome_headers = false, // plain headers → uncompressed body
             }),
-            .js = js_engine,
+            .js         = js_engine,
+            .event_loop = el,
+            .base_url   = base_url,
         };
+        page.attachHosts();
+        return page;
     }
 
     pub fn deinit(self: *Page) void {
+        self.event_loop.deinit();
         self.js.deinit();
         self.client.deinit();
+        self.allocator.free(self.base_url);
+    }
+
+    /// Wire the Page's event loop and fetch adapter into the JsEngine so
+    /// that JS `setTimeout` / `fetch` reach the Zig runtime. Call after
+    /// every JsEngine (re-)init.
+    fn attachHosts(self: *Page) void {
+        self.js.attachEventLoop(&self.event_loop);
+        self.js.attachFetchHost(.{
+            .ptr     = self,
+            .fetchFn = fetchAdapter,
+        });
+    }
+
+    /// FetchHost adapter: runs the caller's URL through either the HTTP
+    /// client (`http(s)://`) or the filesystem (`file://`), resolving
+    /// relative URLs against the page's base URL.
+    fn fetchAdapter(ptr: *anyopaque, url: []const u8) anyerror!engine.FetchHost.Response {
+        const self: *Page = @ptrCast(@alignCast(ptr));
+        const gpa = self.allocator;
+
+        const resolved = try resolveUrl(gpa, self.base_url, url);
+        errdefer gpa.free(resolved);
+
+        if (std.mem.startsWith(u8, resolved, "http://") or
+            std.mem.startsWith(u8, resolved, "https://"))
+        {
+            var resp = try self.client.fetch(resolved);
+            defer resp.deinit();
+            const body = try gpa.dupe(u8, resp.body);
+            return .{
+                .status    = resp.status,
+                .body      = body,
+                .url       = resolved,
+                .allocator = gpa,
+            };
+        }
+        if (std.mem.startsWith(u8, resolved, "file://")) {
+            const path = resolved[7..];
+            const body = try std.Io.Dir.cwd().readFileAlloc(
+                self.io,
+                path,
+                gpa,
+                .limited(16 * 1024 * 1024),
+            );
+            return .{
+                .status    = 200,
+                .body      = body,
+                .url       = resolved,
+                .allocator = gpa,
+            };
+        }
+        gpa.free(resolved);
+        return error.UnsupportedScheme;
+    }
+
+    /// Drain microtasks + tick the event loop until both queues are empty.
+    /// Caps the wait at `max_ms` wall-clock milliseconds so a runaway
+    /// `setInterval` cannot wedge the test runner.
+    pub fn drainAll(self: *Page, max_ms: u64) void {
+        self.event_loop.loop.update_now();
+        const start = self.event_loop.loop.now();
+        const deadline = start +| @as(i64, @intCast(max_ms));
+        while (true) {
+            self.js.drainMicrotasks();
+            if (!self.event_loop.hasPending()) return;
+            self.event_loop.loop.update_now();
+            if (self.event_loop.loop.now() >= deadline) return;
+            self.event_loop.tickOnce() catch return;
+        }
     }
 
     // ── Public API ───────────────────────────────────────────────────────
@@ -129,6 +218,15 @@ pub const Page = struct {
         const saved_sink = self.js.host.sink;
         self.js.deinit();
         self.js = try engine.JsEngine.init(gpa, saved_sink);
+        // The event loop holds Values tied to the previous context; discard
+        // them and re-point at the new context, then re-attach timer/fetch
+        // bindings.
+        self.event_loop.reset(self.js.ctx);
+        self.attachHosts();
+
+        // Update base URL for fetch() relative resolution.
+        gpa.free(self.base_url);
+        self.base_url = try gpa.dupe(u8, url);
 
         // Keep a copy of the raw HTML for PageResult.html.
         const html = try gpa.dupe(u8, html_src);
@@ -149,11 +247,15 @@ pub const Page = struct {
         // ── Populate window.location from the requested URL ───────────────
         self.setLocationFromUrl(url);
 
-        // ── Execute inline <script> tags in document order ────────────────
-        if (zig_doc.htmlElement()) |root| self.executeScriptsInElement(root);
+        // ── Execute <script> tags (inline + external src=) in document order.
+        if (zig_doc.htmlElement()) |root| self.executeScriptsInElement(root, url);
 
-        // ── Drain microtask / Promise queue ───────────────────────────────
-        self.js.drainMicrotasks();
+        // ── Drain microtask + macrotask queues ────────────────────────────
+        // drainAll alternates QuickJS job drain with libxev ticks so that
+        // setTimeout callbacks and fetch resolvers run before we extract
+        // page state. The cap is generous — long enough for real network
+        // fetches, short enough to bail out of a runaway setInterval.
+        self.drainAll(5_000);
 
         // ── Extract window.__awrData__ (if set by page scripts) ───────────
         const window_data: ?[]const u8 = blk: {
@@ -261,7 +363,9 @@ pub const Page = struct {
             return try gpa.dupe(u8, "{\"ok\":false,\"error\":\"BadPendingEnvelope\"}");
         };
 
-        self.js.drainMicrotasks();
+        // Drain both microtasks and any setTimeout/fetch macrotasks the tool
+        // scheduled before extracting the resolved value.
+        self.drainAll(5_000);
 
         var resolve_buf = std.mem.zeroes([128]u8);
         const resolve_expr = try std.fmt.bufPrint(
@@ -332,35 +436,197 @@ pub const Page = struct {
 
     // ── Script execution ─────────────────────────────────────────────────
 
-    /// Walk the DOM subtree depth-first and eval each inline <script> in
-    /// document order.  External scripts (src=) are skipped — Phase 3.
+    /// Walk the DOM subtree depth-first and execute each `<script>` in
+    /// document order. Inline scripts eval directly; external scripts
+    /// (`src=`) are resolved against `page_url` and fetched — http(s)://
+    /// via the HTTP client, file:// via the local filesystem.
     ///
-    /// JS_Eval requires the input byte at `input[input_len]` to be 0 (see
-    /// the comment in third_party/quickjs-ng/quickjs.c near JS_Eval). Plain
-    /// slices from textContent/trim do not guarantee that, so we copy the
-    /// trimmed source into a sentinel-terminated buffer before calling eval.
-    fn executeScriptsInElement(self: *Page, elem: *const dom.Element) void {
+    /// JS_Eval requires `input[input_len] == 0` (see
+    /// `third_party/quickjs-ng/quickjs.c` near `JS_Eval`), so script
+    /// sources are copied into a sentinel-terminated buffer before eval.
+    ///
+    /// Fetch / eval errors are logged to stderr and swallowed — consistent
+    /// with browser semantics where a failed subresource does not halt
+    /// page loading. Recursion stops at the `<script>` node (its children
+    /// are the source, not further DOM to scan).
+    fn executeScriptsInElement(
+        self: *Page,
+        elem: *const dom.Element,
+        page_url: []const u8,
+    ) void {
         if (std.ascii.eqlIgnoreCase(elem.tag, "script")) {
-            if (elem.getAttribute("src") == null) {
-                const src = elem.textContent(self.allocator) catch return;
-                defer self.allocator.free(src);
-                const trimmed = std.mem.trim(u8, src, " \t\r\n");
-                if (trimmed.len > 0) {
-                    const buf = self.allocator.allocSentinel(u8, trimmed.len, 0) catch return;
-                    defer self.allocator.free(buf);
-                    @memcpy(buf, trimmed);
-                    // Silently ignore JS exceptions — consistent with browser
-                    // error semantics (script errors don't halt page loading).
-                    self.js.eval(buf, "<inline-script>") catch {};
-                }
+            if (elem.getAttribute("src")) |raw_src| {
+                self.runExternalScript(page_url, raw_src);
+            } else {
+                self.runInlineScript(elem);
             }
-            return; // never recurse into <script> contents
+            return;
         }
         for (elem.children.items) |child| {
-            if (child == .element) self.executeScriptsInElement(child.element);
+            if (child == .element) self.executeScriptsInElement(child.element, page_url);
         }
     }
+
+    fn runInlineScript(self: *Page, elem: *const dom.Element) void {
+        const src = elem.textContent(self.allocator) catch return;
+        defer self.allocator.free(src);
+        const trimmed = std.mem.trim(u8, src, " \t\r\n");
+        if (trimmed.len == 0) return;
+        const buf = self.allocator.allocSentinel(u8, trimmed.len, 0) catch return;
+        defer self.allocator.free(buf);
+        @memcpy(buf, trimmed);
+        self.js.eval(buf, "<inline-script>") catch {};
+    }
+
+    fn runExternalScript(self: *Page, page_url: []const u8, raw_src: []const u8) void {
+        const trimmed_src = std.mem.trim(u8, raw_src, " \t\r\n");
+        if (trimmed_src.len == 0) return;
+
+        const resolved = resolveUrl(self.allocator, page_url, trimmed_src) catch |err| {
+            std.debug.print("awr: external script resolve failed ({s}): {t}\n", .{ trimmed_src, err });
+            return;
+        };
+        defer self.allocator.free(resolved);
+
+        const body = self.fetchExternalResource(resolved) catch |err| {
+            std.debug.print("awr: external script fetch failed ({s}): {t}\n", .{ resolved, err });
+            return;
+        };
+        defer self.allocator.free(body);
+
+        if (body.len == 0) return;
+        const buf = self.allocator.allocSentinel(u8, body.len, 0) catch return;
+        defer self.allocator.free(buf);
+        @memcpy(buf, body);
+        // QuickJS's eval wants a null-terminated filename for its stack traces;
+        // allocate one alongside the script buffer so errors point at the URL.
+        const name = self.allocator.allocSentinel(u8, resolved.len, 0) catch return;
+        defer self.allocator.free(name);
+        @memcpy(name, resolved);
+        self.js.eval(buf, name) catch {};
+    }
+
+    /// Fetch an external resource (e.g. `<script src>`) and return its body
+    /// as an owned slice. Supports http(s):// via the HTTP client and
+    /// file:// via direct filesystem read. Any other scheme fails fast.
+    fn fetchExternalResource(self: *Page, url: []const u8) ![]u8 {
+        if (std.mem.startsWith(u8, url, "http://") or
+            std.mem.startsWith(u8, url, "https://"))
+        {
+            var resp = try self.client.fetch(url);
+            defer resp.deinit();
+            return try self.allocator.dupe(u8, resp.body);
+        }
+        if (std.mem.startsWith(u8, url, "file://")) {
+            // file:// URLs: strip the scheme, read from cwd.
+            // Handles both "file:///abs/path" and "file://relative/path".
+            const path = url[7..];
+            return std.Io.Dir.cwd().readFileAlloc(
+                self.io,
+                path,
+                self.allocator,
+                .limited(16 * 1024 * 1024),
+            );
+        }
+        return error.UnsupportedScheme;
+    }
 };
+
+// ── URL resolution ────────────────────────────────────────────────────────
+
+/// Resolve `ref` against `base`. Returns an allocated absolute URL.
+///
+/// Covers the cases AWR's MVP needs for `<script src>` and similar:
+///   - `ref` already has a scheme (http://, https://, file://) → dup as-is
+///   - protocol-relative (`//host/path`) → base scheme + ref
+///   - absolute path (`/path`) → base scheme://authority + ref
+///   - relative path (`foo.js`, `./foo.js`, `../foo.js`) → resolved against
+///     the directory of the base URL's path, with `.`/`..` normalised.
+///
+/// Fragments and query strings on `base` are stripped before resolution.
+fn resolveUrl(
+    alloc: std.mem.Allocator,
+    base: []const u8,
+    ref: []const u8,
+) ![]u8 {
+    if (hasScheme(ref)) return alloc.dupe(u8, ref);
+
+    const scheme_end = std.mem.indexOf(u8, base, "://") orelse
+        return alloc.dupe(u8, ref);
+    const authority_start = scheme_end + 3;
+
+    if (std.mem.startsWith(u8, ref, "//")) {
+        return std.fmt.allocPrint(alloc, "{s}:{s}", .{ base[0..scheme_end], ref });
+    }
+
+    const authority_end = std.mem.indexOfScalarPos(u8, base, authority_start, '/') orelse base.len;
+    const origin_str = base[0..authority_end];
+
+    if (std.mem.startsWith(u8, ref, "/")) {
+        return joinAndNormalize(alloc, origin_str, ref);
+    }
+
+    // Relative — resolve against the directory of base.path.
+    var path_end = base.len;
+    if (std.mem.indexOfScalarPos(u8, base, authority_end, '?')) |q| path_end = @min(path_end, q);
+    if (std.mem.indexOfScalarPos(u8, base, authority_end, '#')) |h| path_end = @min(path_end, h);
+
+    const base_path = if (authority_end < path_end) base[authority_end..path_end] else "/";
+    const last_slash = std.mem.lastIndexOfScalar(u8, base_path, '/') orelse 0;
+    const dir = base_path[0 .. last_slash + 1];
+
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(alloc);
+    try joined.appendSlice(alloc, dir);
+    try joined.appendSlice(alloc, ref);
+
+    return joinAndNormalize(alloc, origin_str, joined.items);
+}
+
+/// Normalise the `.`/`..` segments of an absolute path and prefix it with
+/// `origin`. The input path must begin with '/'.
+fn joinAndNormalize(alloc: std.mem.Allocator, origin: []const u8, path: []const u8) ![]u8 {
+    var segments: std.ArrayList([]const u8) = .empty;
+    defer segments.deinit(alloc);
+
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next()) |seg| {
+        if (std.mem.eql(u8, seg, ".")) continue;
+        if (std.mem.eql(u8, seg, "..")) {
+            if (segments.items.len > 0) _ = segments.pop();
+            continue;
+        }
+        try segments.append(alloc, seg);
+    }
+
+    // Preserve a trailing slash when the input ended in one (e.g. "/dir/").
+    const trailing_slash = path.len > 0 and path[path.len - 1] == '/';
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.appendSlice(alloc, origin);
+    if (segments.items.len == 0) {
+        try out.append(alloc, '/');
+    } else {
+        for (segments.items) |seg| {
+            try out.append(alloc, '/');
+            try out.appendSlice(alloc, seg);
+        }
+        if (trailing_slash) try out.append(alloc, '/');
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// Returns true when `s` has an RFC 3986 scheme prefix (`[A-Za-z][A-Za-z0-9+.-]*:`).
+fn hasScheme(s: []const u8) bool {
+    if (s.len == 0 or !std.ascii.isAlphabetic(s[0])) return false;
+    for (s[1..], 1..) |c, i| {
+        if (c == ':') return i > 0;
+        const ok = std.ascii.isAlphanumeric(c) or c == '+' or c == '-' or c == '.';
+        if (!ok) return false;
+    }
+    return false;
+}
 
 /// Extract the integer value following `"pending":` in a JSON string.
 /// Returns null if the key is missing or the value is not a positive integer.
@@ -381,12 +647,12 @@ fn parsePendingId(json: []const u8) ?u64 {
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 test "Page.init and deinit" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 }
 
 test "Page.processHtml — preserves status code" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><body></body></html>");
@@ -395,7 +661,7 @@ test "Page.processHtml — preserves status code" {
 }
 
 test "Page.processHtml — preserves URL" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/page", 200,
         "<html><body></body></html>");
@@ -404,7 +670,7 @@ test "Page.processHtml — preserves URL" {
 }
 
 test "Page.processHtml — extracts title" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><head><title>Hello AWR</title></head><body></body></html>");
@@ -414,7 +680,7 @@ test "Page.processHtml — extracts title" {
 }
 
 test "Page.processHtml — null title when <title> absent" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><body><p>no title here</p></body></html>");
@@ -423,7 +689,7 @@ test "Page.processHtml — null title when <title> absent" {
 }
 
 test "Page.processHtml — extracts body text" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><body><p>Hello World</p></body></html>");
@@ -433,7 +699,7 @@ test "Page.processHtml — extracts body text" {
 
 test "Page.processHtml — html field is raw source" {
     const src = "<html><head><title>T</title></head><body></body></html>";
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200, src);
     defer result.deinit();
@@ -441,7 +707,7 @@ test "Page.processHtml — html field is raw source" {
 }
 
 test "Page.processHtml — executes inline script, JS state persists" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><body><script>var __awr_x__ = 42;</script></body></html>");
@@ -452,7 +718,7 @@ test "Page.processHtml — executes inline script, JS state persists" {
 }
 
 test "Page.processHtml — document.title accessible inside script" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><head><title>My Page</title></head><body>" ++
@@ -464,7 +730,7 @@ test "Page.processHtml — document.title accessible inside script" {
 }
 
 test "Page.processHtml — empty body gives empty body_text" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("http://example.com/", 200,
         "<html><body></body></html>");
@@ -473,20 +739,85 @@ test "Page.processHtml — empty body gives empty body_text" {
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
 }
 
-test "Page.processHtml — external script (src=) is skipped without crash" {
-    var page = try Page.init(std.testing.allocator);
+test "Page.processHtml — external script (src=) with unreachable host fails softly" {
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
+    // Absolute src pointing at a host that won't resolve — the fetch must
+    // fail without aborting page processing, and the inline <script> that
+    // follows must still run.
     var result = try page.processHtml("http://example.com/", 200,
-        "<html><body><script src=\"/app.js\">fallback</script></body></html>");
+        "<html><body>" ++
+        "<script src=\"http://this.host.does.not.exist.invalid/app.js\"></script>" ++
+        "<script>window.__awr_after_ext__ = true;</script>" ++
+        "</body></html>");
     defer result.deinit();
-    // Should complete without error even though src= script cannot be loaded.
     try std.testing.expectEqual(@as(u16, 200), result.status);
+    const after = try page.js.evalBool("window.__awr_after_ext__ === true");
+    try std.testing.expect(after);
+}
+
+test "Page.processHtml — external script (src=) via file:// loads and executes" {
+    var page = try Page.init(std.testing.allocator, std.testing.io);
+    defer page.deinit();
+    // Base URL points at the fixture so `./tools.js` resolves to
+    // experiments/tools.js on disk. Reading the shell fixture keeps the
+    // test hermetic (no real HTTP, no mock server).
+    var result = try page.processHtml(
+        "file://experiments/external_script.html",
+        200,
+        "<html><body><script src=\"./tools.js\"></script></body></html>",
+    );
+    defer result.deinit();
+    try std.testing.expect(result.tools_json != null);
+    try std.testing.expect(
+        std.mem.indexOf(u8, result.tools_json.?, "external_ping") != null,
+    );
+    const loaded = try page.js.evalBool("window.__awrExternalLoaded__ === true");
+    try std.testing.expect(loaded);
+}
+
+// ── URL resolution tests ──────────────────────────────────────────────────
+
+test "resolveUrl — absolute http ref wins" {
+    const out = try resolveUrl(std.testing.allocator, "http://a.com/page", "https://b.com/x.js");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("https://b.com/x.js", out);
+}
+
+test "resolveUrl — protocol-relative" {
+    const out = try resolveUrl(std.testing.allocator, "https://a.com/page", "//cdn.example/x.js");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("https://cdn.example/x.js", out);
+}
+
+test "resolveUrl — absolute path" {
+    const out = try resolveUrl(std.testing.allocator, "http://a.com/dir/page", "/x.js");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("http://a.com/x.js", out);
+}
+
+test "resolveUrl — relative path strips ./ and joins to base dir" {
+    const out = try resolveUrl(std.testing.allocator, "http://a.com/dir/page.html", "./x.js");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("http://a.com/dir/x.js", out);
+}
+
+test "resolveUrl — relative path with .." {
+    const out = try resolveUrl(std.testing.allocator, "http://a.com/dir/sub/page.html", "../x.js");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("http://a.com/dir/x.js", out);
+}
+
+test "resolveUrl — relative against file:// base" {
+    const out = try resolveUrl(std.testing.allocator, "file://experiments/page.html", "./tools.js");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("file://experiments/tools.js", out);
 }
 
 // ── Step 2 tests — window.location ────────────────────────────────────────
 
 test "Page.processHtml — window.location.href matches url arg" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml(
         "https://example.com/path?q=1", 200, "<html><body></body></html>");
@@ -499,7 +830,7 @@ test "Page.processHtml — window.location.href matches url arg" {
 // ── Step 3 tests — window.__awrData__ ─────────────────────────────────────
 
 test "PageResult.window_data — script sets __awrData__" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         "<html><body><script>window.__awrData__ = {ok: true, n: 42};</script></body></html>");
@@ -509,7 +840,7 @@ test "PageResult.window_data — script sets __awrData__" {
 }
 
 test "PageResult.window_data — null when not set" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         "<html><body></body></html>");
@@ -520,7 +851,7 @@ test "PageResult.window_data — null when not set" {
 // ── Step 4 — Phase 2 integration test ─────────────────────────────────────
 
 test "Phase 2 integration — JS reads DOM and surfaces data via window.__awrData__" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://shop.example.com/", 200,
         \\<html>
@@ -556,7 +887,7 @@ test "Phase 2 integration — JS reads DOM and surfaces data via window.__awrDat
 // ── Navigation isolation test ─────────────────────────────────────────────
 
 test "Page.processHtml — window_data does not bleed between navigations" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
 
     // First navigation sets __awrData__
@@ -576,7 +907,7 @@ test "Page.processHtml — window_data does not bleed between navigations" {
 // ── WebMCP integration tests ──────────────────────────────────────────────
 
 test "WebMCP — empty page reports empty tool list" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         "<html><body></body></html>");
@@ -586,7 +917,7 @@ test "WebMCP — empty page reports empty tool list" {
 }
 
 test "WebMCP — registered tool appears in tools_json" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         \\<html><body><script>
@@ -603,7 +934,7 @@ test "WebMCP — registered tool appears in tools_json" {
 }
 
 test "WebMCP — sync tool callTool returns value" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         \\<html><body><script>
@@ -622,7 +953,7 @@ test "WebMCP — sync tool callTool returns value" {
 }
 
 test "WebMCP — unknown tool returns ToolNotFound" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         "<html><body></body></html>");
@@ -635,7 +966,7 @@ test "WebMCP — unknown tool returns ToolNotFound" {
 }
 
 test "WebMCP — async tool resolves via drainMicrotasks" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         \\<html><body><script>
@@ -654,7 +985,7 @@ test "WebMCP — async tool resolves via drainMicrotasks" {
 }
 
 test "WebMCP — tool handler that throws returns ToolThrew" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://x.com/", 200,
         \\<html><body><script>
@@ -673,7 +1004,7 @@ test "WebMCP — tool handler that throws returns ToolThrew" {
 }
 
 test "WebMCP end-to-end — mock shop page with three tools" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml("https://shop.example.com/", 200,
         \\<html><body>
@@ -743,7 +1074,7 @@ test "WebMCP end-to-end — mock shop page with three tools" {
 // ── Integration test (requires network) ───────────────────────────────────
 
 test "Page.navigate — fetches http://example.com" {
-    var page = try Page.init(std.testing.allocator);
+    var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.navigate("http://example.com/");
     defer result.deinit();
