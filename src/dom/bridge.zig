@@ -42,6 +42,22 @@ const engine = @import("../js/engine.zig");
 const BridgeCtx = struct {
     doc:       *dom.Document,
     allocator: std.mem.Allocator,
+    elem_to_handle: std.AutoHashMap(*dom.Element, u32),
+    handle_to_elem: std.ArrayList(*dom.Element),
+
+    fn init(doc: *dom.Document, allocator: std.mem.Allocator) BridgeCtx {
+        return .{
+            .doc = doc,
+            .allocator = allocator,
+            .elem_to_handle = std.AutoHashMap(*dom.Element, u32).init(allocator),
+            .handle_to_elem = std.ArrayList(*dom.Element).empty,
+        };
+    }
+
+    fn deinit(self: *BridgeCtx) void {
+        self.elem_to_handle.deinit();
+        self.handle_to_elem.deinit(self.allocator);
+    }
 };
 
 fn getBridge(ctx: ?*qjs.Context) ?*BridgeCtx {
@@ -63,7 +79,7 @@ pub fn installDomBridge(
     alloc: std.mem.Allocator,
 ) BridgeError!void {
     const bctx = alloc.create(BridgeCtx) catch return BridgeError.AllocFailed;
-    bctx.* = .{ .doc = doc, .allocator = alloc };
+    bctx.* = BridgeCtx.init(doc, alloc);
 
     // Store in host extension
     eng.host.extension = @ptrCast(bctx);
@@ -80,6 +96,7 @@ pub fn removeDomBridge(eng: *engine.JsEngine) void {
     const host = eng.ctx.getOpaque(engine.EngineHostData) orelse return;
     const ext  = host.extension orelse return;
     const bctx: *BridgeCtx = @ptrCast(@alignCast(ext));
+    bctx.deinit();
     bctx.allocator.destroy(bctx);
     host.extension = null;
 }
@@ -95,6 +112,13 @@ fn installNativeCallbacks(eng: *engine.JsEngine) !void {
         .{ "getElementById",   getElementByIdFn },
         .{ "getTitle",         getTitleFn },
         .{ "getBody",          getBodyFn },
+        .{ "createElement",    createElementFn },
+        .{ "setAttribute",     setAttributeFn },
+        .{ "removeAttribute",  removeAttributeFn },
+        .{ "setTextContent",   setTextContentFn },
+        .{ "appendChild",      appendChildFn },
+        .{ "insertBefore",     insertBeforeFn },
+        .{ "removeChild",      removeChildFn },
     }) |entry| {
         const fname: [:0]const u8 = "__awr_" ++ entry[0] ++ "__";
         const fn_val = qjs.Value.initCFunction(ctx, entry[1], fname, 1);
@@ -131,10 +155,30 @@ fn writeJsonStr(w: anytype, str: []const u8) !void {
 
 /// Serialize an Element to a compact JSON object string.
 /// Writes into `buf`; returns the written slice or null on overflow.
-fn elementToJson(elem: *const dom.Element, buf: []u8) ?[]const u8 {
-    var w = std.Io.Writer.fixed(buf);
+fn ensureHandle(bridge: *BridgeCtx, elem: *dom.Element) ?u32 {
+    if (bridge.elem_to_handle.get(elem)) |h| return h;
+    bridge.handle_to_elem.append(bridge.allocator, elem) catch return null;
+    const h: u32 = @intCast(bridge.handle_to_elem.items.len);
+    bridge.elem_to_handle.put(elem, h) catch return null;
+    return h;
+}
 
-    w.writeAll("{\"tag\":") catch return null;
+fn getElemByHandle(bridge: *BridgeCtx, handle: u32) ?*dom.Element {
+    if (handle == 0) return null;
+    const idx: usize = handle - 1;
+    if (idx >= bridge.handle_to_elem.items.len) return null;
+    return bridge.handle_to_elem.items[idx];
+}
+
+fn elementToJson(bridge: *BridgeCtx, elem: *dom.Element, buf: []u8) ?[]const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    const handle = ensureHandle(bridge, elem) orelse return null;
+
+    w.writeAll("{\"_h\":") catch return null;
+    var hbuf: [32]u8 = undefined;
+    const hs = std.fmt.bufPrint(&hbuf, "{d}", .{handle}) catch return null;
+    w.writeAll(hs) catch return null;
+    w.writeAll(",\"tag\":") catch return null;
     writeJsonStr(&w, elem.tag) catch return null;
     w.writeAll(",\"attrs\":[") catch return null;
     for (elem.attributes, 0..) |attr, i| {
@@ -167,7 +211,7 @@ fn querySelectorFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quic
 
     const elem = bridge.doc.querySelector(sel) orelse return qjs.Value.null;
     var buf: [8192]u8 = undefined;
-    const json = elementToJson(elem, &buf) orelse return qjs.Value.null;
+    const json = elementToJson(bridge, elem, &buf) orelse return qjs.Value.null;
     return qjs.Value.initStringLen(c, json);
 }
 
@@ -190,7 +234,7 @@ fn querySelectorAllFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("q
     for (elems, 0..) |elem, i| {
         if (i > 0) w.writeByte(',') catch break;
         var ebuf: [8192]u8 = undefined;
-        if (elementToJson(elem, &ebuf)) |json| {
+        if (elementToJson(bridge, elem, &ebuf)) |json| {
             w.writeAll(json) catch break;
         }
     }
@@ -210,7 +254,7 @@ fn getElementByIdFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("qui
 
     const elem = bridge.doc.getElementById(id) orelse return qjs.Value.null;
     var buf: [8192]u8 = undefined;
-    const json = elementToJson(elem, &buf) orelse return qjs.Value.null;
+    const json = elementToJson(bridge, elem, &buf) orelse return qjs.Value.null;
     return qjs.Value.initStringLen(c, json);
 }
 
@@ -230,8 +274,162 @@ fn getBodyFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.J
     const c      = ctx orelse return qjs.Value.null;
     const body   = bridge.doc.body() orelse return qjs.Value.null;
     var buf: [8192]u8 = undefined;
-    const json = elementToJson(body, &buf) orelse return qjs.Value.null;
+    const json = elementToJson(bridge, body, &buf) orelse return qjs.Value.null;
     return qjs.Value.initStringLen(c, json);
+}
+
+fn parseHandleArg(ctx: *qjs.Context, raw: @import("quickjs").c.JSValue) ?u32 {
+    const v: qjs.Value = @bitCast(raw);
+    const i = v.toInt32(ctx) catch return null;
+    if (i <= 0) return null;
+    return @intCast(i);
+}
+
+fn createElementFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
+    if (args.len < 1) return qjs.Value.null;
+    const tag_v: qjs.Value = @bitCast(args[0]);
+    const tag_c = tag_v.toCString(c) orelse return qjs.Value.null;
+    defer c.freeCString(tag_c);
+    const tag = std.mem.span(tag_c);
+    const alloc = bridge.doc.arena.allocator();
+    const elem = alloc.create(dom.Element) catch return qjs.Value.null;
+    elem.* = .{ .tag = alloc.dupe(u8, tag) catch return qjs.Value.null, .attributes = &.{}, .children = .empty, .parent = null };
+    var buf: [2048]u8 = undefined;
+    const json = elementToJson(bridge, elem, &buf) orelse return qjs.Value.null;
+    return qjs.Value.initStringLen(c, json);
+}
+
+fn setAttributeFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initBool(false);
+    const c = ctx orelse return qjs.Value.initBool(false);
+    if (args.len < 3) return qjs.Value.initBool(false);
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.initBool(false);
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.initBool(false);
+    const name_v: qjs.Value = @bitCast(args[1]);
+    const val_v: qjs.Value = @bitCast(args[2]);
+    const name_c = name_v.toCString(c) orelse return qjs.Value.initBool(false);
+    defer c.freeCString(name_c);
+    const val_c = val_v.toCString(c) orelse return qjs.Value.initBool(false);
+    defer c.freeCString(val_c);
+    const alloc = bridge.doc.arena.allocator();
+    const name = alloc.dupe(u8, std.mem.span(name_c)) catch return qjs.Value.initBool(false);
+    const value = alloc.dupe(u8, std.mem.span(val_c)) catch return qjs.Value.initBool(false);
+    for (elem.attributes) |*a| {
+        if (std.ascii.eqlIgnoreCase(a.name, name)) {
+            a.value = value;
+            return qjs.Value.initBool(true);
+        }
+    }
+    const old = elem.attributes;
+    const next = alloc.alloc(dom.Attribute, old.len + 1) catch return qjs.Value.initBool(false);
+    @memcpy(next[0..old.len], old);
+    next[old.len] = .{ .name = name, .value = value };
+    elem.attributes = next;
+    return qjs.Value.initBool(true);
+}
+
+fn removeAttributeFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initBool(false);
+    const c = ctx orelse return qjs.Value.initBool(false);
+    if (args.len < 2) return qjs.Value.initBool(false);
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.initBool(false);
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.initBool(false);
+    const name_v: qjs.Value = @bitCast(args[1]);
+    const name_c = name_v.toCString(c) orelse return qjs.Value.initBool(false);
+    defer c.freeCString(name_c);
+    const name = std.mem.span(name_c);
+    const old = elem.attributes;
+    var kept: usize = 0;
+    for (old) |a| if (!std.ascii.eqlIgnoreCase(a.name, name)) kept += 1;
+    const alloc = bridge.doc.arena.allocator();
+    const next = alloc.alloc(dom.Attribute, kept) catch return qjs.Value.initBool(false);
+    var j: usize = 0;
+    for (old) |a| {
+        if (!std.ascii.eqlIgnoreCase(a.name, name)) {
+            next[j] = a;
+            j += 1;
+        }
+    }
+    elem.attributes = next;
+    return qjs.Value.initBool(true);
+}
+
+fn setTextContentFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initBool(false);
+    const c = ctx orelse return qjs.Value.initBool(false);
+    if (args.len < 2) return qjs.Value.initBool(false);
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.initBool(false);
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.initBool(false);
+    const txt_v: qjs.Value = @bitCast(args[1]);
+    const txt_c = txt_v.toCString(c) orelse return qjs.Value.initBool(false);
+    defer c.freeCString(txt_c);
+    elem.children.clearRetainingCapacity();
+    const alloc = bridge.doc.arena.allocator();
+    const t = alloc.create(dom.Text) catch return qjs.Value.initBool(false);
+    t.* = .{ .data = alloc.dupe(u8, std.mem.span(txt_c)) catch return qjs.Value.initBool(false), .parent = elem };
+    elem.children.append(alloc, .{ .text = t }) catch return qjs.Value.initBool(false);
+    return qjs.Value.initBool(true);
+}
+
+fn detachChild(parent: *dom.Element, child: *dom.Element) bool {
+    for (parent.children.items, 0..) |n, i| {
+        if (n == .element and n.element == child) {
+            _ = parent.children.orderedRemove(i);
+            child.parent = null;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn appendChildFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initBool(false);
+    const c = ctx orelse return qjs.Value.initBool(false);
+    if (args.len < 2) return qjs.Value.initBool(false);
+    const ph = parseHandleArg(c, args[0]) orelse return qjs.Value.initBool(false);
+    const ch = parseHandleArg(c, args[1]) orelse return qjs.Value.initBool(false);
+    const parent = getElemByHandle(bridge, ph) orelse return qjs.Value.initBool(false);
+    const child = getElemByHandle(bridge, ch) orelse return qjs.Value.initBool(false);
+    if (child.parent) |old| _ = detachChild(old, child);
+    parent.children.append(bridge.doc.arena.allocator(), .{ .element = child }) catch return qjs.Value.initBool(false);
+    child.parent = parent;
+    return qjs.Value.initBool(true);
+}
+
+fn insertBeforeFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initBool(false);
+    const c = ctx orelse return qjs.Value.initBool(false);
+    if (args.len < 3) return qjs.Value.initBool(false);
+    const ph = parseHandleArg(c, args[0]) orelse return qjs.Value.initBool(false);
+    const nh = parseHandleArg(c, args[1]) orelse return qjs.Value.initBool(false);
+    const parent = getElemByHandle(bridge, ph) orelse return qjs.Value.initBool(false);
+    const node = getElemByHandle(bridge, nh) orelse return qjs.Value.initBool(false);
+    if (node.parent) |old| _ = detachChild(old, node);
+    const alloc = bridge.doc.arena.allocator();
+    var idx: usize = parent.children.items.len;
+    if (parseHandleArg(c, args[2])) |rh| {
+        if (getElemByHandle(bridge, rh)) |ref| {
+            for (parent.children.items, 0..) |n, i| {
+                if (n == .element and n.element == ref) { idx = i; break; }
+            }
+        }
+    }
+    parent.children.insert(alloc, idx, .{ .element = node }) catch return qjs.Value.initBool(false);
+    node.parent = parent;
+    return qjs.Value.initBool(true);
+}
+
+fn removeChildFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initBool(false);
+    const c = ctx orelse return qjs.Value.initBool(false);
+    if (args.len < 2) return qjs.Value.initBool(false);
+    const ph = parseHandleArg(c, args[0]) orelse return qjs.Value.initBool(false);
+    const ch = parseHandleArg(c, args[1]) orelse return qjs.Value.initBool(false);
+    const parent = getElemByHandle(bridge, ph) orelse return qjs.Value.initBool(false);
+    const child = getElemByHandle(bridge, ch) orelse return qjs.Value.initBool(false);
+    return qjs.Value.initBool(detachChild(parent, child));
 }
 
 // ── JS polyfill ───────────────────────────────────────────────────────────
@@ -249,15 +447,16 @@ const BRIDGE_POLYFILL =
     \\    const el = {
     \\      nodeType: 1,
     \\      tagName: (d.tag || '').toUpperCase(),
+    \\      _h: d._h || 0,
     \\      _attrs: attrs,
     \\      _text: d.text || '',
     \\      _children: [],
     \\      getAttribute(name) { return this._attrs[name.toLowerCase()] != null ? this._attrs[name.toLowerCase()] : null; },
-    \\      setAttribute(name, value) { this._attrs[name.toLowerCase()] = String(value); },
-    \\      removeAttribute(name) { delete this._attrs[name.toLowerCase()]; },
+    \\      setAttribute(name, value) { this._attrs[name.toLowerCase()] = String(value); __awr_setAttribute__(this._h, String(name), String(value)); },
+    \\      removeAttribute(name) { delete this._attrs[name.toLowerCase()]; __awr_removeAttribute__(this._h, String(name)); },
     \\      hasAttribute(name) { return name.toLowerCase() in this._attrs; },
     \\      get textContent() { return this._text; },
-    \\      set textContent(v) { this._text = String(v); this._innerHTML = String(v); },
+    \\      set textContent(v) { this._text = String(v); this._innerHTML = String(v); __awr_setTextContent__(this._h, String(v)); },
     \\      get innerHTML() { return this._innerHTML != null ? this._innerHTML : this._text; },
     \\      set innerHTML(v) { this._innerHTML = String(v); },
     \\      get outerHTML() { return '<' + this.tagName.toLowerCase() + '>' + this.innerHTML + '</' + this.tagName.toLowerCase() + '>'; },
@@ -277,9 +476,22 @@ const BRIDGE_POLYFILL =
     \\      addEventListener() {},
     \\      removeEventListener() {},
     \\      dispatchEvent() { return true; },
-    \\      appendChild(child) { this._children.push(child); return child; },
-    \\      removeChild(child) { this._children = this._children.filter(c => c !== child); return child; },
-    \\      insertBefore(node) { this._children.unshift(node); return node; },
+    \\      appendChild(child) {
+    \\        this._children.push(child);
+    \\        if (child && child._h) __awr_appendChild__(this._h, child._h);
+    \\        return child;
+    \\      },
+    \\      removeChild(child) {
+    \\        this._children = this._children.filter(c => c !== child);
+    \\        if (child && child._h) __awr_removeChild__(this._h, child._h);
+    \\        return child;
+    \\      },
+    \\      insertBefore(node, ref) {
+    \\        const idx = ref ? this._children.indexOf(ref) : -1;
+    \\        if (idx >= 0) this._children.splice(idx, 0, node); else this._children.unshift(node);
+    \\        __awr_insertBefore__(this._h, node && node._h ? node._h : 0, ref && ref._h ? ref._h : 0);
+    \\        return node;
+    \\      },
     \\      contains(other) { return false; },
     \\      querySelector(sel) { return null; },
     \\      querySelectorAll(sel) { return []; },
@@ -319,7 +531,7 @@ const BRIDGE_POLYFILL =
     \\    get body() { const r = __awr_getBody__(); return r ? makeElement(r) : null; },
     \\    get head() { return this.querySelector('head'); },
     \\    get documentElement() { return this.querySelector('html'); },
-    \\    createElement(tag) { return makeElement({tag: tag, attrs: [], text: ''}); },
+    \\    createElement(tag) { const r = __awr_createElement__(String(tag)); return r ? makeElement(r) : makeElement({tag: tag, attrs: [], text: ''}); },
     \\    createTextNode(text) { return {nodeType: 3, textContent: String(text), nodeValue: String(text), data: String(text)}; },
     \\    createDocumentFragment() { const f = {_ch:[], appendChild(c){this._ch.push(c);return c;}, querySelectorAll(){return [];}}; return f; },
     \\    createComment(text) { return {nodeType: 8, nodeValue: text}; },
@@ -718,4 +930,24 @@ test "bridge — localStorage stub does not throw" {
     defer removeDomBridge(&eng);
 
     try eng.eval("localStorage.setItem('key','value'); const v = localStorage.getItem('key');", "<test>");
+}
+
+test "bridge — DOM mutations reflect into Zig querySelector" {
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><div id=\"root\"></div></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    try eng.eval(
+        \\const root = document.getElementById('root');
+        \\const n = document.createElement('span');
+        \\n.setAttribute('id', 'added');
+        \\n.textContent = 'hello';
+        \\root.appendChild(n);
+    , "<test>");
+    const ok = try eng.evalBool("document.querySelector('#added') !== null && document.querySelector('#added').textContent === 'hello'");
+    try std.testing.expect(ok);
 }

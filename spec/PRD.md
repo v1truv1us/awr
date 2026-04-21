@@ -208,8 +208,11 @@ libvaxis is the canonical Zig terminal library. Provides sixel graphics support 
 > **Authoritative contract:** `spec/MVP.md` is the fully qualified MVP
 > definition (functional requirements, acceptance tests, stub-closure
 > checklist). The summary below is narrative; `spec/MVP.md` is the bar.
+>
+> **Scope correction (effective April 21, 2026):** WebMCP host behavior is
+> not part of MVP gating. WebMCP work is tracked as MVP+1.
 
-**WebMCP Mock Server Demo** — a self-contained demo showing:
+**(MVP+1) WebMCP Mock Server Demo** — a self-contained demo showing:
 
 1. A local page (served via `file://` or a local HTTP server) calls
    `navigator.modelContext.registerTool()` with 2–3 tools (e.g.,
@@ -230,7 +233,8 @@ A dedicated stdio MCP server wrapper is an **MVP+1** deliverable
 `awr call` is already MCP-compatible, so any agent framework can wrap
 the CLI today.
 
-MVP is achievable within the Phase 4 timeline. It is not a separate track.
+MVP is achievable without WebMCP host delivery; WebMCP is a follow-on
+deliverable (MVP+1), not a blocker for MVP completion.
 
 ---
 

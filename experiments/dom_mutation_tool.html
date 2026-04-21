@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AWR DOM mutation fixture</title>
+</head>
+<body>
+<div id="root"></div>
+<script>
+navigator.modelContext.registerTool(
+  {
+    name: "mutate_and_query",
+    description: "Append a node and query it in the same invocation.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  function () {
+    const root = document.getElementById('root');
+    const el = document.createElement('p');
+    el.setAttribute('id', 'added');
+    el.textContent = 'hello';
+    root.appendChild(el);
+    const found = document.querySelector('#added');
+    return { ok: !!found, text: found ? found.textContent : null };
+  }
+);
+</script>
+</body>
+</html>
