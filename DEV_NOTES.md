@@ -86,18 +86,64 @@ depended on. As a short-term unblock:
 → `Page` → `Client`). Tracked as Phase 3 prerequisite alongside BoringSSL
 + JA4+ Chrome 132 fingerprinting.
 
-### 7. gVisor / Zig 0.16 test runner blocker (environment-only)
+### 7. gVisor / Zig 0.16 Debug startup — `integer overflow` in PHDR walk
 
-On the gVisor-backed Linux container used in CI, Zig 0.16's test runner
-panics with `integer overflow` during `std.Progress.start` (stack trace
-via `mainTerminal`). The panic is environmental — a tiny reproducer
-(`test "x" {}`) works in a plain Linux container — and blocks only
-running the test binaries, not compiling them. `zig build test-page` and
-`zig build test-dom` both compile cleanly; the runner simply can't be
-driven here.
+**Root cause (upstream bug in Zig 0.16):**
+`lib/std/debug/SelfInfo/Elf.zig` iterates the loaded program headers via
+`dl_iterate_phdr`.  Inside the callback, both the `.NOTE` branch (line
+460) and the `.GNU_EH_FRAME` branch (line 472) compute
+`info.addr + phdr.vaddr` with non-wrapping addition.  The VDSO on
+Linux/x86_64 is mapped with `phdr.vaddr = 0xffffffffff700000`, so the
+add overflows `usize` and Debug-mode safety checks panic with
+`integer overflow`.  The matching `.LOAD` branch already uses
+`+%` (line 497) with the comment "Overflowing addition handles VDSOs
+having p_vaddr = 0xffffffffff700000" — the two sister branches just
+missed the `+%`.
 
-**Durable fix:** confirm on native x86_64 Linux in CI (no gVisor). No
-code change required.
+**Where it fires in AWR:**
+Any Debug binary that makes an allocation before `main()` runs will
+hit this.  Zig's startup (`lib/std/start.zig::callMain`) constructs
+the `std.process.Init` bundle by calling
+`std.process.Environ.createMap(gpa, …)`, which performs its first
+heap allocation through `DebugAllocator.alloc`.  `DebugAllocator`
+captures a stack trace on every allocation (`stack_trace_frames = 6`
+by default in Debug) which walks PHDRs and trips the overflow.  The
+panic therefore lands before any user code, with no stack trace
+printed because `std.debug.defaultPanic` then deadlocks on its own
+stderr mutex while attempting the trace.
+
+- **Repro:** `./zig-out/bin/awr --version` in a Debug build.
+- **Stack trace** (captured under `gdb -ex 'rbreak
+  ^debug.FullPanic.*integerOverflow$'`):
+  `DlIterContext.callback → posix.dl_iterate_phdr → SelfInfo.Elf.findModule
+  → StackIterator.next → captureCurrentStackTrace →
+  DebugAllocator.collectStackTrace → DebugAllocator.alloc →
+  Environ.createMap → start.callMain`.
+- **ReleaseSafe side-steps it** because with `link_libc` it selects
+  `std.heap.c_allocator` instead of `DebugAllocator`, so no per-alloc
+  stack trace is captured.
+
+**Fix in-repo (src/main.zig):**
+`pub fn main` now accepts `std.process.Init.Minimal` instead of the
+full `std.process.Init`.  Zig's `callMain` branches on the parameter
+type and, for `Minimal`, skips the `DebugAllocator` wiring entirely.
+We build `gpa = std.heap.c_allocator`, `ArenaAllocator`, and
+`std.Io.Threaded` ourselves from `minimal.args` / `minimal.environ`,
+matching what `callMain` does for `Init` but without the buggy
+allocator.  Trade-off: Debug builds no longer get `DebugAllocator`'s
+leak detection for the CLI entry point; tests continue to use it via
+their own harness.
+
+**Durable fix:** upstream a Zig PR that changes the two sites to
+`info.addr +% phdr.vaddr`, then the `Init.Minimal` workaround in
+`src/main.zig` can be lifted.  The matching test-runner panic (see
+below) also goes away at the same time.
+
+**Test runner still blocked here:** `zig build test-*` invokes the
+stock Zig test binary, whose `std.Progress.start` hits the same PHDR
+walk via a Debug allocation during startup.  Tests compile cleanly —
+they just can't be driven in this container.  No test-side workaround
+yet; move to native x86_64 CI or wait for the upstream fix.
 
 ### 8. `zig build install` fails on v9fs (environment-only)
 
