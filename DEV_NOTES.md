@@ -96,7 +96,7 @@ depended on. As a short-term unblock:
 Linux/x86_64 is mapped with `phdr.vaddr = 0xffffffffff700000`, so the
 add overflows `usize` and Debug-mode safety checks panic with
 `integer overflow`.  The matching `.LOAD` branch already uses
-`+%` (line 497) with the comment "Overflowing addition handles VSDOs
+`+%` (line 497) with the comment "Overflowing addition handles VDSOs
 having p_vaddr = 0xffffffffff700000" — the two sister branches just
 missed the `+%`.
 
