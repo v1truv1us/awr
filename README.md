@@ -31,6 +31,8 @@ macOS — see `third_party/lexbor/BUILD_NOTES.md`).
 
 Agent wiring walk-through: [`docs/agent-integration.md`](docs/agent-integration.md).
 
+Build + test + MCP-readiness runbook: [`docs/BUILD_AND_MCP_READINESS.md`](docs/BUILD_AND_MCP_READINESS.md).
+
 ---
 
 ## What works today ✅
