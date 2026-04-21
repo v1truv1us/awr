@@ -110,10 +110,47 @@ pub const Client = struct {
             else
                 .unhandled;
 
+        const effective_user_agent =
+            if (self.options.user_agent.len != 0)
+                self.options.user_agent
+            else if (self.options.use_chrome_headers)
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+            else
+                "awr";
+
+        var extra_headers: [10]std.http.Header = undefined;
+        var extra_header_count: usize = 0;
+
+        extra_headers[extra_header_count] = .{ .name = "user-agent", .value = effective_user_agent };
+        extra_header_count += 1;
+
+        if (self.options.use_chrome_headers) {
+            extra_headers[extra_header_count] = .{ .name = "accept", .value = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,*/*;q=0.8" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "accept-language", .value = "en-US,en;q=0.9" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "cache-control", .value = "max-age=0" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "pragma", .value = "no-cache" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "sec-fetch-dest", .value = "document" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "sec-fetch-mode", .value = "navigate" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "sec-fetch-site", .value = "none" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "sec-fetch-user", .value = "?1" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "upgrade-insecure-requests", .value = "1" };
+            extra_header_count += 1;
+        }
+
         const result = std_client.fetch(.{
             .location = .{ .url = url_str },
             .response_writer = &body_buf.writer,
             .redirect_behavior = redirect_behavior,
+            .extra_headers = extra_headers[0..extra_header_count],
+            .timeout_ms = self.options.timeout_ms,
         }) catch |err| return mapFetchError(err);
 
         var body_list = body_buf.toArrayList();
