@@ -79,6 +79,11 @@ fn loadPage(
 // `info.addr +% phdr.vaddr` on those two lines (line 497 already does
 // this for the .LOAD case).
 pub fn main(minimal: std.process.Init.Minimal) !void {
+    comptime {
+        if (!@import("builtin").link_libc)
+            @compileError("awr must be built with -Dlink_libc or `exe.linkLibC()` — " ++
+                "std.heap.c_allocator requires libc");
+    }
     // `c_allocator` because build.zig links libc; this matches what
     // `std/start.zig` does in ReleaseSafe/Fast and keeps the CLI well away
     // from the `DebugAllocator` path above.
