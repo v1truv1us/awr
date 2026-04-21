@@ -75,15 +75,19 @@ fn writeJsStr(w: anytype, s: []const u8) !void {
 
 // ── Page ──────────────────────────────────────────────────────────────────
 
-/// Top-level browser page.  Owns an HTTP client and a JS engine.
+/// Top-level browser page.  Owns an HTTP client, a JS engine, and the
+/// libxev-backed event loop that drives `setTimeout`/`setInterval`/`fetch`.
 ///
-/// The JS engine context is reset at the start of each `processHtml` call so
-/// that variables set by one navigation are invisible in the next.
+/// The JS engine context is reset at the start of each `processHtml` call
+/// so that variables set by one navigation are invisible in the next. The
+/// event loop's timer registry is cleared at the same time.
 pub const Page = struct {
-    allocator: std.mem.Allocator,
-    io:        std.Io,
-    client:    client.Client,
-    js:        engine.JsEngine,
+    allocator:  std.mem.Allocator,
+    io:         std.Io,
+    client:     client.Client,
+    js:         engine.JsEngine,
+    event_loop: engine.EventLoop,
+    base_url:   []u8,  // duped, may be replaced on each processHtml
 
     /// Initialise a new Page with default client options.
     /// `io` is threaded through to the HTTP client for all network fetches
@@ -91,19 +95,100 @@ pub const Page = struct {
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Page {
         var js_engine = try engine.JsEngine.init(allocator, null);
         errdefer js_engine.deinit();
-        return Page{
-            .allocator = allocator,
-            .io        = io,
-            .client    = client.Client.init(allocator, io, .{
+
+        var el = try engine.EventLoop.init(allocator, js_engine.ctx);
+        errdefer el.deinit();
+
+        const base_url = try allocator.dupe(u8, "");
+
+        var page = Page{
+            .allocator  = allocator,
+            .io         = io,
+            .client     = client.Client.init(allocator, io, .{
                 .use_chrome_headers = false, // plain headers → uncompressed body
             }),
-            .js = js_engine,
+            .js         = js_engine,
+            .event_loop = el,
+            .base_url   = base_url,
         };
+        page.attachHosts();
+        return page;
     }
 
     pub fn deinit(self: *Page) void {
+        self.event_loop.deinit();
         self.js.deinit();
         self.client.deinit();
+        self.allocator.free(self.base_url);
+    }
+
+    /// Wire the Page's event loop and fetch adapter into the JsEngine so
+    /// that JS `setTimeout` / `fetch` reach the Zig runtime. Call after
+    /// every JsEngine (re-)init.
+    fn attachHosts(self: *Page) void {
+        self.js.attachEventLoop(&self.event_loop);
+        self.js.attachFetchHost(.{
+            .ptr     = self,
+            .fetchFn = fetchAdapter,
+        });
+    }
+
+    /// FetchHost adapter: runs the caller's URL through either the HTTP
+    /// client (`http(s)://`) or the filesystem (`file://`), resolving
+    /// relative URLs against the page's base URL.
+    fn fetchAdapter(ptr: *anyopaque, url: []const u8) anyerror!engine.FetchHost.Response {
+        const self: *Page = @ptrCast(@alignCast(ptr));
+        const gpa = self.allocator;
+
+        const resolved = try resolveUrl(gpa, self.base_url, url);
+        errdefer gpa.free(resolved);
+
+        if (std.mem.startsWith(u8, resolved, "http://") or
+            std.mem.startsWith(u8, resolved, "https://"))
+        {
+            var resp = try self.client.fetch(resolved);
+            defer resp.deinit();
+            const body = try gpa.dupe(u8, resp.body);
+            return .{
+                .status    = resp.status,
+                .body      = body,
+                .url       = resolved,
+                .allocator = gpa,
+            };
+        }
+        if (std.mem.startsWith(u8, resolved, "file://")) {
+            const path = resolved[7..];
+            const body = try std.Io.Dir.cwd().readFileAlloc(
+                self.io,
+                path,
+                gpa,
+                .limited(16 * 1024 * 1024),
+            );
+            return .{
+                .status    = 200,
+                .body      = body,
+                .url       = resolved,
+                .allocator = gpa,
+            };
+        }
+        gpa.free(resolved);
+        return error.UnsupportedScheme;
+    }
+
+    /// Drain microtasks + tick the event loop until both queues are empty.
+    /// Caps the wait at `max_ms` wall-clock milliseconds so a runaway
+    /// `setInterval` cannot wedge the test runner.
+    pub fn drainAll(self: *Page, max_ms: u64) void {
+        self.event_loop.loop.update_now();
+        const start = self.event_loop.loop.now();
+        const deadline = start +| @as(i64, @intCast(max_ms));
+        while (true) {
+            self.js.drainMicrotasks();
+            if (!self.event_loop.hasPending()) return;
+            self.event_loop.loop.update_now();
+            if (self.event_loop.loop.now() >= deadline) return;
+            self.event_loop.tickOnce() catch return;
+        }
     }
 
     // ── Public API ───────────────────────────────────────────────────────
@@ -133,6 +218,15 @@ pub const Page = struct {
         const saved_sink = self.js.host.sink;
         self.js.deinit();
         self.js = try engine.JsEngine.init(gpa, saved_sink);
+        // The event loop holds Values tied to the previous context; discard
+        // them and re-point at the new context, then re-attach timer/fetch
+        // bindings.
+        self.event_loop.reset(self.js.ctx);
+        self.attachHosts();
+
+        // Update base URL for fetch() relative resolution.
+        gpa.free(self.base_url);
+        self.base_url = try gpa.dupe(u8, url);
 
         // Keep a copy of the raw HTML for PageResult.html.
         const html = try gpa.dupe(u8, html_src);
@@ -156,8 +250,12 @@ pub const Page = struct {
         // ── Execute <script> tags (inline + external src=) in document order.
         if (zig_doc.htmlElement()) |root| self.executeScriptsInElement(root, url);
 
-        // ── Drain microtask / Promise queue ───────────────────────────────
-        self.js.drainMicrotasks();
+        // ── Drain microtask + macrotask queues ────────────────────────────
+        // drainAll alternates QuickJS job drain with libxev ticks so that
+        // setTimeout callbacks and fetch resolvers run before we extract
+        // page state. The cap is generous — long enough for real network
+        // fetches, short enough to bail out of a runaway setInterval.
+        self.drainAll(5_000);
 
         // ── Extract window.__awrData__ (if set by page scripts) ───────────
         const window_data: ?[]const u8 = blk: {
@@ -265,7 +363,9 @@ pub const Page = struct {
             return try gpa.dupe(u8, "{\"ok\":false,\"error\":\"BadPendingEnvelope\"}");
         };
 
-        self.js.drainMicrotasks();
+        // Drain both microtasks and any setTimeout/fetch macrotasks the tool
+        // scheduled before extracting the resolved value.
+        self.drainAll(5_000);
 
         var resolve_buf = std.mem.zeroes([128]u8);
         const resolve_expr = try std.fmt.bufPrint(

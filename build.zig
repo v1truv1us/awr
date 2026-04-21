@@ -140,7 +140,7 @@ pub fn build(b: *std.Build) void {
         test_h2_step.dependOn(&run_h2.step);
     }
 
-    // ── JS engine module (depends on quickjs-ng) ─────────────────────────
+    // ── JS engine module (depends on quickjs-ng + libxev) ─────────────────
     {
         const js_mod = b.createModule(.{
             .root_source_file = b.path("src/js/engine.zig"),
@@ -148,6 +148,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         js_mod.addImport("quickjs", qjs_mod);
+        js_mod.addImport("xev", xev_mod);
         js_mod.linkLibrary(qjs_dep.artifact("quickjs-ng"));
 
         const js_test = b.addTest(.{

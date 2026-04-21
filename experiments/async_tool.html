@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AWR async tool fixture</title>
+</head>
+<body>
+<p>Fixture exercising setTimeout + fetch() inside a registered WebMCP tool.</p>
+<script>
+// A tool that runs both macrotask paths: a setTimeout and a fetch() against
+// a same-origin resource. Used by the CLI to verify AT-7 end-to-end.
+navigator.modelContext.registerTool(
+  {
+    name: "fetch_then_wait",
+    description: "Fetch ./tools.js then wait 10ms before resolving.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  function () {
+    return fetch("./tools.js")
+      .then(function (r) { return r.text(); })
+      .then(function (body) {
+        return new Promise(function (resolve) {
+          setTimeout(function () {
+            resolve({
+              ok: true,
+              length: body.length,
+              head: body.slice(0, 24),
+            });
+          }, 10);
+        });
+      });
+  }
+);
+
+// A pure-setTimeout tool, useful for isolating the timer path.
+navigator.modelContext.registerTool(
+  {
+    name: "delay_echo",
+    description: "Echo the given message after a delay.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        msg: { type: "string" },
+        ms:  { type: "integer", minimum: 0, default: 10 },
+      },
+      required: ["msg"],
+    },
+  },
+  function (args) {
+    var ms = (args && typeof args.ms === "number") ? args.ms : 10;
+    return new Promise(function (resolve) {
+      setTimeout(function () {
+        resolve({ echoed: args.msg, after_ms: ms });
+      }, ms);
+    });
+  }
+);
+</script>
+</body>
+</html>

@@ -21,6 +21,35 @@
 
 const std = @import("std");
 const qjs = @import("quickjs");
+const event_loop_mod = @import("event_loop.zig");
+
+pub const EventLoop = event_loop_mod.EventLoop;
+
+/// Adapter interface the JS `fetch()` binding calls to perform the HTTP
+/// request. Page supplies a concrete impl wired to its `Client`; unit
+/// tests can inject their own. Returns JSON-serialisable `{status, body,
+/// url}` on success, or an error the binding translates to a rejected
+/// Promise.
+pub const FetchHost = struct {
+    pub const Response = struct {
+        status: u16,
+        body:   []u8,
+        url:    []u8,
+        allocator: std.mem.Allocator,
+
+        pub fn deinit(self: *Response) void {
+            self.allocator.free(self.body);
+            self.allocator.free(self.url);
+        }
+    };
+
+    ptr:     *anyopaque,
+    fetchFn: *const fn (ptr: *anyopaque, url: []const u8) anyerror!Response,
+
+    pub fn fetch(self: FetchHost, url: []const u8) anyerror!Response {
+        return self.fetchFn(self.ptr, url);
+    }
+};
 
 // ── Public error type ─────────────────────────────────────────────────────
 
@@ -72,6 +101,12 @@ const HostData = struct {
     /// Allows the DOM bridge callbacks to reach the Document without
     /// a circular import dependency.
     extension: ?*anyopaque = null,
+    /// Optional libxev-backed timer queue installed by Page.
+    /// When null, setTimeout/setInterval degrade to the stub behaviour.
+    event_loop: ?*EventLoop = null,
+    /// Optional fetch implementation installed by Page. When null,
+    /// `fetch()` returns a rejected Promise.
+    fetch_host: ?FetchHost = null,
 };
 
 /// Expose HostData so bridge.zig can retrieve it via ctx.getOpaque().
@@ -176,8 +211,20 @@ pub const JsEngine = struct {
 
     fn installWebApis(self: *JsEngine) JsError!void {
         try self.installConsole();
-        try self.installTimerStubs();
-        try self.installFetchStub();
+        try self.installTimers();
+        try self.installFetch();
+        try self.installStructuredClone();
+    }
+
+    /// Called by Page after constructing its EventLoop.
+    /// Safe to call multiple times; the most recent pointer wins.
+    pub fn attachEventLoop(self: *JsEngine, loop: *EventLoop) void {
+        self.host.event_loop = loop;
+    }
+
+    /// Called by Page after constructing its HTTP client wrapper.
+    pub fn attachFetchHost(self: *JsEngine, host: FetchHost) void {
+        self.host.fetch_host = host;
     }
 
     // ── console ─────────────────────────────────────────────────────────
@@ -263,15 +310,14 @@ pub const JsEngine = struct {
         host.sink.write(level, w.buffered());
     }
 
-    // ── timer stubs ──────────────────────────────────────────────────────
+    // ── timers — libxev-backed when an EventLoop is attached ─────────────
 
-    fn installTimerStubs(self: *JsEngine) JsError!void {
+    fn installTimers(self: *JsEngine) JsError!void {
         const ctx = self.ctx;
-        // setTimeout(cb, delay, ...args) → returns 0 (never fires in Phase 2)
-        const setTimeoutFn    = qjs.Value.initCFunction(ctx, timerStub,   "setTimeout",    2);
-        const clearTimeoutFn  = qjs.Value.initCFunction(ctx, timerClear,  "clearTimeout",  1);
-        const setIntervalFn   = qjs.Value.initCFunction(ctx, timerStub,   "setInterval",   2);
-        const clearIntervalFn = qjs.Value.initCFunction(ctx, timerClear,  "clearInterval", 1);
+        const setTimeoutFn    = qjs.Value.initCFunction(ctx, setTimeoutCb,    "setTimeout",    2);
+        const clearTimeoutFn  = qjs.Value.initCFunction(ctx, clearTimerCb,   "clearTimeout",  1);
+        const setIntervalFn   = qjs.Value.initCFunction(ctx, setIntervalCb,   "setInterval",   2);
+        const clearIntervalFn = qjs.Value.initCFunction(ctx, clearTimerCb,   "clearInterval", 1);
         defer setTimeoutFn.deinit(ctx);
         defer clearTimeoutFn.deinit(ctx);
         defer setIntervalFn.deinit(ctx);
@@ -283,34 +329,181 @@ pub const JsEngine = struct {
         try self.setGlobal("clearInterval", clearIntervalFn.dup(ctx));
     }
 
-    fn timerStub(_: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
-        // Phase 2 stub: return timer ID 0, never fires.
-        return qjs.Value.initInt32(0);
+    fn scheduleTimer(
+        ctx: *qjs.Context,
+        args: []const @import("quickjs").c.JSValue,
+        repeating: bool,
+    ) qjs.Value {
+        const host = ctx.getOpaque(HostData) orelse return qjs.Value.initInt32(0);
+        const el = host.event_loop orelse return qjs.Value.initInt32(0);
+        if (args.len < 1) return qjs.Value.initInt32(0);
+        const cb_raw: qjs.Value = @bitCast(args[0]);
+        if (!cb_raw.isFunction(ctx)) return qjs.Value.initInt32(0);
+
+        var delay_ms: u64 = 0;
+        if (args.len >= 2) {
+            const d: qjs.Value = @bitCast(args[1]);
+            if (d.toFloat64(ctx)) |f| {
+                if (f > 0) delay_ms = @intFromFloat(@min(f, @as(f64, std.math.maxInt(u32))));
+            } else |_| {}
+        }
+
+        const owned = cb_raw.dup(ctx);
+        const id = el.schedule(owned, delay_ms, repeating) catch {
+            owned.deinit(ctx);
+            return qjs.Value.initInt32(0);
+        };
+        return qjs.Value.initInt32(@intCast(id));
     }
 
-    fn timerClear(_: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
+    fn setTimeoutCb(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+        const c = ctx orelse return qjs.Value.initInt32(0);
+        return scheduleTimer(c, args, false);
+    }
+
+    fn setIntervalCb(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+        const c = ctx orelse return qjs.Value.initInt32(0);
+        return scheduleTimer(c, args, true);
+    }
+
+    fn clearTimerCb(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+        const c = ctx orelse return qjs.Value.undefined;
+        const host = c.getOpaque(HostData) orelse return qjs.Value.undefined;
+        const el = host.event_loop orelse return qjs.Value.undefined;
+        if (args.len < 1) return qjs.Value.undefined;
+        const id_arg: qjs.Value = @bitCast(args[0]);
+        const id_i = id_arg.toInt32(c) catch return qjs.Value.undefined;
+        if (id_i > 0) el.cancel(@intCast(id_i));
         return qjs.Value.undefined;
     }
 
-    // ── fetch stub ───────────────────────────────────────────────────────
+    // ── fetch — wired to the Page's HTTP client via FetchHost ────────────
 
-    fn installFetchStub(self: *JsEngine) JsError!void {
+    fn installFetch(self: *JsEngine) JsError!void {
         const ctx = self.ctx;
-        const fetchFn = qjs.Value.initCFunction(ctx, fetchStub, "fetch", 1);
-        defer fetchFn.deinit(ctx);
-        try self.setGlobal("fetch", fetchFn.dup(ctx));
+        // Native primitive: returns Promise<{ok, status, url, body}>.
+        const rawFn = qjs.Value.initCFunction(ctx, rawFetchCb, "__awr_rawFetch__", 1);
+        defer rawFn.deinit(ctx);
+        try self.setGlobal("__awr_rawFetch__", rawFn.dup(ctx));
+
+        // Thin JS polyfill: wraps the raw object in a Response-like.
+        try self.eval(FETCH_POLYFILL, "<fetch-polyfill>");
     }
 
-    fn fetchStub(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
+    fn rawFetchCb(
+        ctx: ?*qjs.Context,
+        _: qjs.Value,
+        args: []const @import("quickjs").c.JSValue,
+    ) qjs.Value {
         const c = ctx orelse return qjs.Value.undefined;
-        // Return a rejected Promise so code that does `fetch(...).then(...)` fails gracefully.
-        const result = c.eval(
-            "Promise.reject(new Error('fetch() not available in Phase 2 — use Client.fetch() at the Zig layer'))",
-            "<fetch-stub>",
-            .{},
-        );
-        return result;
+        const promise = qjs.Value.initPromiseCapability(c);
+
+        const fail = struct {
+            fn reject(cc: *qjs.Context, p: qjs.Value.Promise, msg: []const u8) qjs.Value {
+                const err = qjs.Value.initError(cc);
+                const msg_val = qjs.Value.initStringLen(cc, msg);
+                err.setPropertyStr(cc, "message", msg_val) catch {};
+                const rr = p.reject.call(cc, qjs.Value.undefined, &.{err});
+                rr.deinit(cc);
+                err.deinit(cc);
+                p.resolve.deinit(cc);
+                p.reject.deinit(cc);
+                return p.value;
+            }
+        }.reject;
+
+        if (args.len < 1) return fail(c, promise, "fetch() requires a URL");
+        const url_arg: qjs.Value = @bitCast(args[0]);
+        const cstr = url_arg.toCString(c) orelse return fail(c, promise, "fetch() URL must be a string");
+        defer c.freeCString(cstr);
+        const url_slice = std.mem.span(cstr);
+
+        const host = c.getOpaque(HostData) orelse return fail(c, promise, "fetch() host not configured");
+        const fetch_host = host.fetch_host orelse return fail(c, promise, "fetch() not available in this context");
+
+        var resp = fetch_host.fetch(url_slice) catch |err| {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "fetch failed: {t}", .{err}) catch "fetch failed";
+            return fail(c, promise, msg);
+        };
+        defer resp.deinit();
+
+        // Build {ok, status, url, body}.
+        const obj = qjs.Value.initObject(c);
+        const ok_val = qjs.Value.initBool(resp.status >= 200 and resp.status < 300);
+        const status_val = qjs.Value.initInt32(@intCast(resp.status));
+        const url_val = qjs.Value.initStringLen(c, resp.url);
+        const body_val = qjs.Value.initStringLen(c, resp.body);
+
+        obj.setPropertyStr(c, "ok", ok_val) catch {};
+        obj.setPropertyStr(c, "status", status_val) catch {};
+        obj.setPropertyStr(c, "url", url_val) catch {};
+        obj.setPropertyStr(c, "body", body_val) catch {};
+
+        const rr = promise.resolve.call(c, qjs.Value.undefined, &.{obj});
+        rr.deinit(c);
+        obj.deinit(c);
+        promise.resolve.deinit(c);
+        promise.reject.deinit(c);
+        return promise.value;
     }
+
+    const FETCH_POLYFILL =
+        \\(function () {
+        \\  'use strict';
+        \\  var raw = globalThis.__awr_rawFetch__;
+        \\  if (typeof raw !== 'function') return;
+        \\  globalThis.fetch = function fetch(resource, init) {
+        \\    var url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
+        \\    init = init || {};
+        \\    return raw(url, init).then(function (r) {
+        \\      var body = r.body;
+        \\      return {
+        \\        ok: r.ok,
+        \\        status: r.status,
+        \\        url: r.url,
+        \\        headers: { get: function () { return null; } },
+        \\        text:    function () { return Promise.resolve(body); },
+        \\        json:    function () { return Promise.resolve(JSON.parse(body)); },
+        \\        arrayBuffer: function () { return Promise.resolve(new TextEncoder().encode(body).buffer); },
+        \\      };
+        \\    });
+        \\  };
+        \\})();
+    ;
+
+    // ── structuredClone — JSON-round-trip polyfill (covers MVP FR-3.5) ───
+
+    fn installStructuredClone(self: *JsEngine) JsError!void {
+        try self.eval(STRUCTURED_CLONE_POLYFILL, "<structured-clone>");
+    }
+
+    const STRUCTURED_CLONE_POLYFILL =
+        \\(function () {
+        \\  if (typeof globalThis.structuredClone === 'function') return;
+        \\  globalThis.structuredClone = function structuredClone(value) {
+        \\    if (value === null || typeof value !== 'object') return value;
+        \\    if (value instanceof Date)   return new Date(value.getTime());
+        \\    if (value instanceof RegExp) return new RegExp(value.source, value.flags);
+        \\    if (value instanceof Map) {
+        \\      var m = new Map();
+        \\      value.forEach(function (v, k) { m.set(structuredClone(k), structuredClone(v)); });
+        \\      return m;
+        \\    }
+        \\    if (value instanceof Set) {
+        \\      var s = new Set();
+        \\      value.forEach(function (v) { s.add(structuredClone(v)); });
+        \\      return s;
+        \\    }
+        \\    if (Array.isArray(value)) return value.map(structuredClone);
+        \\    var out = {};
+        \\    for (var k in value) {
+        \\      if (Object.prototype.hasOwnProperty.call(value, k)) out[k] = structuredClone(value[k]);
+        \\    }
+        \\    return out;
+        \\  };
+        \\})();
+    ;
 };
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -382,6 +575,8 @@ test "JsEngine — setTimeout is defined and returns a number" {
 
     const ok = try engine.evalBool("typeof setTimeout === 'function'");
     try std.testing.expect(ok);
+    // Without an attached EventLoop the timer returns 0 (not scheduled) but
+    // must still be a number so page scripts don't throw.
     const id_ok = try engine.evalBool("typeof setTimeout(function(){}, 100) === 'number'");
     try std.testing.expect(id_ok);
 }
@@ -410,7 +605,7 @@ test "JsEngine — clearInterval is defined" {
     try std.testing.expect(ok);
 }
 
-test "JsEngine — fetch is a function (stub)" {
+test "JsEngine — fetch is a function" {
     var engine = try JsEngine.init(std.testing.allocator, null);
     defer engine.deinit();
 
@@ -418,12 +613,28 @@ test "JsEngine — fetch is a function (stub)" {
     try std.testing.expect(ok);
 }
 
-test "JsEngine — fetch stub returns a Promise" {
+test "JsEngine — fetch returns a Promise (rejects when no host)" {
     var engine = try JsEngine.init(std.testing.allocator, null);
     defer engine.deinit();
 
     const ok = try engine.evalBool("fetch('https://example.com') instanceof Promise");
     try std.testing.expect(ok);
+}
+
+test "JsEngine — structuredClone is defined" {
+    var engine = try JsEngine.init(std.testing.allocator, null);
+    defer engine.deinit();
+
+    try engine.eval(
+        \\const original = { a: 1, nested: { b: [1, 2, 3] } };
+        \\const clone    = structuredClone(original);
+        \\original.a = 99;
+        \\original.nested.b.push(4);
+    , "<test>");
+    const a_ok = try engine.evalBool("clone.a === 1");
+    const b_ok = try engine.evalBool("clone.nested.b.length === 3");
+    try std.testing.expect(a_ok);
+    try std.testing.expect(b_ok);
 }
 
 test "JsEngine — Promise basics work" {
