@@ -121,15 +121,32 @@ pub const Client = struct {
         const body = try body_list.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(body);
 
+        const headers = try cloneFetchHeaders(self.allocator, result.headers);
+        errdefer headers.deinit(self.allocator);
+
         return Response{
             .status    = @intFromEnum(result.status),
-            .headers   = .{},
+            .headers   = headers,
             .body      = body,
             .allocator = self.allocator,
         };
     }
 };
 
+fn cloneFetchHeaders(allocator: std.mem.Allocator, src_headers: anytype) !http1.HeaderList {
+    var headers: http1.HeaderList = .{};
+    errdefer headers.deinit(allocator);
+
+    for (src_headers) |header| {
+        try headers.append(allocator, .{
+            .name = try allocator.dupe(u8, header.name),
+            .value = try allocator.dupe(u8, header.value),
+        });
+    }
+
+    headers.owns_strings = true;
+    return headers;
+}
 /// Translate `std.http.Client.FetchError` into our stable `FetchError`
 /// surface. Anything we can't map falls through as the original error.
 fn mapFetchError(err: anyerror) anyerror {
