@@ -3,13 +3,14 @@
 ## Installing Zig 0.16 in this environment (Linux x86_64)
 
 Per Zig's official Getting Started guide, the reliable approach here is
-**direct download** (not `apt`) because this base image does not provide a
-`zig` package.
+**direct download + checksum verification** (not `apt`) because this base
+image does not provide a `zig` package.
 
 ```bash
 cd /tmp
 curl -L --fail -o zig-x86_64-linux-0.16.0.tar.xz \
   https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+echo '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  zig-x86_64-linux-0.16.0.tar.xz' | sha256sum -c -
 tar -xf zig-x86_64-linux-0.16.0.tar.xz
 PATH=/tmp/zig-x86_64-linux-0.16.0:$PATH zig version
 ```

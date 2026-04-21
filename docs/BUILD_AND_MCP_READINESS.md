@@ -6,20 +6,32 @@ This runbook is the operational checklist for taking AWR from a fresh clone to a
 
 ### Required toolchain
 
-- **Zig 0.16.0**
+- **Zig 0.16.0** (installed from the official Zig downloads page)
 - **lexbor v2.5.0** installed on the system include/lib path
 - Linux x86_64 or macOS arm64
 
-If Zig is missing in your environment, install it directly from ziglang.org (the `apt` package is commonly unavailable):
+If Zig is missing, follow Zig's official Getting Started flow (download prebuilt archive, verify checksum, add `zig` to `PATH`). On Linux x86_64 in this repo's environment:
 
 ```bash
+mkdir -p "$HOME/.local/opt" "$HOME/.local/bin"
 cd /tmp
 curl -L --fail -o zig-x86_64-linux-0.16.0.tar.xz \
   https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+echo '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  zig-x86_64-linux-0.16.0.tar.xz' | sha256sum -c -
 tar -xf zig-x86_64-linux-0.16.0.tar.xz
-export PATH=/tmp/zig-x86_64-linux-0.16.0:$PATH
+mv zig-x86_64-linux-0.16.0 "$HOME/.local/opt/zig-0.16.0"
+ln -sf "$HOME/.local/opt/zig-0.16.0/zig" "$HOME/.local/bin/zig"
+export PATH="$HOME/.local/bin:$PATH"
 zig version
 ```
+
+Persist PATH for future shells:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+```
+
+Important hygiene note: install Zig under `/tmp` or `$HOME/.local`, **not** in the repository root. This avoids committing toolchain archives/directories and keeps diffs small.
 
 For lexbor installation details, follow:
 
@@ -30,7 +42,7 @@ For lexbor installation details, follow:
 From repository root:
 
 ```bash
-zig build -Doptimize=ReleaseSafe
+PATH="$HOME/.local/bin:$PATH" zig build -Doptimize=ReleaseSafe
 ```
 
 Expected artifact:
@@ -50,16 +62,16 @@ Quick sanity checks:
 Run the primary suites explicitly:
 
 ```bash
-zig build test
-zig build test-net
-zig build test-js
-zig build test-html
-zig build test-dom
-zig build test-client
-zig build test-h2
-zig build test-page
-zig build test-tls
-zig build test-e2e
+PATH="$HOME/.local/bin:$PATH" zig build test
+PATH="$HOME/.local/bin:$PATH" zig build test-net
+PATH="$HOME/.local/bin:$PATH" zig build test-js
+PATH="$HOME/.local/bin:$PATH" zig build test-html
+PATH="$HOME/.local/bin:$PATH" zig build test-dom
+PATH="$HOME/.local/bin:$PATH" zig build test-client
+PATH="$HOME/.local/bin:$PATH" zig build test-h2
+PATH="$HOME/.local/bin:$PATH" zig build test-page
+PATH="$HOME/.local/bin:$PATH" zig build test-tls
+PATH="$HOME/.local/bin:$PATH" zig build test-e2e
 ```
 
 If running inside a gVisor/v9fs container, expect known Zig 0.16 environment issues described in `DEV_NOTES.md` (#7 and #8).

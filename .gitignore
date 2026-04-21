@@ -2,6 +2,11 @@
 zig-cache/
 zig-out/
 
+# Prevent accidental commits of locally-downloaded Zig toolchains when
+# contributors follow ziglang.org/getting-started from the repo root.
+/zig-x86_64-linux-*.tar.xz
+/zig-x86_64-linux-*/
+
 # Locally-cloned lexbor source (build from source per
 # third_party/lexbor/BUILD_NOTES.md; the compiled static lib goes to
 # /usr/local/lib and is linked by build.zig on Linux).
