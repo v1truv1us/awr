@@ -28,6 +28,10 @@ pub const PendingTimer = struct {
     delay_ms: u64,
     repeating: bool,
     cancelled: bool = false,
+    /// Set by `EventLoop.reset` when the owning JS context is torn down.
+    /// `releaseEntry` skips `callback.deinit` for orphaned entries because
+    /// the context that owns the Value is already gone.
+    orphaned: bool = false,
     owner: *EventLoop,
 };
 
@@ -36,6 +40,10 @@ pub const EventLoop = struct {
     loop: xev.Loop,
     ctx: *qjs.Context,
     timers: std.AutoHashMap(u32, *PendingTimer),
+    /// Entries whose JS context has been torn down (via `reset`).  They stay
+    /// alive until libxev fires their completion callback (marking them freed),
+    /// or until `deinit` disposes of them directly.
+    orphaned: std.ArrayListUnmanaged(*PendingTimer) = .{},
     next_id: u32 = 1,
 
     pub fn init(allocator: std.mem.Allocator, ctx: *qjs.Context) !EventLoop {
@@ -57,20 +65,36 @@ pub const EventLoop = struct {
             self.allocator.destroy(entry);
         }
         self.timers.deinit();
+        // Free any orphaned entries that did not fire before deinit was called.
+        // Their JS context is already gone so we must not call callback.deinit.
+        for (self.orphaned.items) |entry| {
+            self.allocator.destroy(entry);
+        }
+        self.orphaned.deinit(self.allocator);
         self.loop.deinit();
     }
 
     /// Update the JS context pointer (call after JsEngine is re-initialised).
-    /// Old timers are discarded — the previous context owns their callbacks.
+    /// Old timers are marked orphaned and moved to `self.orphaned` so they
+    /// remain alive until libxev fires their completion callback (at which
+    /// point `timerCallback` frees them without touching the old context).
+    /// If `deinit` runs before a timer fires, `deinit` frees the entry directly.
     pub fn reset(self: *EventLoop, ctx: *qjs.Context) void {
-        // Best effort: timers from a previous context are no longer valid. We
-        // simply forget them; their callbacks live inside the now-destroyed
-        // context and were freed when that context was torn down.
+        // Old timer entries must not be freed immediately — libxev still holds
+        // a reference to their embedded `completion` struct and will invoke
+        // `timerCallback` when the timer expires (or is processed).
+        // Mark each entry cancelled + orphaned so timerCallback is a no-op
+        // for the JS side, then track it in `orphaned` for safe cleanup.
         var it = self.timers.valueIterator();
         while (it.next()) |entry_ptr| {
             const entry = entry_ptr.*;
-            // Do NOT call callback.deinit — the old context is gone.
-            self.allocator.destroy(entry);
+            entry.cancelled = true;
+            entry.orphaned = true;
+            self.orphaned.append(self.allocator, entry) catch {
+                // OOM: the entry will still be freed when timerCallback fires
+                // naturally. If deinit runs before that happens, the entry will
+                // be leaked. This is an extremely unlikely edge case.
+            };
         }
         self.timers.clearRetainingCapacity();
         self.ctx = ctx;
@@ -149,8 +173,8 @@ fn timerCallback(
     const self = entry.owner;
 
     _ = r catch {
-        // Timer was cancelled via libxev (we don't currently use that path —
-        // cancellation is a flag on the entry).
+        // Timer was cancelled via libxev (e.g. fired with error.Canceled);
+        // free the entry regardless of orphaned state.
         releaseEntry(self, entry);
         return .disarm;
     };
@@ -179,8 +203,20 @@ fn timerCallback(
 }
 
 fn releaseEntry(self: *EventLoop, entry: *PendingTimer) void {
-    entry.callback.deinit(self.ctx);
-    _ = self.timers.remove(entry.id);
+    if (entry.orphaned) {
+        // The JS context that owns the callback Value is gone; do NOT call
+        // callback.deinit.  Remove from the orphaned tracking list (O(n),
+        // but the list is typically very short).
+        for (self.orphaned.items, 0..) |e, i| {
+            if (e == entry) {
+                _ = self.orphaned.swapRemove(i);
+                break;
+            }
+        }
+    } else {
+        entry.callback.deinit(self.ctx);
+        _ = self.timers.remove(entry.id);
+    }
     self.allocator.destroy(entry);
 }
 
