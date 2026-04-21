@@ -7,6 +7,12 @@
 > acceptance test in §3 passes on a clean
 > `zig build -Doptimize=ReleaseSafe`.
 
+> **Scope correction (effective April 21, 2026):**
+> WebMCP is **not** part of MVP. WebMCP-related requirements and tests in
+> this document are retained for historical context, but are now tracked as
+> **MVP+1**. For MVP gating, treat FR-4, FR-5.3/FR-5.4/FR-5.7, and AT-1/AT-2/
+> AT-3/AT-5 as non-blocking.
+
 ---
 
 ## 0. Target
@@ -15,9 +21,7 @@ A production-grade agentic web runtime that:
 
 1. loads real web pages (HTTP, HTTPS, `file://`, bare paths);
 2. runs the page's JavaScript — inline **and** external — to completion;
-3. exposes any WebMCP tools the page registers to an AI agent via a
-   small, stable CLI;
-4. returns typed JSON results.
+3. returns stable JSON page output suitable for downstream agent tooling.
 
 **No stubs on any code path the agent exercises.** `TODO`, `unreachable`,
 `error.NotImplemented`, or "Phase 3" gates inside FR-1 through FR-5 are

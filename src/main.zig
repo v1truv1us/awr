@@ -41,6 +41,17 @@ fn stdoutWrite(io: std.Io, bytes: []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(io, bytes);
 }
 
+/// Detect whether `awr call` returned the error envelope shape
+/// `{ "ok": false, ... }` (with or without spaces after the colon).
+fn isFailedCallEnvelope(out: []const u8) bool {
+    const s = std.mem.trim(u8, out, " \t\r\n");
+    const tight = std.mem.indexOf(u8, s, "\"ok\":false");
+    if (tight) |i| return i < 24;
+    const spaced = std.mem.indexOf(u8, s, "\"ok\": false");
+    if (spaced) |i| return i < 24;
+    return false;
+}
+
 /// Load a page from either an http(s):// URL or a local file path.
 /// The returned PageResult is owned by the caller.
 fn loadPage(
@@ -171,6 +182,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         defer alloc.free(out);
         try stdoutWrite(io, out);
         try stdoutWrite(io, "\n");
+        if (isFailedCallEnvelope(out)) std.process.exit(1);
         return;
     }
 
@@ -204,4 +216,10 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     try buf.appendSlice(alloc, "}\n");
 
     try stdoutWrite(io, buf.items);
+}
+
+test "isFailedCallEnvelope detects {ok:false}" {
+    try std.testing.expect(isFailedCallEnvelope("{\"ok\":false,\"error\":\"ToolNotFound\"}"));
+    try std.testing.expect(isFailedCallEnvelope("{\"ok\": false, \"error\": \"ToolNotFound\"}"));
+    try std.testing.expect(!isFailedCallEnvelope("{\"ok\":true,\"value\":{}}"));
 }

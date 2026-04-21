@@ -1,15 +1,14 @@
 # AWR — Agentic Web Runtime
 
-A headless terminal browser for AI agents. Loads pages, runs their
-JavaScript, and exposes any WebMCP tools the page registers
-(`navigator.modelContext.registerTool(...)`) as a CLI surface so an
-agent can discover and invoke them.
+A headless terminal browser for AI agents. Loads pages and runs their
+JavaScript with a CLI-first interface.
 
-**Status: v1 slice shipped** (commit [`950d954`](../../commit/950d954)
-on `main`). The authoritative MVP contract lives in `spec/MVP.md`;
-`MVP_PLAN.md` tracks the 7-step implementation slice. All seven steps
-are ✅, and the end-to-end demo is verified against
-`experiments/webmcp_mock.html`.
+> Scope note (April 21, 2026): WebMCP is currently implemented as an
+> experimental feature, but it is **not part of MVP gating**. MVP scope
+> and acceptance criteria are governed by `spec/MVP.md` and `spec/PRD.md`.
+
+**Status:** implementation in progress against the authoritative MVP
+contract in `spec/MVP.md` (with `spec/PRD.md` as product context).
 
 ---
 

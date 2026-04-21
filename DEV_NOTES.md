@@ -1,5 +1,32 @@
 # AWR Dev Notes
 
+## Installing Zig 0.16 in this environment (Linux x86_64)
+
+Per Zig's official Getting Started guide, the reliable approach here is
+**direct download** (not `apt`) because this base image does not provide a
+`zig` package.
+
+```bash
+cd /tmp
+curl -L --fail -o zig-x86_64-linux-0.16.0.tar.xz \
+  https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+tar -xf zig-x86_64-linux-0.16.0.tar.xz
+PATH=/tmp/zig-x86_64-linux-0.16.0:$PATH zig version
+```
+
+For repeatable local use in this repo, prefix build/test commands with that
+PATH, e.g.:
+
+```bash
+PATH=/tmp/zig-x86_64-linux-0.16.0:$PATH zig build -Doptimize=ReleaseSafe
+```
+
+Notes:
+
+- `apt-get install zig` fails in this environment (`Unable to locate package zig`).
+- Build may still fail if dependency fetches to GitHub are blocked; that is
+  separate from Zig installation itself.
+
 ## Zig 0.16 migration — patch debt
 
 On 2026-04-18 this tree was migrated from Zig 0.15 to 0.16 to pick up

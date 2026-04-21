@@ -7,9 +7,12 @@
 /// fromLexbor() but may be freed immediately after — all strings are copied
 /// into the arena.
 ///
-/// Phase 2 querySelector surface (bridge.zig will expose to JS):
+/// querySelector surface (bridge.zig will expose to JS):
 ///   document.getElementById(id)
-///   document.querySelector(sel)      — tag, #id, .class, tag#id, tag.class
+///   document.querySelector(sel)      — tag, #id, .class, tag#id, tag.class,
+///                                      [attr], [attr=val], :not(sel),
+///                                      descendant, child (>), adjacent (+),
+///                                      sibling (~), multi-class
 ///   document.querySelectorAll(sel)
 ///   element.getAttribute(name)
 ///   element.textContent              (concatenated text nodes)
@@ -31,6 +34,40 @@ pub const NodeKind = enum { document, element, text, comment, other };
 pub const Attribute = struct {
     name:  []const u8,
     value: []const u8,
+};
+
+const AttrSelector = struct {
+    name: []const u8,
+    value: ?[]const u8 = null,
+};
+
+const SimpleSelector = struct {
+    tag: ?[]const u8 = null,
+    id: ?[]const u8 = null,
+    classes: std.ArrayListUnmanaged([]const u8) = .empty,
+    attrs: std.ArrayListUnmanaged(AttrSelector) = .empty,
+    not_sel: ?*SimpleSelector = null,
+
+    fn deinit(self: *SimpleSelector, alloc: std.mem.Allocator) void {
+        if (self.not_sel) |n| {
+            n.deinit(alloc);
+            alloc.destroy(n);
+        }
+        self.classes.deinit(alloc);
+        self.attrs.deinit(alloc);
+    }
+};
+
+const ComplexSelector = struct {
+    const Combinator = enum { descendant, child, adjacent, sibling };
+    steps: std.ArrayListUnmanaged(SimpleSelector) = .empty,
+    combinators: std.ArrayListUnmanaged(Combinator) = .empty,
+
+    fn deinit(self: *ComplexSelector, alloc: std.mem.Allocator) void {
+        for (self.steps.items) |*s| s.deinit(alloc);
+        self.steps.deinit(alloc);
+        self.combinators.deinit(alloc);
+    }
 };
 
 pub const Node = union(NodeKind) {
@@ -136,13 +173,9 @@ pub const Document = struct {
     pub fn querySelector(self: *const Document, sel: []const u8) ?*Element {
         const root = self.root orelse return null;
         const trimmed = std.mem.trim(u8, sel, " \t\n\r");
-        if (std.mem.indexOfAny(u8, trimmed, " \t")) |_| {
-            var out: std.ArrayList(*Element) = .empty;
-            defer out.deinit(std.heap.page_allocator);
-            collectCompound(std.heap.page_allocator, root, trimmed, &out);
-            return if (out.items.len > 0) out.items[0] else null;
-        }
-        return findBySelector(root, trimmed);
+        var parsed = parseComplexSelector(std.heap.page_allocator, trimmed) catch return null;
+        defer parsed.deinit(std.heap.page_allocator);
+        return findByComplexSelector(root, &parsed);
     }
 
     pub fn querySelectorAll(
@@ -153,43 +186,11 @@ pub const Document = struct {
         var out: std.ArrayList(*Element) = .empty;
         const trimmed = std.mem.trim(u8, sel, " \t\n\r");
         if (self.root) |root| {
-            if (std.mem.indexOfAny(u8, trimmed, " \t")) |_| {
-                collectCompound(allocator, root, trimmed, &out);
-            } else {
-                collectBySelector(allocator, root, trimmed, &out);
-            }
+            var parsed = try parseComplexSelector(allocator, trimmed);
+            defer parsed.deinit(allocator);
+            collectByComplexSelector(allocator, root, &parsed, &out);
         }
         return out.toOwnedSlice(allocator);
-    }
-
-    /// Handle descendant combinator: "A B C" matches elements matching C
-    /// that have an ancestor matching B that has an ancestor matching A.
-    /// Split by whitespace; resolve left-to-right.
-    fn collectCompound(
-        alloc: std.mem.Allocator,
-        root:  *Element,
-        sel:   []const u8,
-        out:   *std.ArrayList(*Element),
-    ) void {
-        var it = std.mem.tokenizeAny(u8, sel, " \t");
-        const first = it.next() orelse return;
-
-        var current: std.ArrayList(*Element) = .empty;
-        defer current.deinit(alloc);
-        collectBySelector(alloc, root, first, &current);
-
-        while (it.next()) |next_sel| {
-            var next_set: std.ArrayList(*Element) = .empty;
-            defer next_set.deinit(alloc);
-            for (current.items) |ancestor| {
-                for (ancestor.children.items) |child| {
-                    if (child == .element) collectBySelector(alloc, child.element, next_sel, &next_set);
-                }
-            }
-            current.deinit(alloc);
-            current = next_set.clone(alloc) catch .empty;
-        }
-        for (current.items) |e| out.append(alloc, e) catch {};
     }
 
     // ── Private search helpers ───────────────────────────────────────
@@ -206,45 +207,213 @@ pub const Document = struct {
         return null;
     }
 
-    fn findBySelector(elem: *Element, sel: []const u8) ?*Element {
-        if (matchesSelector(elem, sel)) return elem;
+    fn findByComplexSelector(elem: *Element, sel: *const ComplexSelector) ?*Element {
+        if (matchesComplexSelector(elem, sel)) return elem;
         for (elem.children.items) |child| {
             if (child == .element) {
-                if (findBySelector(child.element, sel)) |found| return found;
+                if (findByComplexSelector(child.element, sel)) |found| return found;
             }
         }
         return null;
     }
 
-    fn collectBySelector(alloc: std.mem.Allocator, elem: *Element, sel: []const u8, out: *std.ArrayList(*Element)) void {
-        if (matchesSelector(elem, sel)) out.append(alloc, elem) catch {};
+    fn collectByComplexSelector(alloc: std.mem.Allocator, elem: *Element, sel: *const ComplexSelector, out: *std.ArrayList(*Element)) void {
+        if (matchesComplexSelector(elem, sel)) out.append(alloc, elem) catch {};
         for (elem.children.items) |child| {
-            if (child == .element) collectBySelector(alloc, child.element, sel, out);
+            if (child == .element) collectByComplexSelector(alloc, child.element, sel, out);
         }
     }
 
-    /// Simple CSS selector: tag | #id | .class | tag#id | tag.class
-    fn matchesSelector(elem: *const Element, sel: []const u8) bool {
-        if (sel.len == 0) return false;
-        if (sel[0] == '#') {
+    fn matchesComplexSelector(elem: *const Element, sel: *const ComplexSelector) bool {
+        if (sel.steps.items.len == 0) return false;
+        return matchStep(elem, sel, sel.steps.items.len - 1);
+    }
+
+    fn matchStep(elem: *const Element, sel: *const ComplexSelector, step_idx: usize) bool {
+        const step = &sel.steps.items[step_idx];
+        if (!matchesSimpleSelector(elem, step)) return false;
+        if (step_idx == 0) return true;
+        const comb = sel.combinators.items[step_idx - 1];
+        switch (comb) {
+            .child => {
+                const p = elem.parent orelse return false;
+                return matchStep(p, sel, step_idx - 1);
+            },
+            .descendant => {
+                var p = elem.parent;
+                while (p) |cur| : (p = cur.parent) {
+                    if (matchStep(cur, sel, step_idx - 1)) return true;
+                }
+                return false;
+            },
+            .adjacent => {
+                const sib = previousElementSibling(elem) orelse return false;
+                return matchStep(sib, sel, step_idx - 1);
+            },
+            .sibling => {
+                var sib = previousElementSibling(elem);
+                while (sib) |cur| : (sib = previousElementSibling(cur)) {
+                    if (matchStep(cur, sel, step_idx - 1)) return true;
+                }
+                return false;
+            },
+        }
+    }
+
+    fn previousElementSibling(elem: *const Element) ?*Element {
+        const p = elem.parent orelse return null;
+        var prev: ?*Element = null;
+        for (p.children.items) |n| {
+            if (n == .element) {
+                if (n.element == elem) return prev;
+                prev = n.element;
+            }
+        }
+        return null;
+    }
+
+    fn matchesSimpleSelector(elem: *const Element, sel: *const SimpleSelector) bool {
+        if (sel.tag) |tag| {
+            if (tag.len > 0 and !std.mem.eql(u8, tag, "*") and !std.ascii.eqlIgnoreCase(elem.tag, tag)) return false;
+        }
+        if (sel.id) |idv| {
             const eid = elem.getAttribute("id") orelse return false;
-            return std.mem.eql(u8, eid, sel[1..]);
+            if (!std.mem.eql(u8, eid, idv)) return false;
         }
-        if (sel[0] == '.') {
+        for (sel.classes.items) |cls| {
             const ecls = elem.getAttribute("class") orelse return false;
-            return classListContains(ecls, sel[1..]);
+            if (!classListContains(ecls, cls)) return false;
         }
-        if (std.mem.indexOfScalar(u8, sel, '#')) |hp| {
-            if (!std.ascii.eqlIgnoreCase(elem.tag, sel[0..hp])) return false;
-            const eid = elem.getAttribute("id") orelse return false;
-            return std.mem.eql(u8, eid, sel[hp + 1..]);
+        for (sel.attrs.items) |a| {
+            const v = elem.getAttribute(a.name) orelse return false;
+            if (a.value) |expected| {
+                if (!std.mem.eql(u8, v, expected)) return false;
+            }
         }
-        if (std.mem.indexOfScalar(u8, sel, '.')) |dp| {
-            if (!std.ascii.eqlIgnoreCase(elem.tag, sel[0..dp])) return false;
-            const ecls = elem.getAttribute("class") orelse return false;
-            return classListContains(ecls, sel[dp + 1..]);
+        if (sel.not_sel) |n| {
+            if (matchesSimpleSelector(elem, n)) return false;
         }
-        return std.ascii.eqlIgnoreCase(elem.tag, sel);
+        return true;
+    }
+
+    fn parseComplexSelector(alloc: std.mem.Allocator, sel: []const u8) !ComplexSelector {
+        var out: ComplexSelector = .{};
+        var i: usize = 0;
+        while (i < sel.len) {
+            while (i < sel.len and (sel[i] == ' ' or sel[i] == '\t' or sel[i] == '\n' or sel[i] == '\r')) : (i += 1) {}
+            if (i >= sel.len) break;
+            const start = i;
+            var bracket_depth: i32 = 0;
+            var paren_depth: i32 = 0;
+            while (i < sel.len) : (i += 1) {
+                const ch = sel[i];
+                if (ch == '[') bracket_depth += 1
+                else if (ch == ']') bracket_depth -= 1
+                else if (ch == '(') paren_depth += 1
+                else if (ch == ')') paren_depth -= 1
+                else if (bracket_depth == 0 and paren_depth == 0 and (ch == '>' or ch == '+' or ch == '~' or ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r'))
+                    break;
+            }
+            const token = std.mem.trim(u8, sel[start..i], " \t\n\r");
+            if (token.len == 0) continue;
+            try out.steps.append(alloc, try parseSimpleSelector(alloc, token));
+            if (i >= sel.len) break;
+
+            var j = i;
+            var saw_ws = false;
+            while (j < sel.len and (sel[j] == ' ' or sel[j] == '\t' or sel[j] == '\n' or sel[j] == '\r')) : (j += 1) {
+                saw_ws = true;
+            }
+            const ch = if (j < sel.len) sel[j] else 0;
+            if (ch == '>' or ch == '+' or ch == '~') {
+                try out.combinators.append(alloc, switch (ch) {
+                    '>' => .child,
+                    '+' => .adjacent,
+                    else => .sibling,
+                });
+                i = j + 1;
+            } else {
+                if (saw_ws) try out.combinators.append(alloc, .descendant);
+                i = j;
+            }
+        }
+        return out;
+    }
+
+    fn parseSimpleSelector(alloc: std.mem.Allocator, token: []const u8) !SimpleSelector {
+        var out: SimpleSelector = .{};
+        var i: usize = 0;
+        while (i < token.len) {
+            const ch = token[i];
+            if (ch == '.') {
+                i += 1;
+                const start = i;
+                while (i < token.len and isIdentChar(token[i])) : (i += 1) {}
+                if (i > start) try out.classes.append(alloc, token[start..i]);
+                continue;
+            }
+            if (ch == '#') {
+                i += 1;
+                const start = i;
+                while (i < token.len and isIdentChar(token[i])) : (i += 1) {}
+                if (i > start) out.id = token[start..i];
+                continue;
+            }
+            if (std.mem.startsWith(u8, token[i..], ":not(")) {
+                i += 5;
+                const start = i;
+                var depth: i32 = 1;
+                while (i < token.len and depth > 0) : (i += 1) {
+                    if (token[i] == '(') depth += 1
+                    else if (token[i] == ')') depth -= 1;
+                }
+                const end = if (i == 0) 0 else i - 1;
+                if (end > start) {
+                    const inner = try alloc.create(SimpleSelector);
+                    inner.* = try parseSimpleSelector(alloc, std.mem.trim(u8, token[start..end], " \t\n\r"));
+                    out.not_sel = inner;
+                }
+                continue;
+            }
+            if (ch == '[') {
+                i += 1;
+                const start = i;
+                while (i < token.len and token[i] != ']') : (i += 1) {}
+                if (i <= token.len) {
+                    const inside = std.mem.trim(u8, token[start..@min(i, token.len)], " \t\n\r");
+                    if (inside.len > 0) {
+                        if (std.mem.indexOfScalar(u8, inside, '=')) |eq| {
+                            const name = std.mem.trim(u8, inside[0..eq], " \t\n\r");
+                            var value = std.mem.trim(u8, inside[eq + 1 ..], " \t\n\r");
+                            if (value.len >= 2 and ((value[0] == '"' and value[value.len - 1] == '"') or (value[0] == '\'' and value[value.len - 1] == '\'')))
+                                value = value[1 .. value.len - 1];
+                            try out.attrs.append(alloc, .{ .name = name, .value = value });
+                        } else {
+                            try out.attrs.append(alloc, .{ .name = inside });
+                        }
+                    }
+                }
+                if (i < token.len and token[i] == ']') i += 1;
+                continue;
+            }
+            if (isIdentStart(ch) or ch == '*') {
+                const start = i;
+                i += 1;
+                while (i < token.len and isIdentChar(token[i])) : (i += 1) {}
+                out.tag = token[start..i];
+                continue;
+            }
+            i += 1;
+        }
+        return out;
+    }
+
+    fn isIdentStart(c: u8) bool {
+        return std.ascii.isAlphabetic(c) or c == '_' or c == '-';
+    }
+
+    fn isIdentChar(c: u8) bool {
+        return std.ascii.isAlphanumeric(c) or c == '_' or c == '-';
     }
 
     fn classListContains(class_attr: []const u8, needle: []const u8) bool {
@@ -500,4 +669,38 @@ test "querySelector — tag.class compound selector" {
     const elem = doc.querySelector("p.note");
     try std.testing.expect(elem != null);
     try std.testing.expectEqualStrings("p", elem.?.tag);
+}
+
+test "querySelector — attribute selectors" {
+    var doc = try parseDocument(std.testing.allocator,
+        "<html><body><div data-x=\"1\"></div><div data-x=\"2\"></div></body></html>");
+    defer doc.deinit();
+    try std.testing.expect(doc.querySelector("[data-x]") != null);
+    const eq = doc.querySelector("[data-x='2']");
+    try std.testing.expect(eq != null);
+}
+
+test "querySelector — :not pseudo-class" {
+    var doc = try parseDocument(std.testing.allocator,
+        "<html><body><p class=\"a\"></p><p class=\"b\"></p></body></html>");
+    defer doc.deinit();
+    const elem = doc.querySelector("p:not(.a)");
+    try std.testing.expect(elem != null);
+    try std.testing.expect(std.mem.eql(u8, elem.?.getAttribute("class") orelse "", "b"));
+}
+
+test "querySelector — combinators > + ~" {
+    var doc = try parseDocument(std.testing.allocator,
+        "<html><body><div id=\"wrap\"><span class=\"a\"></span><span class=\"b\"></span><em></em><span class=\"c\"></span></div></body></html>");
+    defer doc.deinit();
+    try std.testing.expect(doc.querySelector("div > span.b") != null);
+    try std.testing.expect(doc.querySelector("span.a + span.b") != null);
+    try std.testing.expect(doc.querySelector("span.a ~ span.c") != null);
+}
+
+test "querySelector — multi-class selector" {
+    var doc = try parseDocument(std.testing.allocator,
+        "<html><body><li class=\"foo bar\">x</li></body></html>");
+    defer doc.deinit();
+    try std.testing.expect(doc.querySelector("li.foo.bar") != null);
 }
