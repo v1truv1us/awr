@@ -43,7 +43,7 @@ pub const EventLoop = struct {
     /// Entries whose JS context has been torn down (via `reset`).  They stay
     /// alive until libxev fires their completion callback (marking them freed),
     /// or until `deinit` disposes of them directly.
-    orphaned: std.ArrayListUnmanaged(*PendingTimer) = .{},
+    orphaned: std.ArrayListUnmanaged(*PendingTimer) = .empty,
     next_id: u32 = 1,
 
     pub fn init(allocator: std.mem.Allocator, ctx: *qjs.Context) !EventLoop {

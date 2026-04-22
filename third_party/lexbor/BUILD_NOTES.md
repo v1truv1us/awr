@@ -7,6 +7,20 @@ contributors must build it from source into `/usr/local`.
 
 ## One-shot build (Linux)
 
+Preferred (repo-managed local install, no sudo):
+
+```bash
+./scripts/bootstrap_lexbor.sh
+```
+
+This installs lexbor into `third_party/lexbor/install`, which works with:
+
+```bash
+zig build -Dlexbor-prefix=third_party/lexbor/install
+```
+
+Manual `/usr/local` install path:
+
 ```bash
 git clone --depth 1 --branch v2.5.0 https://github.com/lexbor/lexbor \
     third_party/lexbor

@@ -25,8 +25,12 @@ PATH=/tmp/zig-x86_64-linux-0.16.0:$PATH zig build -Doptimize=ReleaseSafe
 Notes:
 
 - `apt-get install zig` fails in this environment (`Unable to locate package zig`).
-- Build may still fail if dependency fetches to GitHub are blocked; that is
-  separate from Zig installation itself.
+- If `zig build` fails with `invalid HTTP response: HttpConnectionClosing`
+  while resolving `build.zig.zon` deps, run `./scripts/bootstrap_deps.sh`.
+  The build now reads `libxev` and `zig-quickjs-ng` from local git checkouts
+  under `third_party/` to avoid Zig's HTTP fetch path.
+- If `liblexbor` is missing on Linux, run `./scripts/bootstrap_lexbor.sh`
+  and build with `-Dlexbor-prefix=third_party/lexbor/install`.
 
 ## Zig 0.16 migration — patch debt
 

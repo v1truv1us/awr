@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) void {
     // libraries that don't ship in apt).
     const host_os = @import("builtin").target.os.tag;
     const is_mac  = host_os == .macos;
+    const lexbor_prefix_opt = b.option([]const u8, "lexbor-prefix", "Install prefix containing lexbor include/ and lib/");
 
     const nghttp2_include_sys: std.Build.LazyPath = if (is_mac)
         .{ .cwd_relative = "/opt/homebrew/opt/libnghttp2/include" }
@@ -44,14 +45,14 @@ pub fn build(b: *std.Build) void {
         .{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" };
     const nghttp2_include = b.path("src/net"); // for h2_shim.h
 
-    const lexbor_include: std.Build.LazyPath = if (is_mac)
-        .{ .cwd_relative = "/opt/homebrew/opt/lexbor/include" }
+    const lexbor_prefix = lexbor_prefix_opt orelse if (is_mac)
+        "/opt/homebrew/opt/lexbor"
     else
-        .{ .cwd_relative = "/usr/local/include" };
-    const lexbor_lib: std.Build.LazyPath = if (is_mac)
-        .{ .cwd_relative = "/opt/homebrew/opt/lexbor/lib" }
-    else
-        .{ .cwd_relative = "/usr/local/lib" };
+        "/usr/local";
+    const lexbor_include: std.Build.LazyPath =
+        .{ .cwd_relative = b.fmt("{s}/include", .{lexbor_prefix}) };
+    const lexbor_lib: std.Build.LazyPath =
+        .{ .cwd_relative = b.fmt("{s}/lib", .{lexbor_prefix}) };
 
     // ── BoringSSL paths (vendored in third_party/) ────────────────────────
     // Pre-built static libs for macOS/arm64. See third_party/boringssl/BUILD_NOTES.md to rebuild.

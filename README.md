@@ -15,7 +15,11 @@ contract in `spec/MVP.md` (with `spec/PRD.md` as product context).
 ## Quick start
 
 ```bash
-zig build -Doptimize=ReleaseSafe       # produces zig-out/bin/awr (~9.9 MB)
+./scripts/bootstrap_deps.sh              # clones pinned libxev + zig-quickjs-ng locally
+./scripts/bootstrap_lexbor.sh           # builds lexbor v2.5.0 into third_party/lexbor/install
+zig build -Doptimize=ReleaseSafe \
+  -Dlexbor-prefix=third_party/lexbor/install
+                                        # produces zig-out/bin/awr (~9.9 MB)
 
 ./zig-out/bin/awr --version            # prints 0.0.<git-hash>
 ./zig-out/bin/awr tools experiments/webmcp_mock.html

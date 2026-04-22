@@ -342,7 +342,9 @@ fn removeAttributeFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("qu
     const name = std.mem.span(name_c);
     const old = elem.attributes;
     var kept: usize = 0;
-    for (old) |a| if (!std.ascii.eqlIgnoreCase(a.name, name)) kept += 1;
+    for (old) |a| {
+        if (!std.ascii.eqlIgnoreCase(a.name, name)) kept += 1;
+    }
     const alloc = bridge.doc.arena.allocator();
     const next = alloc.alloc(dom.Attribute, kept) catch return qjs.Value.initBool(false);
     var j: usize = 0;

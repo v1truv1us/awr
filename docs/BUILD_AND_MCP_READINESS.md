@@ -33,16 +33,45 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 
 Important hygiene note: install Zig under `/tmp` or `$HOME/.local`, **not** in the repository root. This avoids committing toolchain archives/directories and keeps diffs small.
 
-For lexbor installation details, follow:
+Bootstrap lexbor locally (no `/usr/local` install required):
 
-- `third_party/lexbor/BUILD_NOTES.md`
+```bash
+./scripts/bootstrap_lexbor.sh
+```
+
+By default this installs lexbor v2.5.0 under:
+
+- `third_party/lexbor/install`
+
+### Dependency bootstrap (required before first build)
+
+This repo now uses **path dependencies** for `libxev` and `zig-quickjs-ng`
+to avoid Zig HTTP fetch failures seen in constrained environments.
+Bootstrap them once:
+
+```bash
+./scripts/bootstrap_deps.sh
+```
+
+This script clones pinned commits into:
+
+- `third_party/libxev/`
+- `third_party/zig-quickjs-ng/`
+- `third_party/quickjs-ng-quickjs/`
+
+It also patches `third_party/zig-quickjs-ng/build.zig.zon` to use the local
+`quickjs-ng-quickjs` checkout so Zig does not need to fetch nested tarballs.
+All of these directories are intentionally gitignored.
 
 ## 2) Build steps
 
 From repository root:
 
 ```bash
-PATH="$HOME/.local/bin:$PATH" zig build -Doptimize=ReleaseSafe
+./scripts/bootstrap_deps.sh
+./scripts/bootstrap_lexbor.sh
+PATH="$HOME/.local/bin:$PATH" zig build -Doptimize=ReleaseSafe \
+  -Dlexbor-prefix=third_party/lexbor/install
 ```
 
 Expected artifact:
@@ -84,6 +113,12 @@ Build artifacts must remain untracked:
 - `zig-cache/`
 - `zig-out/`
 - `zig-pkg/`
+- `third_party/libxev/`
+- `third_party/zig-quickjs-ng/`
+- `third_party/quickjs-ng-quickjs/`
+- `third_party/lexbor/src/`
+- `third_party/lexbor/build/`
+- `third_party/lexbor/install/`
 
 These are intentionally ignored in `.gitignore` to keep the repository clean across local and CI builds.
 
