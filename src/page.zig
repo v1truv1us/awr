@@ -261,6 +261,7 @@ pub const Page = struct {
         // ── Install DOM bridge (document/window globals in JS) ────────────
         // removeDomBridge runs before zig_doc.deinit (LIFO defer order).
         try bridge.installDomBridge(&self.js, zig_doc, gpa);
+        errdefer bridge.removeDomBridge(&self.js);
 
         // ── Populate window.location from the requested URL ───────────────
         self.setLocationFromUrl(url);

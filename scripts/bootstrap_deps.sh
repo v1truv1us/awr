@@ -32,26 +32,57 @@ clone_or_update "$repo_root/third_party/quickjs-ng-quickjs" \
 
 python - <<PY
 from pathlib import Path
+import sys
+
+def require_replace(text, old, new, path, description):
+    if old not in text:
+        print(f"bootstrap patch failed for {path}: missing expected text for {description}", file=sys.stderr)
+        sys.exit(1)
+    return text.replace(old, new)
 
 repo_root = Path(r"""$repo_root""")
 zon = repo_root / "third_party" / "zig-quickjs-ng" / "build.zig.zon"
 text = zon.read_text()
-text = text.replace(
+text = require_replace(
+    text,
     '.url = "https://github.com/quickjs-ng/quickjs/archive/85640f81e04bc93940acc2756c792c66076dd768.tar.gz",\n'
     '            .hash = "N-V-__8AAIZ_PAA7y10jIaLigzkK4qd5-jfKEoTOOfHCsIGM",',
     '.path = "../quickjs-ng-quickjs",',
+    zon,
+    "replace quickjs HTTP dependency with local path",
 )
 zon.write_text(text)
 
 build_zig = repo_root / "third_party" / "zig-quickjs-ng" / "build.zig"
 build_text = build_zig.read_text()
-build_text = build_text.replace("    tests.linkLibrary(lib);", "    mod.linkLibrary(lib);")
-build_text = build_text.replace("    lib.linkLibC();", "    lib.root_module.link_libc = true;")
-build_text = build_text.replace(
+build_text = require_replace(
+    build_text,
+    "    tests.linkLibrary(lib);",
+    "    mod.linkLibrary(lib);",
+    build_zig,
+    "update tests.linkLibrary call",
+)
+build_text = require_replace(
+    build_text,
+    "    lib.linkLibC();",
+    "    lib.root_module.link_libc = true;",
+    build_zig,
+    "update lib.linkLibC call",
+)
+build_text = require_replace(
+    build_text,
     "    lib.addIncludePath(upstream.path(\"\"));",
     "    lib.root_module.addIncludePath(upstream.path(\"\"));",
+    build_zig,
+    "update addIncludePath call",
 )
-build_text = build_text.replace("    lib.addCSourceFiles(.{", "    lib.root_module.addCSourceFiles(.{")
+build_text = require_replace(
+    build_text,
+    "    lib.addCSourceFiles(.{",
+    "    lib.root_module.addCSourceFiles(.{",
+    build_zig,
+    "update addCSourceFiles call",
+)
 build_zig.write_text(build_text)
 PY
 

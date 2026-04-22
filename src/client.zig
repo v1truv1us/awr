@@ -158,9 +158,12 @@ pub const Client = struct {
         const body = try body_list.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(body);
 
+        const headers = try cloneFetchHeaders(self.allocator, result.headers);
+        errdefer headers.deinit(self.allocator);
+
         return Response{
             .status    = @intFromEnum(result.status),
-            .headers   = .{},
+            .headers   = headers,
             .body      = body,
             .allocator = self.allocator,
         };

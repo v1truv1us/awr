@@ -7,7 +7,7 @@ This runbook is the operational checklist for taking AWR from a fresh clone to a
 ### Required toolchain
 
 - **Zig 0.16.0** (installed from the official Zig downloads page)
-- **lexbor v2.5.0** installed on the system include/lib path
+- **lexbor v2.5.0** available either on the system include/lib path **or** via the local bootstrap install at `third_party/lexbor/install` (pass `-Dlexbor-prefix=third_party/lexbor/install` when using the local prefix)
 - Linux x86_64 or macOS arm64
 
 If Zig is missing, follow Zig's official Getting Started flow (download prebuilt archive, verify checksum, add `zig` to `PATH`). On Linux x86_64 in this repo's environment:
