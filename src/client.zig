@@ -149,6 +149,7 @@ pub const Client = struct {
             .location = .{ .url = url_str },
             .response_writer = &body_buf.writer,
             .redirect_behavior = redirect_behavior,
+            .timeout_ms = self.options.timeout_ms,
             .extra_headers = extra_headers[0..extra_header_count],
         }) catch |err| return mapFetchError(err);
 
@@ -157,9 +158,12 @@ pub const Client = struct {
         const body = try body_list.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(body);
 
+        const headers = try cloneFetchHeaders(self.allocator, result.headers);
+        errdefer headers.deinit(self.allocator);
+
         return Response{
             .status    = @intFromEnum(result.status),
-            .headers   = .{},
+            .headers   = headers,
             .body      = body,
             .allocator = self.allocator,
         };

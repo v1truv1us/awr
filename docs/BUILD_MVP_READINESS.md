@@ -1,13 +1,13 @@
-# Build, Test, and MCP-Readiness Runbook
+# Build, Test, and MVP-Readiness Runbook
 
-This runbook is the operational checklist for taking AWR from a fresh clone to a reproducible local build, test execution, and MCP-readiness verification.
+This runbook is the operational checklist for taking AWR from a fresh clone to a reproducible local build, test execution, and MVP-readiness verification.
 
 ## 1) Prerequisites
 
 ### Required toolchain
 
 - **Zig 0.16.0** (installed from the official Zig downloads page)
-- **lexbor v2.5.0** installed on the system include/lib path
+- **lexbor v2.5.0** available either on the system include/lib path **or** via the local bootstrap install at `third_party/lexbor/install` (pass `-Dlexbor-prefix=third_party/lexbor/install` when using the local prefix)
 - Linux x86_64 or macOS arm64
 
 If Zig is missing, follow Zig's official Getting Started flow (download prebuilt archive, verify checksum, add `zig` to `PATH`). On Linux x86_64 in this repo's environment:
@@ -131,9 +131,9 @@ Build artifacts must remain untracked:
 
 These are intentionally ignored in `.gitignore` to keep the repository clean across local and CI builds.
 
-## 5) MVP -> MCP readiness checklist
+## 5) MVP readiness checklist
 
-Use this checklist before declaring "MCP-ready" for agent integration:
+Use this checklist before declaring "MVP-ready" for agent integration:
 
 1. **Build completeness**
    - `zig build -Doptimize=ReleaseSafe` succeeds.
