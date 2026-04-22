@@ -149,6 +149,7 @@ pub const Client = struct {
             .location = .{ .url = url_str },
             .response_writer = &body_buf.writer,
             .redirect_behavior = redirect_behavior,
+            .timeout_ms = self.options.timeout_ms,
             .extra_headers = extra_headers[0..extra_header_count],
         }) catch |err| return mapFetchError(err);
 
