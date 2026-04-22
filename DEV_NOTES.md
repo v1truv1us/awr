@@ -3,13 +3,14 @@
 ## Installing Zig 0.16 in this environment (Linux x86_64)
 
 Per Zig's official Getting Started guide, the reliable approach here is
-**direct download** (not `apt`) because this base image does not provide a
-`zig` package.
+**direct download + checksum verification** (not `apt`) because this base
+image does not provide a `zig` package.
 
 ```bash
 cd /tmp
 curl -L --fail -o zig-x86_64-linux-0.16.0.tar.xz \
   https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+echo '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  zig-x86_64-linux-0.16.0.tar.xz' | sha256sum -c -
 tar -xf zig-x86_64-linux-0.16.0.tar.xz
 PATH=/tmp/zig-x86_64-linux-0.16.0:$PATH zig version
 ```
@@ -24,8 +25,12 @@ PATH=/tmp/zig-x86_64-linux-0.16.0:$PATH zig build -Doptimize=ReleaseSafe
 Notes:
 
 - `apt-get install zig` fails in this environment (`Unable to locate package zig`).
-- Build may still fail if dependency fetches to GitHub are blocked; that is
-  separate from Zig installation itself.
+- If `zig build` fails with `invalid HTTP response: HttpConnectionClosing`
+  while resolving `build.zig.zon` deps, run `./scripts/bootstrap_deps.sh`.
+  The build now reads `libxev` and `zig-quickjs-ng` from local git checkouts
+  under `third_party/` to avoid Zig's HTTP fetch path.
+- If `liblexbor` is missing on Linux, run `./scripts/bootstrap_lexbor.sh`
+  and build with `-Dlexbor-prefix=third_party/lexbor/install`.
 
 ## Zig 0.16 migration — patch debt
 

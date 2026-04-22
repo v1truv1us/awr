@@ -15,7 +15,11 @@ contract in `spec/MVP.md` (with `spec/PRD.md` as product context).
 ## Quick start
 
 ```bash
-zig build -Doptimize=ReleaseSafe       # produces zig-out/bin/awr (~9.9 MB)
+./scripts/bootstrap_deps.sh              # clones pinned libxev + zig-quickjs-ng locally
+./scripts/bootstrap_lexbor.sh           # builds lexbor v2.5.0 into third_party/lexbor/install
+zig build -Doptimize=ReleaseSafe \
+  -Dlexbor-prefix=third_party/lexbor/install
+                                        # produces zig-out/bin/awr (~9.9 MB)
 
 ./zig-out/bin/awr --version            # prints 0.0.<git-hash>
 ./zig-out/bin/awr tools experiments/webmcp_mock.html
@@ -23,6 +27,9 @@ zig build -Doptimize=ReleaseSafe       # produces zig-out/bin/awr (~9.9 MB)
     search_products '{"q":"Widget"}'
 ./zig-out/bin/awr call  experiments/webmcp_mock.html \
     add_to_cart '{"sku":"w-001","qty":2}'
+
+# MVP operational smoke checks (local fixtures + mock server):
+./scripts/mvp_smoke.sh
 ```
 
 Requires Zig 0.16 and lexbor v2.5.0 on the system library path
@@ -30,6 +37,8 @@ Requires Zig 0.16 and lexbor v2.5.0 on the system library path
 macOS — see `third_party/lexbor/BUILD_NOTES.md`).
 
 Agent wiring walk-through: [`docs/agent-integration.md`](docs/agent-integration.md).
+
+Build + test + MVP-readiness runbook: [`docs/BUILD_MVP_READINESS.md`](docs/BUILD_MVP_READINESS.md).
 
 ---
 

@@ -408,12 +408,12 @@ pub const Document = struct {
         return out;
     }
 
-    fn isIdentStart(c: u8) bool {
-        return std.ascii.isAlphabetic(c) or c == '_' or c == '-';
+    fn isIdentStart(ch: u8) bool {
+        return std.ascii.isAlphabetic(ch) or ch == '_' or ch == '-';
     }
 
-    fn isIdentChar(c: u8) bool {
-        return std.ascii.isAlphanumeric(c) or c == '_' or c == '-';
+    fn isIdentChar(ch: u8) bool {
+        return std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-';
     }
 
     fn classListContains(class_attr: []const u8, needle: []const u8) bool {
