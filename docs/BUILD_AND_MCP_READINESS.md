@@ -105,6 +105,15 @@ PATH="$HOME/.local/bin:$PATH" zig build test-e2e
 
 If running inside a gVisor/v9fs container, expect known Zig 0.16 environment issues described in `DEV_NOTES.md` (#7 and #8).
 
+For a fast operational MVP verification (fixtures + local mock server):
+
+```bash
+./scripts/mvp_smoke.sh
+```
+
+This script hard-checks AT-1/2/3/5/6/7/8 and runs AT-4 (`https://example.com`)
+as best-effort (warning only in environments where Zig outbound networking is restricted).
+
 ## 4) Build artifacts and repository hygiene
 
 Build artifacts must remain untracked:

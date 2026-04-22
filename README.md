@@ -27,6 +27,9 @@ zig build -Doptimize=ReleaseSafe \
     search_products '{"q":"Widget"}'
 ./zig-out/bin/awr call  experiments/webmcp_mock.html \
     add_to_cart '{"sku":"w-001","qty":2}'
+
+# MVP operational smoke checks (local fixtures + mock server):
+./scripts/mvp_smoke.sh
 ```
 
 Requires Zig 0.16 and lexbor v2.5.0 on the system library path

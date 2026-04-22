@@ -88,6 +88,7 @@ pub const Page = struct {
     js:         engine.JsEngine,
     event_loop: engine.EventLoop,
     base_url:   []u8,  // duped, may be replaced on each processHtml
+    current_doc: ?dom.Document = null,
 
     /// Initialise a new Page with default client options.
     /// `io` is threaded through to the HTTP client for all network fetches
@@ -110,12 +111,18 @@ pub const Page = struct {
             .js         = js_engine,
             .event_loop = el,
             .base_url   = base_url,
+            .current_doc = null,
         };
         page.attachHosts();
         return page;
     }
 
     pub fn deinit(self: *Page) void {
+        if (self.current_doc) |*doc_ref| {
+            bridge.removeDomBridge(&self.js);
+            doc_ref.deinit();
+            self.current_doc = null;
+        }
         self.event_loop.deinit();
         self.js.deinit();
         self.client.deinit();
@@ -212,6 +219,12 @@ pub const Page = struct {
     ) !PageResult {
         const gpa = self.allocator;
 
+        if (self.current_doc) |*doc_ref| {
+            bridge.removeDomBridge(&self.js);
+            doc_ref.deinit();
+            self.current_doc = null;
+        }
+
         // ── Reset JS context to prevent state bleed between navigations ───
         // Save the console sink (it lives inside the old host allocation),
         // tear down the old runtime+context, then bring up a fresh one.
@@ -236,13 +249,18 @@ pub const Page = struct {
         // dom.parseDocument keeps everything within a single @cImport context,
         // avoiding the cross-module cImport type-mismatch that arises when
         // html/parser.zig and dom/node.zig are imported separately.
-        var zig_doc = try dom.parseDocument(gpa, html);
-        defer zig_doc.deinit();
+        self.current_doc = try dom.parseDocument(gpa, html);
+        errdefer {
+            if (self.current_doc) |*doc_ref| {
+                doc_ref.deinit();
+                self.current_doc = null;
+            }
+        }
+        const zig_doc = &(self.current_doc.?);
 
         // ── Install DOM bridge (document/window globals in JS) ────────────
         // removeDomBridge runs before zig_doc.deinit (LIFO defer order).
-        try bridge.installDomBridge(&self.js, &zig_doc, gpa);
-        defer bridge.removeDomBridge(&self.js);
+        try bridge.installDomBridge(&self.js, zig_doc, gpa);
 
         // ── Populate window.location from the requested URL ───────────────
         self.setLocationFromUrl(url);
@@ -1082,4 +1100,3 @@ test "Page.navigate — fetches http://example.com" {
     try std.testing.expect(result.title != null);
     try std.testing.expect(std.mem.indexOf(u8, result.body_text, "Example Domain") != null);
 }
-
