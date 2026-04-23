@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>WebMCP Mock Shop</title>
+</head>
+<body>
+  <h1>AWR WebMCP Demo</h1>
+  <p>
+    This page registers three tools on <code>navigator.modelContext</code>.
+    An agent embedding AWR can discover them via <code>awr tools</code>
+    and invoke them via <code>awr call</code>.
+  </p>
+
+  <ul id="catalog">
+    <li data-sku="w-001" data-price="9.99">Widget A</li>
+    <li data-sku="w-002" data-price="14.99">Widget B</li>
+    <li data-sku="w-003" data-price="19.99">Widget C</li>
+  </ul>
+
+  <script>
+    'use strict';
+
+    // In-page state the tools act against.
+    const catalog = Array.from(document.querySelectorAll('#catalog li')).map(li => ({
+      sku:   li.getAttribute('data-sku'),
+      name:  li.textContent.trim(),
+      price: Number(li.getAttribute('data-price')),
+    }));
+    const cart = [];
+
+    // Tool 1: search_products — filter catalog by substring.
+    navigator.modelContext.registerTool(
+      {
+        name: 'search_products',
+        description: 'Search the catalog for products whose name contains a query string.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            q: { type: 'string', description: 'Case-insensitive substring to match.' },
+          },
+          required: ['q'],
+        },
+      },
+      function (args) {
+        const q = String((args && args.q) || '').toLowerCase();
+        return catalog.filter(p => p.name.toLowerCase().includes(q));
+      }
+    );
+
+    // Tool 2: get_price — look up a single product's price.
+    navigator.modelContext.registerTool(
+      {
+        name: 'get_price',
+        description: 'Return the price of a product by SKU.',
+        inputSchema: {
+          type: 'object',
+          properties: { sku: { type: 'string' } },
+          required: ['sku'],
+        },
+      },
+      function (args) {
+        const sku = String((args && args.sku) || '');
+        const p = catalog.find(x => x.sku === sku);
+        if (!p) throw new Error('Unknown SKU: ' + sku);
+        return { sku: p.sku, price: p.price };
+      }
+    );
+
+    // Tool 3: add_to_cart — async to exercise the Promise-resolve path.
+    navigator.modelContext.registerTool(
+      {
+        name: 'add_to_cart',
+        description: 'Add N units of a product to the shopping cart. Async.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            sku: { type: 'string' },
+            qty: { type: 'integer', minimum: 1, default: 1 },
+          },
+          required: ['sku'],
+        },
+      },
+      function (args) {
+        const sku = String((args && args.sku) || '');
+        const qty = Number((args && args.qty) || 1);
+        const p = catalog.find(x => x.sku === sku);
+        if (!p) return Promise.reject(new Error('Unknown SKU: ' + sku));
+        return Promise.resolve().then(() => {
+          cart.push({ sku: p.sku, qty, unit_price: p.price });
+          return { cart_size: cart.length, total: cart.reduce((t, i) => t + i.unit_price * i.qty, 0) };
+        });
+      }
+    );
+  </script>
+</body>
+</html>

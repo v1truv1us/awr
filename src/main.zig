@@ -1,153 +1,13 @@
 const std = @import("std");
 const build_opts = @import("build_opts");
-// TODO(Zig 0.16): browser.zig needs Io.Writer migration
-const browser = @import("browser.zig");
-// TODO(Zig 0.16): mcp_stdio.zig needs Io.Writer migration
-const mcp_stdio = @import("mcp_stdio.zig");
 const page_mod = @import("page");
-
-const FetchOptions = struct {
-    json: bool = false,
-    mcp: bool = false,
-    no_color: bool = false,
-    width: usize = 80,
-    url: ?[]const u8 = null,
-};
-
-const PostOptions = struct {
-    url: []const u8,
-    data: []const u8,
-};
-
-const EvalOptions = struct {
-    url: []const u8,
-    expr: []const u8,
-};
-
-const McpCallOptions = struct {
-    url: []const u8,
-    tool_name: []const u8,
-    input_json: ?[]const u8 = null,
-};
-
-const CliCommand = union(enum) {
-    browse: []const u8,
-    fetch: FetchOptions,
-    post: PostOptions,
-    eval_expr: EvalOptions,
-    mcp_call: McpCallOptions,
-    mcp_stdio: []const u8,
-};
-
-fn printUsage(writer: anytype) !void {
-    try writer.writeAll("AWR v0.0.");
-    try writer.writeAll(build_opts.git_hash);
-    try writer.writeAll("\nUsage:\n  awr [options] <url>\n  awr browse <url>\n  awr post <url> --data <body>\n  awr eval <url> <expr>\n  awr mcp-call <url> <tool-name> [--input <json>]\n  awr mcp-stdio <url>\n\nOptions:\n  --json      Output JSON\n  --mcp       Output discovered WebMCP tools as JSON\n  --width N   Set render width (default: 80)\n  --no-color  Disable ANSI styling\n  --help      Show this help\n  --version   Show version\n");
-}
-
-fn parseBrowseArgs(args: []const []const u8) ![]const u8 {
-    if (args.len < 3) return error.MissingUrl;
-    if (args.len > 3) return error.UnexpectedArgument;
-    return args[2];
-}
-
-fn parseFetchArgs(args: []const []const u8) !FetchOptions {
-    var opts = FetchOptions{};
-
-    var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-
-        if (std.mem.eql(u8, arg, "--help")) return error.ShowHelp;
-        if (std.mem.eql(u8, arg, "--version")) return error.ShowVersion;
-        if (std.mem.eql(u8, arg, "--json")) {
-            opts.json = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--mcp")) {
-            opts.mcp = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--no-color")) {
-            opts.no_color = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--width")) {
-            i += 1;
-            if (i >= args.len) return error.MissingWidthValue;
-            opts.width = try std.fmt.parseUnsigned(usize, args[i], 10);
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--")) return error.UnknownOption;
-        if (opts.url != null) return error.UnexpectedArgument;
-        opts.url = arg;
-    }
-
-    if (opts.url == null) return error.MissingUrl;
-    return opts;
-}
-
-fn parsePostArgs(args: []const []const u8) !PostOptions {
-    if (args.len < 4) return error.MissingUrl;
-    const url = args[2];
-    if (!std.mem.eql(u8, args[3], "--data")) return error.MissingDataValue;
-    if (args.len < 5) return error.MissingDataValue;
-    if (args.len > 5) return error.UnexpectedArgument;
-    return .{ .url = url, .data = args[4] };
-}
-
-fn parseEvalArgs(args: []const []const u8) !EvalOptions {
-    if (args.len < 4) return error.MissingUrl;
-    if (args.len > 4) return error.UnexpectedArgument;
-    return .{ .url = args[2], .expr = args[3] };
-}
-
-fn parseMcpCallArgs(args: []const []const u8) !McpCallOptions {
-    if (args.len < 4) return error.MissingUrl;
-
-    var opts = McpCallOptions{
-        .url = args[2],
-        .tool_name = args[3],
-    };
-
-    var i: usize = 4;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "--input")) {
-            i += 1;
-            if (i >= args.len) return error.MissingInputValue;
-            opts.input_json = args[i];
-            continue;
-        }
-        return error.UnknownOption;
-    }
-
-    return opts;
-}
-
-fn parseMcpStdioArgs(args: []const []const u8) ![]const u8 {
-    if (args.len < 3) return error.MissingUrl;
-    if (args.len > 3) return error.UnexpectedArgument;
-    return args[2];
-}
-
-fn parseArgs(args: []const []const u8) !CliCommand {
-    if (args.len <= 1) return error.MissingUrl;
-    if (std.mem.eql(u8, args[1], "--help")) return error.ShowHelp;
-    if (std.mem.eql(u8, args[1], "--version")) return error.ShowVersion;
-    if (std.mem.eql(u8, args[1], "browse")) return .{ .browse = try parseBrowseArgs(args) };
-    if (std.mem.eql(u8, args[1], "post")) return .{ .post = try parsePostArgs(args) };
-    if (std.mem.eql(u8, args[1], "eval")) return .{ .eval_expr = try parseEvalArgs(args) };
-    if (std.mem.eql(u8, args[1], "mcp-call")) return .{ .mcp_call = try parseMcpCallArgs(args) };
-    if (std.mem.eql(u8, args[1], "mcp-stdio")) return .{ .mcp_stdio = try parseMcpStdioArgs(args) };
-    return .{ .fetch = try parseFetchArgs(args) };
-}
+const mock_mod = @import("mock.zig");
 
 fn writeJsonStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
     try list.append(alloc, '"');
     for (s) |c| {
         switch (c) {
-            '"' => try list.appendSlice(alloc, "\\\""),
+            '"'  => try list.appendSlice(alloc, "\\\""),
             '\\' => try list.appendSlice(alloc, "\\\\"),
             '\n' => try list.appendSlice(alloc, "\\n"),
             '\r' => try list.appendSlice(alloc, "\\r"),
@@ -163,240 +23,203 @@ fn writeJsonStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u
     try list.append(alloc, '"');
 }
 
-pub fn main(init: std.process.Init.Minimal) !void {
+const USAGE =
+    \\AWR — Agentic Web Runtime
+    \\
+    \\Usage:
+    \\  awr <url>                    Load URL/path, print JSON {url, status, title, body_text, window_data, tools}
+    \\  awr tools <url>              Load URL/path, print the JSON array of registered WebMCP tools
+    \\  awr call <url> <name> <json> Load URL/path, invoke tool <name> with <json> args, print result envelope
+    \\  awr mock [--port N]          Serve experiments/ over HTTP (default: 127.0.0.1:7777)
+    \\  awr --version                Print version and exit
+    \\
+    \\<url> may be an http(s):// URL, a file:// URL, or a local filesystem path.
+    \\
+;
+
+fn stdoutWrite(io: std.Io, bytes: []const u8) !void {
+    try std.Io.File.stdout().writeStreamingAll(io, bytes);
+}
+
+/// Detect whether `awr call` returned the error envelope shape
+/// `{ "ok": false, ... }` (with or without spaces after the colon).
+fn isFailedCallEnvelope(out: []const u8) bool {
+    const s = std.mem.trim(u8, out, " \t\r\n");
+    const tight = std.mem.indexOf(u8, s, "\"ok\":false");
+    if (tight) |i| return i < 24;
+    const spaced = std.mem.indexOf(u8, s, "\"ok\": false");
+    if (spaced) |i| return i < 24;
+    return false;
+}
+
+/// Load a page from either an http(s):// URL or a local file path.
+/// The returned PageResult is owned by the caller.
+fn loadPage(
+    p: *page_mod.Page,
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    location: []const u8,
+) !page_mod.PageResult {
+    if (std.mem.startsWith(u8, location, "http://") or std.mem.startsWith(u8, location, "https://")) {
+        return p.navigate(location);
+    }
+
+    const path: []const u8 = if (std.mem.startsWith(u8, location, "file://"))
+        location[7..]
+    else
+        location;
+
+    const html = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(16 * 1024 * 1024));
+    defer alloc.free(html);
+
+    const synthetic_url = if (std.mem.startsWith(u8, location, "file://"))
+        try alloc.dupe(u8, location)
+    else
+        try std.fmt.allocPrint(alloc, "file://{s}", .{path});
+    defer alloc.free(synthetic_url);
+
+    return p.processHtml(synthetic_url, 200, html);
+}
+
+// We accept `Init.Minimal` instead of the richer `Init` so that Zig's
+// startup code in `std/start.zig` skips its own `DebugAllocator` setup.
+// That allocator captures a stack trace on every allocation, which in Zig
+// 0.16 panics with `integer overflow` inside
+// `std/debug/SelfInfo/Elf.zig:{460,472}` — the VDSO's `phdr.vaddr =
+// 0xffffffffff700000` is added to `info.addr` without wrapping arithmetic.
+// The buggy code path runs before `main`, so instrumenting here is too
+// late; the only in-repo fix is to never take that path. Upstream needs
+// `info.addr +% phdr.vaddr` on those two lines (line 497 already does
+// this for the .LOAD case).
+pub fn main(minimal: std.process.Init.Minimal) !void {
+    comptime {
+        if (!@import("builtin").link_libc)
+            @compileError("awr must be built with -Dlink_libc or `exe.linkLibC()` — " ++
+                "std.heap.c_allocator requires libc");
+    }
+    // `c_allocator` because build.zig links libc; this matches what
+    // `std/start.zig` does in ReleaseSafe/Fast and keeps the CLI well away
+    // from the `DebugAllocator` path above.
     const alloc = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(alloc, .{});
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena_state.deinit();
+
+    var threaded: std.Io.Threaded = .init(alloc, .{
+        .argv0 = .init(minimal.args),
+        .environ = minimal.environ,
+    });
     defer threaded.deinit();
     const io = threaded.io();
 
-    var stdout_buf: [4096]u8 = undefined;
-    var file_writer = std.Io.File.stdout().writer(io, &stdout_buf);
-    const out = &file_writer.interface;
-    const stdout_file = std.Io.File.stdout();
-    const is_tty = stdout_file.isTty(io) catch false;
+    const args = try minimal.args.toSlice(arena_state.allocator());
 
-    var args_iter = std.process.Args.Iterator.init(init.args);
-    var args_list: std.ArrayList([]const u8) = .empty;
-    defer args_list.deinit(alloc);
-    while (args_iter.next()) |arg| {
-        try args_list.append(alloc, arg);
+    if (args.len < 2) {
+        try stdoutWrite(io, USAGE);
+        std.process.exit(1);
     }
-    const args = args_list.items;
 
-    const cmd = parseArgs(args) catch |err| switch (err) {
-        error.ShowHelp => {
-            try printUsage(out);
-            try out.flush();
-            return;
-        },
-        error.ShowVersion => {
-            try out.writeAll("0.0.");
-            try out.writeAll(build_opts.git_hash);
-            try out.writeAll("\n");
-            try out.flush();
-            return;
-        },
-        else => {
-            try printUsage(out);
-            try out.writeAll("\nerror: ");
-            try out.writeAll(@errorName(err));
-            try out.writeAll("\n");
-            try out.flush();
+    if (std.mem.eql(u8, args[1], "--version") or std.mem.eql(u8, args[1], "-v")) {
+        const out = try std.fmt.allocPrint(alloc, "0.0.{s}\n", .{build_opts.git_hash});
+        defer alloc.free(out);
+        try stdoutWrite(io, out);
+        return;
+    }
+
+    // Subcommand: awr mock [--port N] [--root DIR]
+    if (std.mem.eql(u8, args[1], "mock")) {
+        var port: u16 = 7777;
+        var root: []const u8 = "experiments";
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--port") and i + 1 < args.len) {
+                port = std.fmt.parseInt(u16, args[i + 1], 10) catch {
+                    std.process.fatal("mock: --port expects a u16, got '{s}'", .{args[i + 1]});
+                };
+                i += 1;
+            } else if (std.mem.eql(u8, args[i], "--root") and i + 1 < args.len) {
+                root = args[i + 1];
+                i += 1;
+            } else {
+                std.process.fatal("mock: unknown arg '{s}'", .{args[i]});
+            }
+        }
+        try mock_mod.run(alloc, io, "127.0.0.1", port, root);
+        return;
+    }
+
+    // Subcommand: awr tools <url>
+    if (std.mem.eql(u8, args[1], "tools")) {
+        if (args.len < 3) {
+            try stdoutWrite(io, "usage: awr tools <url>\n");
             std.process.exit(1);
-        },
+        }
+        var p = try page_mod.Page.init(alloc, io);
+        defer p.deinit();
+        var result = loadPage(&p, alloc, io, args[2]) catch |err| {
+            std.process.fatal("error loading {s}: {t}", .{ args[2], err });
+        };
+        defer result.deinit();
+        const tj = result.tools_json orelse "[]";
+        try stdoutWrite(io, tj);
+        try stdoutWrite(io, "\n");
+        return;
+    }
+
+    // Subcommand: awr call <url> <tool> <json>
+    if (std.mem.eql(u8, args[1], "call")) {
+        if (args.len < 5) {
+            try stdoutWrite(io, "usage: awr call <url> <tool-name> <json-args>\n");
+            std.process.exit(1);
+        }
+        var p = try page_mod.Page.init(alloc, io);
+        defer p.deinit();
+        var result = loadPage(&p, alloc, io, args[2]) catch |err| {
+            std.process.fatal("error loading {s}: {t}", .{ args[2], err });
+        };
+        defer result.deinit();
+        const out = try p.callTool(args[3], args[4]);
+        defer alloc.free(out);
+        try stdoutWrite(io, out);
+        try stdoutWrite(io, "\n");
+        if (isFailedCallEnvelope(out)) std.process.exit(1);
+        return;
+    }
+
+    // Default: treat arg as a URL/path and print the full JSON envelope.
+    const url = args[1];
+    var p = try page_mod.Page.init(alloc, io);
+    defer p.deinit();
+
+    var result = loadPage(&p, alloc, io, url) catch |err| {
+        std.process.fatal("error fetching {s}: {t}", .{ url, err });
     };
+    defer result.deinit();
 
-    switch (cmd) {
-        .browse => |url| {
-            browser.run(alloc, io, url) catch |err| {
-                std.debug.print("error browsing {s}: {any}\n", .{ url, err });
-                std.process.exit(1);
-            };
-        },
-        .fetch => |opts| {
-            const url = opts.url.?;
-            var p = try page_mod.Page.init(alloc, io);
-            defer p.deinit();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
 
-            if (opts.mcp) {
-                var result = p.navigate(url) catch |err| {
-                    std.debug.print("error discovering WebMCP tools from {s}: {any}\n", .{ url, err });
-                    std.process.exit(1);
-                };
-                defer result.deinit();
+    try buf.append(alloc, '{');
+    try buf.appendSlice(alloc, "\"url\":");
+    try writeJsonStr(&buf, alloc, result.url);
+    const status_str = try std.fmt.allocPrint(alloc, ",\"status\":{d}", .{result.status});
+    defer alloc.free(status_str);
+    try buf.appendSlice(alloc, status_str);
+    try buf.appendSlice(alloc, ",\"title\":");
+    if (result.title) |t| try writeJsonStr(&buf, alloc, t) else try buf.appendSlice(alloc, "null");
+    try buf.appendSlice(alloc, ",\"body_text\":");
+    try writeJsonStr(&buf, alloc, result.body_text);
+    try buf.appendSlice(alloc, ",\"window_data\":");
+    if (result.window_data) |wd| try buf.appendSlice(alloc, wd) else try buf.appendSlice(alloc, "null");
+    try buf.appendSlice(alloc, ",\"tools\":");
+    if (result.tools_json) |tj| try buf.appendSlice(alloc, tj) else try buf.appendSlice(alloc, "[]");
+    try buf.appendSlice(alloc, "}\n");
 
-                const tools = p.loadedMcpToolsJson() catch |err| {
-                    std.debug.print("error discovering WebMCP tools from {s}: {any}\n", .{ url, err });
-                    std.process.exit(1);
-                };
-                defer alloc.free(tools);
-
-                var buf: std.ArrayList(u8) = .empty;
-                defer buf.deinit(alloc);
-                try buf.appendSlice(alloc, "{\"url\":");
-                try writeJsonStr(&buf, alloc, result.url);
-                try buf.appendSlice(alloc, ",\"tools\":");
-                try buf.appendSlice(alloc, tools);
-                try buf.appendSlice(alloc, "}\n");
-
-                try out.writeAll(buf.items);
-                try out.flush();
-                return;
-            }
-
-            var result = p.navigate(url) catch |err| {
-                std.debug.print("error fetching {s}: {any}\n", .{ url, err });
-                std.process.exit(1);
-            };
-            defer result.deinit();
-
-            if (opts.json) {
-                var buf: std.ArrayList(u8) = .empty;
-                defer buf.deinit(alloc);
-
-                try buf.append(alloc, '{');
-                try buf.appendSlice(alloc, "\"url\":");
-                try writeJsonStr(&buf, alloc, result.url);
-                const status_str = try std.fmt.allocPrint(alloc, ",\"status\":{d}", .{result.status});
-                defer alloc.free(status_str);
-                try buf.appendSlice(alloc, status_str);
-                try buf.appendSlice(alloc, ",\"title\":");
-                if (result.title) |t| try writeJsonStr(&buf, alloc, t) else try buf.appendSlice(alloc, "null");
-                try buf.appendSlice(alloc, ",\"body_text\":");
-                try writeJsonStr(&buf, alloc, result.body_text);
-                try buf.appendSlice(alloc, ",\"window_data\":");
-                if (result.window_data) |wd| try buf.appendSlice(alloc, wd) else try buf.appendSlice(alloc, "null");
-                try buf.appendSlice(alloc, "}\n");
-
-                try out.writeAll(buf.items);
-                try out.flush();
-                return;
-            }
-
-            try page_mod.renderHtml(alloc, out, result.html, .{
-                .max_width = opts.width,
-                .ansi_colors = !opts.no_color and is_tty,
-            });
-            try out.flush();
-        },
-        .post => |opts| {
-            var http_client = page_mod.Client.init(alloc, io, .{ .use_chrome_headers = false });
-            defer http_client.deinit();
-
-            var resp = http_client.post(opts.url, opts.data) catch |err| {
-                std.debug.print("error posting {s}: {any}\n", .{ opts.url, err });
-                std.process.exit(1);
-            };
-            defer resp.deinit();
-
-            try out.writeAll(resp.body);
-            if (resp.body.len == 0 or resp.body[resp.body.len - 1] != '\n') {
-                try out.writeAll("\n");
-            }
-            try out.flush();
-        },
-        .eval_expr => |opts| {
-            var p = try page_mod.Page.init(alloc, io);
-            defer p.deinit();
-
-            const value = p.evaluate(opts.url, opts.expr) catch {
-                std.debug.print("error: eval failed\n", .{});
-                std.process.exit(1);
-            };
-            defer alloc.free(value);
-
-            try out.writeAll(value);
-            try out.writeAll("\n");
-            try out.flush();
-        },
-        .mcp_call => |opts| {
-            var p = try page_mod.Page.init(alloc, io);
-            defer p.deinit();
-
-            const value = p.callWebMcpTool(opts.url, opts.tool_name, opts.input_json) catch |err| {
-                std.debug.print("error calling WebMCP tool {s} at {s}: {any}\n", .{ opts.tool_name, opts.url, err });
-                std.process.exit(1);
-            };
-            defer alloc.free(value);
-
-            try out.writeAll(value);
-            try out.writeAll("\n");
-            try out.flush();
-        },
-        .mcp_stdio => |url| {
-            mcp_stdio.serve(alloc, io, url) catch |err| {
-                std.debug.print("error serving MCP stdio for {s}: {any}\n", .{ url, err });
-                std.process.exit(1);
-            };
-        },
-    }
+    try stdoutWrite(io, buf.items);
 }
 
-test "parseArgs defaults to fetch command" {
-    const cmd = try parseArgs(&.{ "awr", "https://example.com" });
-    switch (cmd) {
-        .fetch => |opts| try std.testing.expectEqualStrings("https://example.com", opts.url.?),
-        else => return error.UnexpectedArgument,
-    }
-}
-
-test "parseArgs parses browse command" {
-    const cmd = try parseArgs(&.{ "awr", "browse", "https://example.com" });
-    switch (cmd) {
-        .browse => |url| try std.testing.expectEqualStrings("https://example.com", url),
-        else => return error.UnexpectedArgument,
-    }
-}
-
-test "parseArgs parses post command" {
-    const cmd = try parseArgs(&.{ "awr", "post", "https://example.com", "--data", "x=1" });
-    switch (cmd) {
-        .post => |opts| {
-            try std.testing.expectEqualStrings("https://example.com", opts.url);
-            try std.testing.expectEqualStrings("x=1", opts.data);
-        },
-        else => return error.UnexpectedArgument,
-    }
-}
-
-test "parseArgs parses eval command" {
-    const cmd = try parseArgs(&.{ "awr", "eval", "https://example.com", "document.title" });
-    switch (cmd) {
-        .eval_expr => |opts| {
-            try std.testing.expectEqualStrings("https://example.com", opts.url);
-            try std.testing.expectEqualStrings("document.title", opts.expr);
-        },
-        else => return error.UnexpectedArgument,
-    }
-}
-
-test "parseArgs parses fetch mcp flag" {
-    const cmd = try parseArgs(&.{ "awr", "--mcp", "https://example.com" });
-    switch (cmd) {
-        .fetch => |opts| {
-            try std.testing.expect(opts.mcp);
-            try std.testing.expectEqualStrings("https://example.com", opts.url.?);
-        },
-        else => return error.UnexpectedArgument,
-    }
-}
-
-test "parseArgs parses mcp-call command" {
-    const cmd = try parseArgs(&.{ "awr", "mcp-call", "https://example.com", "tool-a", "--input", "{\"x\":1}" });
-    switch (cmd) {
-        .mcp_call => |opts| {
-            try std.testing.expectEqualStrings("https://example.com", opts.url);
-            try std.testing.expectEqualStrings("tool-a", opts.tool_name);
-            try std.testing.expectEqualStrings("{\"x\":1}", opts.input_json.?);
-        },
-        else => return error.UnexpectedArgument,
-    }
-}
-
-test "parseArgs parses mcp-stdio command" {
-    const cmd = try parseArgs(&.{ "awr", "mcp-stdio", "https://example.com" });
-    switch (cmd) {
-        .mcp_stdio => |url| try std.testing.expectEqualStrings("https://example.com", url),
-        else => return error.UnexpectedArgument,
-    }
+test "isFailedCallEnvelope detects {ok:false}" {
+    try std.testing.expect(isFailedCallEnvelope("{\"ok\":false,\"error\":\"ToolNotFound\"}"));
+    try std.testing.expect(isFailedCallEnvelope("{\"ok\": false, \"error\": \"ToolNotFound\"}"));
+    try std.testing.expect(!isFailedCallEnvelope("{\"ok\":true,\"value\":{}}"));
 }

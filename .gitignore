@@ -1,2 +1,25 @@
 .zig-cache/
+zig-cache/
 zig-out/
+
+# Prevent accidental commits of locally-downloaded Zig toolchains when
+# contributors follow ziglang.org/getting-started from the repo root.
+/zig-x86_64-linux-*.tar.xz
+/zig-x86_64-linux-*/
+
+# Locally-cloned lexbor source (build from source per
+# third_party/lexbor/BUILD_NOTES.md; the compiled static lib goes to
+# /usr/local/lib and is linked by build.zig on Linux).
+third_party/lexbor/*
+!third_party/lexbor/BUILD_NOTES.md
+
+# Local checkouts used to bypass Zig's HTTP fetch path in constrained
+# environments. Bootstrapped by scripts/bootstrap_deps.sh.
+third_party/libxev/
+third_party/zig-quickjs-ng/
+third_party/quickjs-ng-quickjs/
+
+# Local Zig package cache. The patched copy of quickjs_ng/build.zig lives
+# here (see DEV_NOTES.md #1); re-apply after any `zig fetch` refresh until
+# the upstream PR lands or we vendor quickjs_ng under third_party/.
+zig-pkg/
