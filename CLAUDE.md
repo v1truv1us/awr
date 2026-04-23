@@ -55,21 +55,21 @@ zig build test-test262 # JS conformance subset
 Primary experience:
 
 1. `awr <url>` renders readable terminal output
-2. `awr --json <url>` returns machine-readable output
-3. `awr browse <url>` opens the interactive terminal browser
-4. `awr eval <url> <expr>` evaluates page JS against the runtime
+2. `awr tools <url>` returns discovered WebMCP tools
+3. `awr call <url> <tool> <json>` invokes a discovered WebMCP tool
+4. `awr mock` serves local test fixtures
 
 Secondary experience:
 
-1. `awr mcp-call <url> <tool-name>` calls a discovered WebMCP tool
-2. `awr mcp-stdio <url>` exposes tools over MCP stdio
+1. deferred native MCP stdio work
+2. deferred browser/TUI expansion beyond the core browser-runtime MVP closure
 
 When docs or code comments need a one-line description, use **CLI-first web browser runtime**.
 
 ## Architecture
 
 ```
-src/main.zig           CLI entry: fetch, browse, post, eval, mcp-call, mcp-stdio
+src/main.zig           CLI entry: default fetch path plus tools/call/mock
 src/client.zig         HTTP client — wires TLS + H1/H2 + cookies + redirects + pooling
 src/page.zig           Page orchestrator — fetch → parse → DOM → JS bridge → scripts
 src/render.zig         Terminal renderer — ANSI formatting, word wrap, link footnotes, tables
@@ -97,7 +97,7 @@ src/net/
 src/js/engine.zig      QuickJS-NG wrapper — console, fetch(), setTimeout, Promises
 src/html/parser.zig    Lexbor HTML parser wrapper
 src/dom/node.zig       DOM tree types, querySelector, getElementById
-src/dom/bridge.zig     JS ↔ DOM bridge, createElement, event stubs
+src/dom/bridge.zig     JS ↔ DOM bridge and active conformance surface
 ```
 
 ## Code Conventions
@@ -117,14 +117,13 @@ Browser runtime status:
 
 - Networking, TLS, cookies, redirects, and H1/H2 routing are implemented
 - Page fetch → parse → DOM → JS → render pipeline is implemented
-- CLI commands for default fetch, browse, eval, post, `mcp-call`, and `mcp-stdio` exist
-- Curated WPT-style DOM coverage and curated Test262-style JS coverage exist in-tree
+- CLI commands for the default fetch path plus `tools`, `call`, and `mock` exist
+- Curated WPT and Test262 coverage exists in-tree, but MVP closure remains gated by wiring, build health, corpus growth, and removal of shipped stubs
 
 WPT-first status:
 
-- `zig build test-wpt` validates a curated DOM behavior slice
-- `zig build test-test262` validates a curated JS behavior slice
-- These suites are intentionally small today and should expand before large new runtime features
+- Curated WPT and Test262 suites are the primary correctness signal for DOM and JS work
+- The active execution authority is the canonical spec set, not this summary
 
 ## Critical Constraints
 
@@ -138,6 +137,8 @@ WPT-first status:
 
 - `README.md` — quickest product and CLI overview
 - `AGENTS.md` — module guidance for code changes
-- `MVP_PLAN.md` — current MVP scope and near-term work
-- `MVP_ROADMAP.md` — ship order after the current MVP baseline
-- `spec/PRD.md` — product requirements aligned to the current CLI-first browser direction
+- `spec/MVP.md` — canonical umbrella spec and closure rules
+- `spec/subspecs/mvp-remainder.md` — active MVP completion track
+- `spec/subspecs/wpt-conformance.md` — conformance runner/corpus authority
+- `docs/adr/0001-spec-governance.md` — spec governance record
+- `spec/PRD.md` — product context only; not execution authority

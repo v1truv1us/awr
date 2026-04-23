@@ -12,6 +12,7 @@
 ///   defer result.deinit();
 ///   std.debug.print("title: {?s}\n", .{result.title});
 const std = @import("std");
+const builtin = @import("builtin");
 const client = @import("client.zig");
 const engine = @import("js/engine.zig");
 const dom = @import("dom/node.zig"); // parseDocument handles HTML+DOM internally
@@ -425,10 +426,27 @@ pub const Page = struct {
         var proto_buf: [16]u8 = undefined;
         const proto = std.fmt.bufPrint(&proto_buf, "{s}:", .{u.scheme}) catch return;
 
+        var host_buf: [512]u8 = undefined;
+        const host: []const u8 = if (u.port != default_port)
+            std.fmt.bufPrint(&host_buf, "{s}:{d}", .{ u.host, u.port }) catch return
+        else
+            u.host;
+
+        var port_buf: [16]u8 = undefined;
+        const port: []const u8 = if (u.port != default_port)
+            std.fmt.bufPrint(&port_buf, "{d}", .{u.port}) catch return
+        else
+            "";
+
         // Compute search: "?query" or ""
         var search_buf: [1024]u8 = undefined;
         const search: []const u8 = if (u.query) |q|
             std.fmt.bufPrint(&search_buf, "?{s}", .{q}) catch ""
+        else
+            "";
+
+        const hash: []const u8 = if (std.mem.indexOfScalar(u8, raw_url, '#')) |idx|
+            raw_url[idx..]
         else
             "";
 
@@ -437,6 +455,12 @@ pub const Page = struct {
         w.writeByte(';') catch return;
         w.writeAll("window.location.hostname=") catch return;
         writeJsStr(&w, u.host) catch return;
+        w.writeByte(';') catch return;
+        w.writeAll("window.location.host=") catch return;
+        writeJsStr(&w, host) catch return;
+        w.writeByte(';') catch return;
+        w.writeAll("window.location.port=") catch return;
+        writeJsStr(&w, port) catch return;
         w.writeByte(';') catch return;
         w.writeAll("window.location.pathname=") catch return;
         writeJsStr(&w, u.path) catch return;
@@ -449,6 +473,9 @@ pub const Page = struct {
         w.writeByte(';') catch return;
         w.writeAll("window.location.search=") catch return;
         writeJsStr(&w, search) catch return;
+        w.writeByte(';') catch return;
+        w.writeAll("window.location.hash=") catch return;
+        writeJsStr(&w, hash) catch return;
         w.writeByte(';') catch return;
 
         // Call JsEngine.eval via an indirected function reference so the token
@@ -507,13 +534,13 @@ pub const Page = struct {
         if (trimmed_src.len == 0) return;
 
         const resolved = resolveUrl(self.allocator, page_url, trimmed_src) catch |err| {
-            std.debug.print("awr: external script resolve failed ({s}): {t}\n", .{ trimmed_src, err });
+            logExternalScriptError("awr: external script resolve failed ({s}): {t}\n", .{ trimmed_src, err });
             return;
         };
         defer self.allocator.free(resolved);
 
         const body = self.fetchExternalResource(resolved) catch |err| {
-            std.debug.print("awr: external script fetch failed ({s}): {t}\n", .{ resolved, err });
+            logExternalScriptError("awr: external script fetch failed ({s}): {t}\n", .{ resolved, err });
             return;
         };
         defer self.allocator.free(body);
@@ -553,6 +580,11 @@ pub const Page = struct {
             );
         }
         return error.UnsupportedScheme;
+    }
+
+    fn logExternalScriptError(comptime fmt: []const u8, args: anytype) void {
+        if (builtin.is_test) return;
+        std.debug.print(fmt, args);
     }
 };
 

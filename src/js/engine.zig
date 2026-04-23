@@ -563,7 +563,11 @@ test "JsEngine — console.error is defined" {
 }
 
 test "JsEngine — console.log does not throw" {
-    var engine = try JsEngine.init(std.testing.allocator, null);
+    const Sink = struct {
+        fn write(_: *anyopaque, _: ConsoleSink.Level, _: []const u8) void {}
+    };
+    const sink = ConsoleSink{ .ptr = @ptrFromInt(1), .writeFn = Sink.write };
+    var engine = try JsEngine.init(std.testing.allocator, sink);
     defer engine.deinit();
 
     try engine.eval("console.log('hello from test');", "<test>");

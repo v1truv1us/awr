@@ -51,6 +51,21 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/element_matches_closest.js"),
     },
     .{
+        .filename = "element_parentNode.js",
+        .html = "<html><body><section id=\"shell\"><p id=\"leaf\">hello</p></section></body></html>",
+        .script = @embedFile("wpt/element_parentNode.js"),
+    },
+    .{
+        .filename = "element_siblings.js",
+        .html = "<html><body><ul><li id=\"first\">a</li><li id=\"second\">b</li><li id=\"third\">c</li></ul></body></html>",
+        .script = @embedFile("wpt/element_siblings.js"),
+    },
+    .{
+        .filename = "element_classList.js",
+        .html = "<html><body><div id=\"item\" class=\"foo bar\"></div></body></html>",
+        .script = @embedFile("wpt/element_classList.js"),
+    },
+    .{
         .filename = "console_namespace.js",
         .html = "<html><body></body></html>",
         .script = @embedFile("wpt/console_namespace.js"),

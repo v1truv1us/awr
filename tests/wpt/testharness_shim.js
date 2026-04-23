@@ -52,6 +52,12 @@
     }
   };
 
+  global.assert_false = function assert_false(actual, message) {
+    if (actual !== false) {
+      fail(message || ('expected false but got ' + formatValue(actual)));
+    }
+  };
+
   global.assert_equals = function assert_equals(actual, expected, message) {
     if (actual !== expected) {
       fail(message || ('expected ' + formatValue(expected) + ' but got ' + formatValue(actual)));

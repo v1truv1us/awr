@@ -4,14 +4,14 @@ A headless terminal browser for AI agents. Loads pages and runs their
 JavaScript with a CLI-first interface.
 
 > **Canonical spec:** `spec/MVP.md`
-> **Active work now:** `spec/subspecs/mvp-remainder.md`
+> **Active work now:** `spec/subspecs/mvp-remainder.md`, `spec/subspecs/wpt-conformance.md`
 > **Deferred tracks:** `spec/subspecs/mcp-stdio.md`,
 > `spec/subspecs/browser-tui.md`, and `spec/Fingerprint-Plan.md`
 > **Governance ADR:** `docs/adr/0001-spec-governance.md`
 
-**Status:** the WebMCP CLI slice and the primary browser-runtime MVP path are
-shipped on the CLI surface. `spec/subspecs/mvp-remainder.md` is now the closure
-record for that work.
+**Status:** AWR ships a usable CLI browser-runtime baseline, but MVP closure is
+still active and is gated by the canonical WPT/Test262 conformance track and a
+fully green default test baseline.
 
 If canonical spec boundaries or document authority change, update both
 `spec/MVP.md` and `docs/adr/0001-spec-governance.md` as part of the same change.
@@ -102,12 +102,10 @@ JS sees real page data through a thin polyfill over five Zig callbacks:
   reflected back to the Zig tree, which is fine for read-mostly agent
   workflows).
 - `window`, `location`, `navigator` (with `userAgent`), `history`,
-  `screen`, `localStorage` / `sessionStorage`, `XMLHttpRequest` stub.
+  `screen`, `localStorage` / `sessionStorage`, and other browser-facing APIs on
+  the active conformance path.
 - `window.location` is populated from the requested URL
   (`href`, `hostname`, `pathname`, `origin`, `search`, `protocol`).
-- Observers (`MutationObserver`, `IntersectionObserver`,
-  `ResizeObserver`, `PerformanceObserver`) are no-op stubs so pages
-  that construct them don't throw.
 - 17 bridge tests in `src/dom/bridge.zig`.
 
 ### WebMCP
@@ -132,7 +130,7 @@ JS sees real page data through a thin polyfill over five Zig callbacks:
 - `zig build -Doptimize=ReleaseSmall|ReleaseFast` supported.
 - Test steps: `zig build test`, `test-net`, `test-js`, `test-html`,
   `test-dom`, `test-client`, `test-h2`, `test-page`, `test-tls`,
-  `test-e2e`.
+  `test-e2e`, `test-wpt`, `test-test262`.
 - macOS Homebrew paths auto-detected; Linux reads from `/usr/local`.
 
 ---
@@ -143,11 +141,8 @@ JS sees real page data through a thin polyfill over five Zig callbacks:
   as the supported integration surface.
 - Browser/TUI work and later fingerprinting remain deferred; `awr <url>` is the
   main shipped product path.
-- Event handling is still intentionally thin: `addEventListener` and observer
-  APIs exist so pages do not throw, but AWR is not a full event-driven browser.
-- The standalone TLS/TCP tracks still have non-MVP engineering debt; the
-  shipped CLI/browser path is verified with `test-js`, `test-dom`, `test-page`,
-  `test-client`, and `./scripts/mvp_smoke.sh`.
+- MVP closure is still active: the repo is moving toward WPT/Test262-gated
+  closure and removal of shipped stubs on the browser/runtime surface.
 
 ---
 
@@ -155,7 +150,8 @@ JS sees real page data through a thin polyfill over five Zig callbacks:
 
 See the canonical spec map in `spec/MVP.md`.
 
-- **Closure record:** `spec/subspecs/mvp-remainder.md`
+- **Active MVP completion track:** `spec/subspecs/mvp-remainder.md`
+- **Conformance authority:** `spec/subspecs/wpt-conformance.md`
 - **Deferred MCP stdio:** `spec/subspecs/mcp-stdio.md`
 - **Deferred browser/TUI:** `spec/subspecs/browser-tui.md`
 - **Deferred fingerprint roadmap:** `spec/Fingerprint-Plan.md`
@@ -185,6 +181,7 @@ spec/
   Fingerprint-Plan.md
   subspecs/
     mvp-remainder.md
+    wpt-conformance.md
     mcp-stdio.md
     browser-tui.md
 third_party/lexbor/       Build notes for lexbor dependency

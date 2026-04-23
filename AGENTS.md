@@ -12,7 +12,7 @@ Global framing:
 Execution specs:
 
 - Canonical umbrella spec: `spec/MVP.md`
-- Active work now: `spec/subspecs/mvp-remainder.md`
+- Active work now: `spec/subspecs/mvp-remainder.md`, `spec/subspecs/wpt-conformance.md`
 - Deferred tracks: `spec/subspecs/mcp-stdio.md`, `spec/subspecs/browser-tui.md`, `spec/Fingerprint-Plan.md`
 - Historical/background docs: `MVP_PLAN.md`, `MVP_BACKLOG.md`, `spec/PRD.md`
 - Governance ADR: `docs/adr/0001-spec-governance.md`
@@ -90,12 +90,12 @@ Lexbor HTML parser wrapper. Parses HTML strings into a tree that gets converted 
 **Test command**: `zig build test-dom`
 
 ### What lives here
-DOM tree types (`node.zig`) and the JS↔DOM bridge (`bridge.zig`). Provides `querySelector`, `getElementById`, `createElement`, `textContent`, and event stubs.
+DOM tree types (`node.zig`) and the JS↔DOM bridge (`bridge.zig`). Provides query, mutation, and event-facing DOM behavior exposed to page code.
 
 ### Constraints
 - **`node.zig` defines the tree structure.** `Node` is a tagged union of element, text, comment, etc. Tree traversal, querySelector, and getElementById live here.
 - **`bridge.zig` exposes DOM to JS.** It registers `document.getElementById`, `document.querySelector`, `document.createElement`, etc. as QuickJS C functions.
-- **Event handling is stubbed.** `addEventListener` exists but does not fire events. This is sufficient for WebMCP tool registration (which uses inline script execution, not event-driven flow).
+- **No shipped stubs.** If a DOM-facing API is exposed on the MVP browser/runtime path, it must be real or removed until it can be implemented correctly.
 - **WPT-first applies here most strongly.** Prefer changes backed by curated DOM conformance cases over one-off behavior tweaks.
 
 ### Key relationships

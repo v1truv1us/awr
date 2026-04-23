@@ -111,10 +111,15 @@ fn installNativeCallbacks(eng: *engine.JsEngine) !void {
         .{ "querySelectorAll", querySelectorAllFn },
         .{ "querySelectorScoped", querySelectorScopedFn },
         .{ "querySelectorAllScoped", querySelectorAllScopedFn },
+        .{ "getParent",        getParentFn },
+        .{ "getNextSibling",   getNextSiblingFn },
+        .{ "getPreviousSibling", getPreviousSiblingFn },
         .{ "matches",         matchesFn },
         .{ "closest",         closestFn },
+        .{ "contains",        containsFn },
         .{ "getElementById",   getElementByIdFn },
         .{ "getTitle",         getTitleFn },
+        .{ "setTitle",         setTitleFn },
         .{ "getBody",          getBodyFn },
         .{ "createElement",    createElementFn },
         .{ "setAttribute",     setAttributeFn },
@@ -307,6 +312,69 @@ fn querySelectorAllScopedFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @imp
     return qjs.Value.initStringLen(c, w.buffered());
 }
 
+fn getParentFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
+    if (args.len == 0) return qjs.Value.null;
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.null;
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.null;
+    const parent = elem.parent orelse return qjs.Value.null;
+    var buf: [8192]u8 = undefined;
+    const json = elementToJson(bridge, parent, &buf) orelse return qjs.Value.null;
+    return qjs.Value.initStringLen(c, json);
+}
+
+fn getNextSiblingFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
+    if (args.len == 0) return qjs.Value.null;
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.null;
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.null;
+    const parent = elem.parent orelse return qjs.Value.null;
+    for (parent.children.items, 0..) |node, i| {
+        if (node == .element and node.element == elem) {
+            var j = i + 1;
+            while (j < parent.children.items.len) : (j += 1) {
+                const sibling = parent.children.items[j];
+                if (sibling == .element) {
+                    var buf: [8192]u8 = undefined;
+                    const json = elementToJson(bridge, sibling.element, &buf) orelse return qjs.Value.null;
+                    return qjs.Value.initStringLen(c, json);
+                }
+            }
+            break;
+        }
+    }
+    return qjs.Value.null;
+}
+
+fn getPreviousSiblingFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
+    if (args.len == 0) return qjs.Value.null;
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.null;
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.null;
+    const parent = elem.parent orelse return qjs.Value.null;
+    var previous: ?*dom.Element = null;
+    for (parent.children.items) |node| {
+        if (node == .element) {
+            if (node.element == elem) {
+                if (previous) |sibling| {
+                    var buf: [8192]u8 = undefined;
+                    const json = elementToJson(bridge, sibling, &buf) orelse return qjs.Value.null;
+                    return qjs.Value.initStringLen(c, json);
+                }
+                return qjs.Value.null;
+            }
+            previous = node.element;
+        }
+    }
+    return qjs.Value.null;
+}
+
 fn matchesFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
     const bridge = getBridge(ctx) orelse return qjs.Value.initBool(false);
     const c = ctx orelse return qjs.Value.initBool(false);
@@ -337,6 +405,23 @@ fn closestFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").
     return qjs.Value.initStringLen(c, json);
 }
 
+fn containsFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initBool(false);
+    const c = ctx orelse return qjs.Value.initBool(false);
+    if (args.len < 2) return qjs.Value.initBool(false);
+
+    const parent_h = parseHandleArg(c, args[0]) orelse return qjs.Value.initBool(false);
+    const child_h = parseHandleArg(c, args[1]) orelse return qjs.Value.initBool(false);
+    const parent = getElemByHandle(bridge, parent_h) orelse return qjs.Value.initBool(false);
+    const child = getElemByHandle(bridge, child_h) orelse return qjs.Value.initBool(false);
+
+    var cur: ?*dom.Element = child;
+    while (cur) |elem| : (cur = elem.parent) {
+        if (elem == parent) return qjs.Value.initBool(true);
+    }
+    return qjs.Value.initBool(false);
+}
+
 fn getTitleFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
     const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(ctx orelse return qjs.Value.undefined, "");
     const c      = ctx orelse return qjs.Value.undefined;
@@ -346,6 +431,54 @@ fn getTitleFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.
     const text   = title.textContent(bridge.allocator) catch return qjs.Value.initStringLen(c, "");
     defer bridge.allocator.free(text);
     return qjs.Value.initStringLen(c, text);
+}
+
+fn setTitleFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initBool(false);
+    const c = ctx orelse return qjs.Value.initBool(false);
+    if (args.len == 0) return qjs.Value.initBool(false);
+
+    const title_v: qjs.Value = @bitCast(args[0]);
+    const title_c = title_v.toCString(c) orelse return qjs.Value.initBool(false);
+    defer c.freeCString(title_c);
+
+    const alloc = bridge.doc.arena.allocator();
+    const html = bridge.doc.htmlElement() orelse return qjs.Value.initBool(false);
+
+    var head = html.firstChildByTag("head");
+    if (head == null) {
+        const new_head = alloc.create(dom.Element) catch return qjs.Value.initBool(false);
+        new_head.* = .{
+            .tag = alloc.dupe(u8, "head") catch return qjs.Value.initBool(false),
+            .attributes = &.{},
+            .children = .empty,
+            .parent = html,
+        };
+        html.children.insert(alloc, 0, .{ .element = new_head }) catch return qjs.Value.initBool(false);
+        head = new_head;
+    }
+
+    var title = head.?.firstChildByTag("title");
+    if (title == null) {
+        const new_title = alloc.create(dom.Element) catch return qjs.Value.initBool(false);
+        new_title.* = .{
+            .tag = alloc.dupe(u8, "title") catch return qjs.Value.initBool(false),
+            .attributes = &.{},
+            .children = .empty,
+            .parent = head.?,
+        };
+        head.?.children.append(alloc, .{ .element = new_title }) catch return qjs.Value.initBool(false);
+        title = new_title;
+    }
+
+    title.?.children.clearRetainingCapacity();
+    const text_node = alloc.create(dom.Text) catch return qjs.Value.initBool(false);
+    text_node.* = .{
+        .data = alloc.dupe(u8, std.mem.span(title_c)) catch return qjs.Value.initBool(false),
+        .parent = title.?,
+    };
+    title.?.children.append(alloc, .{ .text = text_node }) catch return qjs.Value.initBool(false);
+    return qjs.Value.initBool(true);
 }
 
 fn getBodyFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
@@ -542,38 +675,68 @@ const BRIDGE_POLYFILL =
     \\      set innerHTML(v) { this._innerHTML = String(v); },
     \\      get outerHTML() { return '<' + this.tagName.toLowerCase() + '>' + this.innerHTML + '</' + this.tagName.toLowerCase() + '>'; },
     \\      get id() { return this._attrs.id || ''; },
-    \\      set id(v) { this._attrs.id = String(v); },
+    \\      set id(v) { this._attrs.id = String(v); __awr_setAttribute__(this._h, 'id', String(v)); },
     \\      get className() { return this._attrs.class || ''; },
-    \\      set className(v) { this._attrs.class = String(v); },
+    \\      set className(v) { this._attrs.class = String(v); __awr_setAttribute__(this._h, 'class', String(v)); },
     \\      get style() { return this._style || (this._style = {}); },
     \\      get dataset() { return this._dataset || (this._dataset = {}); },
-    \\      classList: {
-    \\        _cls: attrs.class ? attrs.class.split(' ') : [],
-    \\        contains(c) { return this._cls.includes(c); },
-    \\        add(c) { if (!this.contains(c)) this._cls.push(c); },
-    \\        remove(c) { this._cls = this._cls.filter(x => x !== c); },
-    \\        toggle(c) { this.contains(c) ? this.remove(c) : this.add(c); },
+    \\      get classList() {
+    \\        const owner = this;
+    \\        const tokens = function() {
+    \\          const raw = (owner._attrs.class || '').trim();
+    \\          return raw ? raw.split(/\s+/).filter(Boolean) : [];
+    \\        };
+    \\        const commit = function(next) {
+    \\          owner.className = next.join(' ');
+    \\        };
+    \\        return {
+    \\          contains(c) { return tokens().includes(String(c)); },
+    \\          add(c) {
+    \\            const next = tokens();
+    \\            const value = String(c);
+    \\            if (!next.includes(value)) next.push(value);
+    \\            commit(next);
+    \\          },
+    \\          remove(c) {
+    \\            const value = String(c);
+    \\            commit(tokens().filter(x => x !== value));
+    \\          },
+    \\          toggle(c) {
+    \\            const value = String(c);
+    \\            const next = tokens();
+    \\            if (next.includes(value)) {
+    \\              commit(next.filter(x => x !== value));
+    \\              return false;
+    \\            }
+    \\            next.push(value);
+    \\            commit(next);
+    \\            return true;
+    \\          },
+    \\        };
     \\      },
     \\      addEventListener() {},
     \\      removeEventListener() {},
     \\      dispatchEvent() { return true; },
     \\      appendChild(child) {
     \\        this._children.push(child);
+    \\        if (child) child._parent = this;
     \\        if (child && child._h) __awr_appendChild__(this._h, child._h);
     \\        return child;
     \\      },
     \\      removeChild(child) {
     \\        this._children = this._children.filter(c => c !== child);
+    \\        if (child) child._parent = null;
     \\        if (child && child._h) __awr_removeChild__(this._h, child._h);
     \\        return child;
     \\      },
     \\      insertBefore(node, ref) {
     \\        const idx = ref ? this._children.indexOf(ref) : -1;
     \\        if (idx >= 0) this._children.splice(idx, 0, node); else this._children.unshift(node);
+    \\        if (node) node._parent = this;
     \\        __awr_insertBefore__(this._h, node && node._h ? node._h : 0, ref && ref._h ? ref._h : 0);
     \\        return node;
     \\      },
-    \\      contains(other) { return false; },
+    \\      contains(other) { return !!(other && other._h && __awr_contains__(this._h, other._h)); },
     \\      querySelector(sel) {
     \\        const r = __awr_querySelectorScoped__(this._h, String(sel));
     \\        return r ? makeElement(r) : null;
@@ -594,10 +757,20 @@ const BRIDGE_POLYFILL =
     \\      scrollIntoView() {},
     \\      get children() { return this._children; },
     \\      get childNodes() { return this._children; },
-    \\      get parentNode() { return null; },
-    \\      get parentElement() { return null; },
-    \\      get nextSibling() { return null; },
-    \\      get previousSibling() { return null; },
+    \\      get parentNode() {
+    \\        if (this._parent) return this._parent;
+    \\        const r = __awr_getParent__(this._h);
+    \\        return r ? makeElement(r) : null;
+    \\      },
+    \\      get parentElement() { return this.parentNode; },
+    \\      get nextSibling() {
+    \\        const r = __awr_getNextSibling__(this._h);
+    \\        return r ? makeElement(r) : null;
+    \\      },
+    \\      get previousSibling() {
+    \\        const r = __awr_getPreviousSibling__(this._h);
+    \\        return r ? makeElement(r) : null;
+    \\      },
     \\      get firstChild() { return this._children[0] || null; },
     \\      get lastChild() { return this._children[this._children.length - 1] || null; },
     \\      get nodeValue() { return null; },
@@ -617,7 +790,7 @@ const BRIDGE_POLYFILL =
     \\    getElementsByClassName(cls) { return document.querySelectorAll('.' + cls); },
     \\    getElementsByTagName(tag) { return document.querySelectorAll(tag); },
     \\    get title() { return __awr_getTitle__(); },
-    \\    set title(v) {},
+    \\    set title(v) { __awr_setTitle__(String(v)); },
     \\    get body() { const r = __awr_getBody__(); return r ? makeElement(r) : null; },
     \\    get head() { return this.querySelector('head'); },
     \\    get documentElement() { return this.querySelector('html'); },

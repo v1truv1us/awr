@@ -71,6 +71,8 @@ pub fn build(b: *std.Build) void {
     const test_page_step   = b.step("test-page",   "Run src/page tests (unit + integration, requires network)");
     const test_tls_step    = b.step("test-tls",    "Run BoringSSL smoke + tls_conn unit tests");
     const test_e2e_step    = b.step("test-e2e",    "Run end-to-end integration tests (requires network)");
+    const test_wpt_step    = b.step("test-wpt",    "Run curated WPT browser-runtime tests");
+    const test_test262_step = b.step("test-test262", "Run curated Test262 JS runtime tests");
 
     // ── Net layer modules (pure-Zig, no C deps) ───────────────────────────
     const pure_net_modules = [_]struct { name: []const u8, src: []const u8 }{
@@ -288,6 +290,11 @@ pub fn build(b: *std.Build) void {
             .link_libc   = true,
             .link_libcpp = true, // BoringSSL is C++ (std::variant, exceptions, vtables)
         });
+        tls_smoke_mod.addCSourceFile(.{
+            .file  = b.path("src/net/tls_awr_shim.c"),
+            .flags = &.{ "-std=c11", "-Wall", "-Wextra" },
+        });
+        tls_smoke_mod.addIncludePath(b.path("src/net"));
         tls_smoke_mod.addIncludePath(boringssl_include);
         tls_smoke_mod.addObjectFile(boringssl_lib_ssl);
         tls_smoke_mod.addObjectFile(boringssl_lib_crpt);
@@ -339,4 +346,73 @@ pub fn build(b: *std.Build) void {
     });
     const run_e2e = b.addRunArtifact(e2e_test);
     test_e2e_step.dependOn(&run_e2e.step);
+
+    // ── Curated WPT runner ────────────────────────────────────────────────
+    {
+        const wpt_mod = b.createModule(.{
+            .root_source_file = b.path("tests/wpt_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        wpt_mod.addImport("xev", xev_mod);
+        wpt_mod.addImport("quickjs", qjs_mod);
+        wpt_mod.linkLibrary(qjs_dep.artifact("quickjs-ng"));
+        wpt_mod.addIncludePath(lexbor_include);
+        wpt_mod.addLibraryPath(lexbor_lib);
+        wpt_mod.linkSystemLibrary("lexbor", .{});
+
+        const page_import = b.createModule(.{
+            .root_source_file = b.path("src/page.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        page_import.addImport("xev", xev_mod);
+        page_import.addImport("quickjs", qjs_mod);
+        page_import.linkLibrary(qjs_dep.artifact("quickjs-ng"));
+        page_import.addIncludePath(lexbor_include);
+        page_import.addLibraryPath(lexbor_lib);
+        page_import.linkSystemLibrary("lexbor", .{});
+        wpt_mod.addImport("page", page_import);
+
+        const wpt_test = b.addTest(.{
+            .name = "wpt",
+            .root_module = wpt_mod,
+            .use_llvm = true,
+        });
+        const run_wpt = b.addRunArtifact(wpt_test);
+        test_wpt_step.dependOn(&run_wpt.step);
+        test_step.dependOn(&run_wpt.step);
+    }
+
+    // ── Curated Test262 runner ────────────────────────────────────────────
+    {
+        const test262_mod = b.createModule(.{
+            .root_source_file = b.path("tests/test262_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        test262_mod.addImport("quickjs", qjs_mod);
+        test262_mod.addImport("xev", xev_mod);
+
+        const engine_import = b.createModule(.{
+            .root_source_file = b.path("src/js/engine.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        engine_import.addImport("quickjs", qjs_mod);
+        engine_import.addImport("xev", xev_mod);
+        engine_import.linkLibrary(qjs_dep.artifact("quickjs-ng"));
+        test262_mod.addImport("engine", engine_import);
+
+        const test262_test = b.addTest(.{
+            .name = "test262",
+            .root_module = test262_mod,
+            .use_llvm = true,
+        });
+        const run_test262 = b.addRunArtifact(test262_test);
+        test_test262_step.dependOn(&run_test262.step);
+        test_step.dependOn(&run_test262.step);
+    }
 }

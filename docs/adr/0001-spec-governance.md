@@ -12,7 +12,9 @@ be misread.
 The repo now has a clearer split:
 
 - `spec/MVP.md` is the canonical umbrella spec.
-- `spec/subspecs/mvp-remainder.md` is the active execution spec.
+- `spec/subspecs/mvp-remainder.md` is the active MVP completion track.
+- `spec/subspecs/wpt-conformance.md` is the active conformance authority for
+  curated WPT/Test262 work.
 - `spec/subspecs/mcp-stdio.md`, `spec/subspecs/browser-tui.md`, and
   `spec/Fingerprint-Plan.md` are deferred tracks.
 - `MVP_PLAN.md`, `MVP_BACKLOG.md`, and `spec/PRD.md` are historical/background
@@ -26,14 +28,16 @@ append future governance changes.
 We standardize spec/documentation authority as follows:
 
 1. `spec/MVP.md` is the top-level canonical spec and change-control point.
-2. `spec/subspecs/mvp-remainder.md` defines the work that is active now.
-3. Deferred tracks must stay documented in their own files, but they do not
+2. `spec/subspecs/mvp-remainder.md` defines the active MVP completion work.
+3. `spec/subspecs/wpt-conformance.md` defines the conformance runner/corpus
+   authority for that work.
+4. Deferred tracks must stay documented in their own files, but they do not
    control current execution priority unless `spec/MVP.md` is updated.
-4. Historical/background documents may preserve rationale or prior plans, but
+5. Historical/background documents may preserve rationale or prior plans, but
    they are non-canonical.
-5. This ADR is the historical record for spec-boundary and documentation-
+6. This ADR is the historical record for spec-boundary and documentation-
    authority decisions.
-6. Any future change to canonical spec boundaries, document authority, or
+7. Any future change to canonical spec boundaries, document authority, or
    governance rules must update both the affected document and this ADR.
 
 ## Consequences
@@ -58,7 +62,8 @@ Accepted and in force.
 At the time of acceptance:
 
 - Canonical umbrella spec: `spec/MVP.md`
-- Active execution spec: `spec/subspecs/mvp-remainder.md`
+- Active MVP completion track: `spec/subspecs/mvp-remainder.md`
+- Active conformance authority: `spec/subspecs/wpt-conformance.md`
 - Deferred tracks: `spec/subspecs/mcp-stdio.md`,
   `spec/subspecs/browser-tui.md`, `spec/Fingerprint-Plan.md`
 - Non-canonical historical/background docs: `MVP_PLAN.md`, `MVP_BACKLOG.md`,
@@ -76,6 +81,17 @@ documentation governance.
 - Recorded MCP stdio, browser/TUI, and fingerprint planning docs as deferred.
 - Recorded `MVP_PLAN.md`, `MVP_BACKLOG.md`, and `spec/PRD.md` as historical or
   background only.
+
+### 2026-04-23 — MVP closure and conformance authority update
+
+- Reframed `spec/MVP.md` so MVP closure is gated by curated WPT/Test262,
+  a green default test baseline, and the no-stubs rule.
+- Reframed `spec/subspecs/mvp-remainder.md` from closure record to active MVP
+  completion track.
+- Added `spec/subspecs/wpt-conformance.md` as the canonical conformance
+  authority for curated WPT/Test262 work.
+- Recorded that README and agent-facing guidance files must be updated when the
+  canonical execution boundary changes.
 
 ### Template for future amendments
 
