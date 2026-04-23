@@ -84,7 +84,7 @@ fn buildCaseHtml(allocator: std.mem.Allocator, case: WptCase) ![]u8 {
 }
 
 fn runCase(allocator: std.mem.Allocator, case: WptCase) !void {
-    var page = try page_mod.Page.init(allocator);
+    var page = try page_mod.Page.init(allocator, std.testing.io);
     defer page.deinit();
 
     const html = try buildCaseHtml(allocator, case);

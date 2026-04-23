@@ -11,11 +11,11 @@
 ///   var result = try page.navigate("http://example.com/");
 ///   defer result.deinit();
 ///   std.debug.print("title: {?s}\n", .{result.title});
-const std     = @import("std");
-const client  = @import("client.zig");
-const engine  = @import("js/engine.zig");
-const dom     = @import("dom/node.zig");   // parseDocument handles HTML+DOM internally
-const bridge  = @import("dom/bridge.zig");
+const std = @import("std");
+const client = @import("client.zig");
+const engine = @import("js/engine.zig");
+const dom = @import("dom/node.zig"); // parseDocument handles HTML+DOM internally
+const bridge = @import("dom/bridge.zig");
 const url_mod = @import("net/url.zig");
 
 // ── PageResult ────────────────────────────────────────────────────────────
@@ -23,7 +23,7 @@ const url_mod = @import("net/url.zig");
 /// Result of a Page.navigate() or Page.processHtml() call.
 /// All fields are owned by this struct; call deinit() when done.
 pub const PageResult = struct {
-    /// The URL that was requested.
+    /// The effective final URL for this page load.
     url: []const u8,
     /// HTTP status code of the final response.
     status: u16,
@@ -82,12 +82,12 @@ fn writeJsStr(w: anytype, s: []const u8) !void {
 /// so that variables set by one navigation are invisible in the next. The
 /// event loop's timer registry is cleared at the same time.
 pub const Page = struct {
-    allocator:  std.mem.Allocator,
-    io:         std.Io,
-    client:     client.Client,
-    js:         engine.JsEngine,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    client: client.Client,
+    js: engine.JsEngine,
     event_loop: engine.EventLoop,
-    base_url:   []u8,  // duped, may be replaced on each processHtml
+    base_url: []u8, // duped, may be replaced on each processHtml
     current_doc: ?dom.Document = null,
 
     /// Initialise a new Page with default client options.
@@ -103,14 +103,14 @@ pub const Page = struct {
         const base_url = try allocator.dupe(u8, "");
 
         var page = Page{
-            .allocator  = allocator,
-            .io         = io,
-            .client     = client.Client.init(allocator, io, .{
+            .allocator = allocator,
+            .io = io,
+            .client = client.Client.init(allocator, io, .{
                 .use_chrome_headers = false, // plain headers → uncompressed body
             }),
-            .js         = js_engine,
+            .js = js_engine,
             .event_loop = el,
-            .base_url   = base_url,
+            .base_url = base_url,
             .current_doc = null,
         };
         page.attachHosts();
@@ -135,7 +135,7 @@ pub const Page = struct {
     fn attachHosts(self: *Page) void {
         self.js.attachEventLoop(&self.event_loop);
         self.js.attachFetchHost(.{
-            .ptr     = self,
+            .ptr = self,
             .fetchFn = fetchAdapter,
         });
     }
@@ -156,10 +156,12 @@ pub const Page = struct {
             var resp = try self.client.fetch(resolved);
             defer resp.deinit();
             const body = try gpa.dupe(u8, resp.body);
+            const response_url = try gpa.dupe(u8, resp.url);
+            gpa.free(resolved);
             return .{
-                .status    = resp.status,
-                .body      = body,
-                .url       = resolved,
+                .status = resp.status,
+                .body = body,
+                .url = response_url,
                 .allocator = gpa,
             };
         }
@@ -172,9 +174,9 @@ pub const Page = struct {
                 .limited(16 * 1024 * 1024),
             );
             return .{
-                .status    = 200,
-                .body      = body,
-                .url       = resolved,
+                .status = 200,
+                .body = body,
+                .url = resolved,
                 .allocator = gpa,
             };
         }
@@ -205,16 +207,16 @@ pub const Page = struct {
     pub fn navigate(self: *Page, url: []const u8) !PageResult {
         var resp = try self.client.fetch(url);
         defer resp.deinit();
-        return self.processHtml(url, resp.status, resp.body);
+        return self.processHtml(resp.url, resp.status, resp.body);
     }
 
     /// Process an already-fetched HTML string without making a network
     /// request.  Useful for unit tests and offline scenarios.
     /// Caller must call result.deinit().
     pub fn processHtml(
-        self:     *Page,
-        url:      []const u8,
-        status:   u16,
+        self: *Page,
+        url: []const u8,
+        status: u16,
         html_src: []const u8,
     ) !PageResult {
         const gpa = self.allocator;
@@ -300,7 +302,10 @@ pub const Page = struct {
             const head = zig_doc.head() orelse break :blk null;
             const title_elem = head.firstChildByTag("title") orelse break :blk null;
             const text = title_elem.textContent(gpa) catch break :blk null;
-            if (text.len == 0) { gpa.free(text); break :blk null; }
+            if (text.len == 0) {
+                gpa.free(text);
+                break :blk null;
+            }
             break :blk text;
         };
         errdefer if (title) |t| gpa.free(t);
@@ -315,14 +320,14 @@ pub const Page = struct {
         const url_copy = try gpa.dupe(u8, url);
 
         return PageResult{
-            .url         = url_copy,
-            .status      = status,
-            .title       = title,
-            .body_text   = body_text,
-            .html        = html,
+            .url = url_copy,
+            .status = status,
+            .title = title,
+            .body_text = body_text,
+            .html = html,
             .window_data = window_data,
-            .tools_json  = tools_json,
-            .allocator   = gpa,
+            .tools_json = tools_json,
+            .allocator = gpa,
         };
     }
 
@@ -673,8 +678,7 @@ test "Page.init and deinit" {
 test "Page.processHtml — preserves status code" {
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
-    var result = try page.processHtml("http://example.com/", 200,
-        "<html><body></body></html>");
+    var result = try page.processHtml("http://example.com/", 200, "<html><body></body></html>");
     defer result.deinit();
     try std.testing.expectEqual(@as(u16, 200), result.status);
 }
@@ -682,8 +686,7 @@ test "Page.processHtml — preserves status code" {
 test "Page.processHtml — preserves URL" {
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
-    var result = try page.processHtml("http://example.com/page", 200,
-        "<html><body></body></html>");
+    var result = try page.processHtml("http://example.com/page", 200, "<html><body></body></html>");
     defer result.deinit();
     try std.testing.expectEqualStrings("http://example.com/page", result.url);
 }
@@ -691,8 +694,7 @@ test "Page.processHtml — preserves URL" {
 test "Page.processHtml — extracts title" {
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
-    var result = try page.processHtml("http://example.com/", 200,
-        "<html><head><title>Hello AWR</title></head><body></body></html>");
+    var result = try page.processHtml("http://example.com/", 200, "<html><head><title>Hello AWR</title></head><body></body></html>");
     defer result.deinit();
     try std.testing.expect(result.title != null);
     try std.testing.expectEqualStrings("Hello AWR", result.title.?);
@@ -701,8 +703,7 @@ test "Page.processHtml — extracts title" {
 test "Page.processHtml — null title when <title> absent" {
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
-    var result = try page.processHtml("http://example.com/", 200,
-        "<html><body><p>no title here</p></body></html>");
+    var result = try page.processHtml("http://example.com/", 200, "<html><body><p>no title here</p></body></html>");
     defer result.deinit();
     try std.testing.expectEqual(@as(?[]const u8, null), result.title);
 }
@@ -710,8 +711,7 @@ test "Page.processHtml — null title when <title> absent" {
 test "Page.processHtml — extracts body text" {
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
-    var result = try page.processHtml("http://example.com/", 200,
-        "<html><body><p>Hello World</p></body></html>");
+    var result = try page.processHtml("http://example.com/", 200, "<html><body><p>Hello World</p></body></html>");
     defer result.deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.body_text, "Hello World") != null);
 }
@@ -728,8 +728,7 @@ test "Page.processHtml — html field is raw source" {
 test "Page.processHtml — executes inline script, JS state persists" {
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
-    var result = try page.processHtml("http://example.com/", 200,
-        "<html><body><script>var __awr_x__ = 42;</script></body></html>");
+    var result = try page.processHtml("http://example.com/", 200, "<html><body><script>var __awr_x__ = 42;</script></body></html>");
     defer result.deinit();
     // JS engine persists after processHtml — variable should be visible.
     const ok = try page.js.evalBool("__awr_x__ === 42");
@@ -739,8 +738,7 @@ test "Page.processHtml — executes inline script, JS state persists" {
 test "Page.processHtml — document.title accessible inside script" {
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
-    var result = try page.processHtml("http://example.com/", 200,
-        "<html><head><title>My Page</title></head><body>" ++
+    var result = try page.processHtml("http://example.com/", 200, "<html><head><title>My Page</title></head><body>" ++
         "<script>var __awr_title__ = document.title;</script>" ++
         "</body></html>");
     defer result.deinit();
@@ -751,8 +749,7 @@ test "Page.processHtml — document.title accessible inside script" {
 test "Page.processHtml — empty body gives empty body_text" {
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
-    var result = try page.processHtml("http://example.com/", 200,
-        "<html><body></body></html>");
+    var result = try page.processHtml("http://example.com/", 200, "<html><body></body></html>");
     defer result.deinit();
     const trimmed = std.mem.trim(u8, result.body_text, " \t\r\n");
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
@@ -764,8 +761,7 @@ test "Page.processHtml — external script (src=) with unreachable host fails so
     // Absolute src pointing at a host that won't resolve — the fetch must
     // fail without aborting page processing, and the inline <script> that
     // follows must still run.
-    var result = try page.processHtml("http://example.com/", 200,
-        "<html><body>" ++
+    var result = try page.processHtml("http://example.com/", 200, "<html><body>" ++
         "<script src=\"http://this.host.does.not.exist.invalid/app.js\"></script>" ++
         "<script>window.__awr_after_ext__ = true;</script>" ++
         "</body></html>");
@@ -838,12 +834,18 @@ test "resolveUrl — relative against file:// base" {
 test "Page.processHtml — window.location.href matches url arg" {
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
-    var result = try page.processHtml(
-        "https://example.com/path?q=1", 200, "<html><body></body></html>");
+    var result = try page.processHtml("https://example.com/path?q=1", 200, "<html><body></body></html>");
     defer result.deinit();
-    const ok = try page.js.evalBool(
-        "window.location.href === 'https://example.com/path?q=1'");
+    const ok = try page.js.evalBool("window.location.href === 'https://example.com/path?q=1'");
     try std.testing.expect(ok);
+}
+
+test "Page.processHtml — PageResult.url matches effective url" {
+    var page = try Page.init(std.testing.allocator, std.testing.io);
+    defer page.deinit();
+    var result = try page.processHtml("https://example.com/path?q=1", 200, "<html><body></body></html>");
+    defer result.deinit();
+    try std.testing.expectEqualStrings("https://example.com/path?q=1", result.url);
 }
 
 // ── Step 3 tests — window.__awrData__ ─────────────────────────────────────
@@ -851,8 +853,7 @@ test "Page.processHtml — window.location.href matches url arg" {
 test "PageResult.window_data — script sets __awrData__" {
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
-    var result = try page.processHtml("https://x.com/", 200,
-        "<html><body><script>window.__awrData__ = {ok: true, n: 42};</script></body></html>");
+    var result = try page.processHtml("https://x.com/", 200, "<html><body><script>window.__awrData__ = {ok: true, n: 42};</script></body></html>");
     defer result.deinit();
     try std.testing.expect(result.window_data != null);
     try std.testing.expect(std.mem.indexOf(u8, result.window_data.?, "\"ok\"") != null);
@@ -861,8 +862,7 @@ test "PageResult.window_data — script sets __awrData__" {
 test "PageResult.window_data — null when not set" {
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
-    var result = try page.processHtml("https://x.com/", 200,
-        "<html><body></body></html>");
+    var result = try page.processHtml("https://x.com/", 200, "<html><body></body></html>");
     defer result.deinit();
     try std.testing.expect(result.window_data == null);
 }
@@ -897,10 +897,10 @@ test "Phase 2 integration — JS reads DOM and surfaces data via window.__awrDat
     try std.testing.expectEqualStrings("Shop", result.title.?);
     try std.testing.expect(result.window_data != null);
     const wd = result.window_data.?;
-    try std.testing.expect(std.mem.indexOf(u8, wd, "\"itemCount\":3")     != null);
-    try std.testing.expect(std.mem.indexOf(u8, wd, "Widget A")           != null);
+    try std.testing.expect(std.mem.indexOf(u8, wd, "\"itemCount\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wd, "Widget A") != null);
     try std.testing.expect(std.mem.indexOf(u8, wd, "\"title\":\"Shop\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, wd, "shop.example.com")   != null);
+    try std.testing.expect(std.mem.indexOf(u8, wd, "shop.example.com") != null);
 }
 
 // ── Navigation isolation test ─────────────────────────────────────────────
@@ -910,14 +910,12 @@ test "Page.processHtml — window_data does not bleed between navigations" {
     defer page.deinit();
 
     // First navigation sets __awrData__
-    var r1 = try page.processHtml("https://a.example/", 200,
-        "<html><body><script>window.__awrData__ = {page: 1};</script></body></html>");
+    var r1 = try page.processHtml("https://a.example/", 200, "<html><body><script>window.__awrData__ = {page: 1};</script></body></html>");
     defer r1.deinit();
     try std.testing.expect(r1.window_data != null);
 
     // Second navigation does NOT set __awrData__
-    var r2 = try page.processHtml("https://b.example/", 200,
-        "<html><body><p>no script</p></body></html>");
+    var r2 = try page.processHtml("https://b.example/", 200, "<html><body><p>no script</p></body></html>");
     defer r2.deinit();
     // Must be null — must not contain page 1's data
     try std.testing.expect(r2.window_data == null);
@@ -928,8 +926,7 @@ test "Page.processHtml — window_data does not bleed between navigations" {
 test "WebMCP — empty page reports empty tool list" {
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
-    var result = try page.processHtml("https://x.com/", 200,
-        "<html><body></body></html>");
+    var result = try page.processHtml("https://x.com/", 200, "<html><body></body></html>");
     defer result.deinit();
     try std.testing.expect(result.tools_json != null);
     try std.testing.expectEqualStrings("[]", result.tools_json.?);
@@ -974,8 +971,7 @@ test "WebMCP — sync tool callTool returns value" {
 test "WebMCP — unknown tool returns ToolNotFound" {
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
-    var result = try page.processHtml("https://x.com/", 200,
-        "<html><body></body></html>");
+    var result = try page.processHtml("https://x.com/", 200, "<html><body></body></html>");
     defer result.deinit();
 
     const out = try page.callTool("does_not_exist", "{}");
@@ -1098,6 +1094,7 @@ test "Page.navigate — fetches http://example.com" {
     var result = try page.navigate("http://example.com/");
     defer result.deinit();
     try std.testing.expectEqual(@as(u16, 200), result.status);
+    try std.testing.expectEqualStrings("http://example.com/", result.url);
     try std.testing.expect(result.title != null);
     try std.testing.expect(std.mem.indexOf(u8, result.body_text, "Example Domain") != null);
 }

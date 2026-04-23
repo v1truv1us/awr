@@ -11,13 +11,13 @@
 /// All mutating methods require an explicit allocator argument.
 const std = @import("std");
 
-// Zig 0.16 removed unixTimestamp(); read CLOCK_REALTIME directly for
+// Zig 0.16 removed unixTimestamp(); use a direct POSIX wall-clock read for
 // cookie expiry arithmetic.
 // TODO(durable): migrate to an explicit Io clock parameter once cookie APIs
 // thread an Io (matches the 0.16 std design, tracked in DEV_NOTES.md).
 fn unixTimestamp() i64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
+    var ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.REALTIME, &ts);
     return @intCast(ts.sec);
 }
 

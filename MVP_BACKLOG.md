@@ -1,6 +1,12 @@
-# AWR MVP — Flat Backlog
+# AWR MVP — Historical Backlog Snapshot
 
-Single source of truth for outstanding MVP work on the CLI-first terminal browser. Supersedes the phase-named planning docs (`archive/PHASE1_EXIT_STATUS.md`, `archive/PHASE1_CLOSURE_PLAN.md`, `archive/PHASE2_START_PLAN.md`, `archive/TLS_RESUME_PLAN.md`, `spec/Fingerprint-Plan.md`) — those remain as history, but priority and ordering live here.
+> **Superseded / non-canonical.** This backlog is preserved as background from
+> before the spec-consolidation pass.
+>
+> Use `spec/MVP.md` as the canonical umbrella spec.
+> Use `spec/subspecs/mvp-remainder.md` for active work.
+> Treat everything below as historical context that may no longer match the
+> current execution order or status.
 
 Solo ledger: each priority block below has a corresponding `solo` task. Claim one with `solo session start <task-id> --worker <agent-id> --json` before editing.
 

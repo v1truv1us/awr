@@ -128,6 +128,57 @@ pub const Element = struct {
         }
         return null;
     }
+
+    pub fn querySelector(self: *const Element, sel: []const u8) ?*Element {
+        const trimmed = std.mem.trim(u8, sel, " \t\n\r");
+        var parsed = Document.parseComplexSelector(std.heap.page_allocator, trimmed) catch return null;
+        defer parsed.deinit(std.heap.page_allocator);
+
+        for (self.children.items) |child| {
+            if (child == .element) {
+                if (Document.findByComplexSelector(child.element, &parsed)) |found| return found;
+            }
+        }
+        return null;
+    }
+
+    pub fn querySelectorAll(
+        self: *const Element,
+        sel: []const u8,
+        allocator: std.mem.Allocator,
+    ) ![]*Element {
+        var out: std.ArrayList(*Element) = .empty;
+        const trimmed = std.mem.trim(u8, sel, " \t\n\r");
+        var parsed = try Document.parseComplexSelector(allocator, trimmed);
+        defer parsed.deinit(allocator);
+
+        for (self.children.items) |child| {
+            if (child == .element) {
+                Document.collectByComplexSelector(allocator, child.element, &parsed, &out);
+            }
+        }
+
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn matches(self: *const Element, sel: []const u8) bool {
+        const trimmed = std.mem.trim(u8, sel, " \t\n\r");
+        var parsed = Document.parseComplexSelector(std.heap.page_allocator, trimmed) catch return false;
+        defer parsed.deinit(std.heap.page_allocator);
+        return Document.matchesComplexSelector(self, &parsed);
+    }
+
+    pub fn closest(self: *const Element, sel: []const u8) ?*Element {
+        const trimmed = std.mem.trim(u8, sel, " \t\n\r");
+        var parsed = Document.parseComplexSelector(std.heap.page_allocator, trimmed) catch return null;
+        defer parsed.deinit(std.heap.page_allocator);
+
+        var cur: ?*const Element = self;
+        while (cur) |elem| : (cur = elem.parent) {
+            if (Document.matchesComplexSelector(elem, &parsed)) return @constCast(elem);
+        }
+        return null;
+    }
 };
 
 // ── Document ──────────────────────────────────────────────────────────────
@@ -703,4 +754,49 @@ test "querySelector — multi-class selector" {
         "<html><body><li class=\"foo bar\">x</li></body></html>");
     defer doc.deinit();
     try std.testing.expect(doc.querySelector("li.foo.bar") != null);
+}
+
+test "Element.querySelector scopes to descendants" {
+    var doc = try parseDocument(std.testing.allocator,
+        "<html><body><section id=\"first\"><p class=\"item\">one</p></section><section id=\"scope\"><p class=\"item\">two</p><div><p class=\"item\">three</p></div></section></body></html>");
+    defer doc.deinit();
+
+    const scope = doc.getElementById("scope") orelse return error.SkipZigTest;
+    const found = scope.querySelector(".item");
+    try std.testing.expect(found != null);
+    const text = try found.?.textContent(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("two", text);
+}
+
+test "Element.querySelectorAll scopes to descendants" {
+    var doc = try parseDocument(std.testing.allocator,
+        "<html><body><section id=\"first\"><p class=\"item\">one</p></section><section id=\"scope\"><p class=\"item\">two</p><div><p class=\"item\">three</p></div></section></body></html>");
+    defer doc.deinit();
+
+    const scope = doc.getElementById("scope") orelse return error.SkipZigTest;
+    const found = try scope.querySelectorAll(".item", std.testing.allocator);
+    defer std.testing.allocator.free(found);
+    try std.testing.expectEqual(@as(usize, 2), found.len);
+}
+
+test "Element.matches supports compound selectors" {
+    var doc = try parseDocument(std.testing.allocator,
+        "<html><body><section class=\"shell\"><div><p id=\"leaf\" class=\"copy\">hello</p></div></section></body></html>");
+    defer doc.deinit();
+
+    const leaf = doc.getElementById("leaf") orelse return error.SkipZigTest;
+    try std.testing.expect(leaf.matches("p.copy"));
+    try std.testing.expect(!leaf.matches("section.shell"));
+}
+
+test "Element.closest walks ancestors" {
+    var doc = try parseDocument(std.testing.allocator,
+        "<html><body><section class=\"shell\"><div><p id=\"leaf\" class=\"copy\">hello</p></div></section></body></html>");
+    defer doc.deinit();
+
+    const leaf = doc.getElementById("leaf") orelse return error.SkipZigTest;
+    const section = leaf.closest("section.shell");
+    try std.testing.expect(section != null);
+    try std.testing.expectEqualStrings("section", section.?.tag);
 }

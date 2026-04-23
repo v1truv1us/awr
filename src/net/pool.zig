@@ -19,14 +19,14 @@ pub const MAX_REQUESTS: u32     = 100;
 
 // Zig 0.16: std.time.milliTimestamp and std.Thread.Mutex moved. The pool is
 // only touched synchronously from Client.fetch today, so use a no-op mutex
-// stub and a direct CLOCK_REALTIME read.
+// stub and a direct POSIX wall-clock read.
 // TODO(durable): thread a proper Io through the pool and use Io.Mutex once
 // the client is fully async (tracked in DEV_NOTES.md).
 fn milliTimestamp() i64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
-    return @as(i64, @intCast(ts.sec)) * 1000 +
-           @as(i64, @intCast(@divTrunc(ts.nsec, std.time.ns_per_ms)));
+    var ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.REALTIME, &ts);
+    return @as(i64, @intCast(ts.sec)) * std.time.ms_per_s +
+        @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
 }
 
 const NoopMutex = struct {

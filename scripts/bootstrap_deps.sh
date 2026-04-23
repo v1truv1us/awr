@@ -30,7 +30,17 @@ clone_or_update "$repo_root/third_party/quickjs-ng-quickjs" \
   "https://github.com/quickjs-ng/quickjs.git" \
   "85640f81e04bc93940acc2756c792c66076dd768"
 
-python - <<PY
+python_bin=""
+if command -v python3 >/dev/null 2>&1; then
+  python_bin="python3"
+elif command -v python >/dev/null 2>&1; then
+  python_bin="python"
+else
+  printf 'bootstrap_deps.sh requires python3 or python\n' >&2
+  exit 1
+fi
+
+"$python_bin" - <<PY
 from pathlib import Path
 import sys
 

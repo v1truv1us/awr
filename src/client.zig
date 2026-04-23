@@ -11,9 +11,9 @@
 /// `Client.init` time. It's re-used by every fetch.
 const std = @import("std");
 
-const http1   = @import("net/http1.zig");
-const cookie  = @import("net/cookie.zig");
-const pool    = @import("net/pool.zig");
+const http1 = @import("net/http1.zig");
+const cookie = @import("net/cookie.zig");
+const pool = @import("net/pool.zig");
 const url_mod = @import("net/url.zig");
 
 pub const Url = url_mod.Url;
@@ -21,11 +21,11 @@ pub const Url = url_mod.Url;
 // ── Options ───────────────────────────────────────────────────────────────
 
 pub const ClientOptions = struct {
-    follow_redirects: bool  = true,
-    max_redirects:    u8    = 10,
-    timeout_ms:       u32   = 30_000,
+    follow_redirects: bool = true,
+    max_redirects: u8 = 10,
+    timeout_ms: u32 = 30_000,
     /// Sent as the User-Agent header when not using Chrome 132 defaults.
-    user_agent:       []const u8 = "AWR/0.1",
+    user_agent: []const u8 = "AWR/0.1",
     /// When true, setChrome132Defaults() is called on every request.
     use_chrome_headers: bool = true,
 };
@@ -33,12 +33,14 @@ pub const ClientOptions = struct {
 // ── Response ──────────────────────────────────────────────────────────────
 
 pub const Response = struct {
-    status:    u16,
-    headers:   http1.HeaderList,
-    body:      []u8,
+    status: u16,
+    url: []const u8,
+    headers: http1.HeaderList,
+    body: []u8,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *Response) void {
+        self.allocator.free(self.url);
         self.headers.deinit(self.allocator);
         self.allocator.free(self.body);
     }
@@ -69,18 +71,18 @@ pub const FetchError = error{
 
 pub const Client = struct {
     allocator: std.mem.Allocator,
-    io:        std.Io,
-    cookies:   cookie.CookieJar,
-    conns:     pool.ConnectionPool,
-    options:   ClientOptions,
+    io: std.Io,
+    cookies: cookie.CookieJar,
+    conns: pool.ConnectionPool,
+    options: ClientOptions,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: ClientOptions) Client {
         return Client{
             .allocator = allocator,
-            .io        = io,
-            .cookies   = cookie.CookieJar.init(allocator),
-            .conns     = pool.ConnectionPool.init(allocator),
-            .options   = options,
+            .io = io,
+            .cookies = cookie.CookieJar.init(allocator),
+            .conns = pool.ConnectionPool.init(allocator),
+            .options = options,
         };
     }
 
@@ -93,11 +95,11 @@ pub const Client = struct {
     pub fn fetch(self: *Client, url_str: []const u8) anyerror!Response {
         // Validate via our own URL parser so bad inputs surface as InvalidUrl
         // before std.http.Client parses and returns its own error.
-        _ = url_mod.Url.parse(url_str) catch return FetchError.InvalidUrl;
+        const uri = std.Uri.parse(url_str) catch return FetchError.InvalidUrl;
 
         var std_client: std.http.Client = .{
             .allocator = self.allocator,
-            .io        = self.io,
+            .io = self.io,
         };
         defer std_client.deinit();
 
@@ -145,26 +147,56 @@ pub const Client = struct {
             extra_header_count += 1;
         }
 
-        const result = std_client.fetch(.{
-            .location = .{ .url = url_str },
-            .response_writer = &body_buf.writer,
+        var req = std_client.request(.GET, uri, .{
             .redirect_behavior = redirect_behavior,
-            .timeout_ms = self.options.timeout_ms,
             .extra_headers = extra_headers[0..extra_header_count],
         }) catch |err| return mapFetchError(err);
+        defer req.deinit();
+
+        req.sendBodiless() catch |err| return mapFetchError(err);
+
+        const redirect_buffer: []u8 = if (redirect_behavior == .unhandled)
+            &.{}
+        else
+            try self.allocator.alloc(u8, 8 * 1024);
+        defer if (redirect_behavior != .unhandled) self.allocator.free(redirect_buffer);
+
+        var result = req.receiveHead(redirect_buffer) catch |err| return mapFetchError(err);
+
+        var headers = try cloneFetchHeaders(self.allocator, result.head.iterateHeaders());
+        errdefer headers.deinit(self.allocator);
+
+        const effective_url = try std.fmt.allocPrint(self.allocator, "{f}", .{
+            req.uri.fmt(.{ .scheme = true, .authentication = true, .authority = true, .path = true, .query = true, .fragment = true }),
+        });
+        errdefer self.allocator.free(effective_url);
+
+        const decompress_buffer: []u8 = switch (result.head.content_encoding) {
+            .identity => &.{},
+            .zstd => try self.allocator.alloc(u8, std.compress.zstd.default_window_len),
+            .deflate, .gzip => try self.allocator.alloc(u8, std.compress.flate.max_window_len),
+            .compress => return error.UnsupportedCompressionMethod,
+        };
+        defer if (result.head.content_encoding != .identity) self.allocator.free(decompress_buffer);
+
+        var transfer_buffer: [64]u8 = undefined;
+        var decompress: std.http.Decompress = undefined;
+        const reader = result.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+        _ = reader.streamRemaining(&body_buf.writer) catch |err| switch (err) {
+            error.ReadFailed => return mapFetchError(result.bodyErr().?),
+            else => |e| return mapFetchError(e),
+        };
 
         var body_list = body_buf.toArrayList();
         errdefer body_list.deinit(self.allocator);
         const body = try body_list.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(body);
 
-        const headers = try cloneFetchHeaders(self.allocator, result.headers);
-        errdefer headers.deinit(self.allocator);
-
         return Response{
-            .status    = @intFromEnum(result.status),
-            .headers   = headers,
-            .body      = body,
+            .status = @intFromEnum(result.head.status),
+            .url = effective_url,
+            .headers = headers,
+            .body = body,
             .allocator = self.allocator,
         };
     }
@@ -174,11 +206,13 @@ fn cloneFetchHeaders(allocator: std.mem.Allocator, src_headers: anytype) !http1.
     var headers: http1.HeaderList = .{};
     errdefer headers.deinit(allocator);
 
-    for (src_headers) |header| {
-        try headers.append(allocator, .{
-            .name = try allocator.dupe(u8, header.name),
-            .value = try allocator.dupe(u8, header.value),
-        });
+    var it = src_headers;
+    while (it.next()) |header| {
+        const name = try allocator.dupe(u8, header.name);
+        errdefer allocator.free(name);
+        const value = try allocator.dupe(u8, header.value);
+        errdefer allocator.free(value);
+        try headers.append(allocator, name, value);
     }
 
     headers.owns_strings = true;
@@ -256,6 +290,19 @@ test "Client cookie jar is populated after fetch sets a cookie (mock)" {
     defer client.deinit();
     try client.cookies.parseSetCookie("session=abc123; Path=/; HttpOnly", "example.com");
     try std.testing.expectEqual(@as(usize, 1), client.cookies.cookies.items.len);
+}
+
+test "fetch populates response url" {
+    var client = Client.init(std.testing.allocator, std.testing.io, .{
+        .use_chrome_headers = false,
+    });
+    defer client.deinit();
+
+    var result = try client.fetch("http://example.com/");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), result.status);
+    try std.testing.expectEqualStrings("http://example.com/", result.url);
 }
 
 test "fetch TooManyRedirects when max_redirects is 0" {

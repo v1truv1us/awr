@@ -7,7 +7,7 @@ fn writeJsonStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u
     try list.append(alloc, '"');
     for (s) |c| {
         switch (c) {
-            '"'  => try list.appendSlice(alloc, "\\\""),
+            '"' => try list.appendSlice(alloc, "\\\""),
             '\\' => try list.appendSlice(alloc, "\\\\"),
             '\n' => try list.appendSlice(alloc, "\\n"),
             '\r' => try list.appendSlice(alloc, "\\r"),
@@ -39,6 +39,34 @@ const USAGE =
 
 fn stdoutWrite(io: std.Io, bytes: []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(io, bytes);
+}
+
+fn describeLoadError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.InvalidUrl => "invalid URL",
+        error.DnsResolutionFailed => "DNS resolution failed",
+        error.ConnectionFailed => "connection failed",
+        error.TlsNotAvailable => "TLS setup or handshake failed",
+        error.TooManyRedirects => "too many redirects",
+        error.FileNotFound => "file not found",
+        error.AccessDenied => "access denied",
+        error.NotDir => "path contains a non-directory segment",
+        error.IsDir => "path points to a directory, not a file",
+        error.NameTooLong => "path is too long",
+        error.FileTooBig => "file exceeds the supported size limit",
+        error.NoSpaceLeft => "out of disk space",
+        error.OutOfMemory => "out of memory",
+        else => @errorName(err),
+    };
+}
+
+fn fatalLoadError(action: []const u8, location: []const u8, err: anyerror) noreturn {
+    std.process.fatal("error {s} {s}: {s} ({s})", .{
+        action,
+        location,
+        describeLoadError(err),
+        @errorName(err),
+    });
 }
 
 /// Detect whether `awr call` returned the error envelope shape
@@ -157,7 +185,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         var p = try page_mod.Page.init(alloc, io);
         defer p.deinit();
         var result = loadPage(&p, alloc, io, args[2]) catch |err| {
-            std.process.fatal("error loading {s}: {t}", .{ args[2], err });
+            fatalLoadError("loading", args[2], err);
         };
         defer result.deinit();
         const tj = result.tools_json orelse "[]";
@@ -175,7 +203,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         var p = try page_mod.Page.init(alloc, io);
         defer p.deinit();
         var result = loadPage(&p, alloc, io, args[2]) catch |err| {
-            std.process.fatal("error loading {s}: {t}", .{ args[2], err });
+            fatalLoadError("loading", args[2], err);
         };
         defer result.deinit();
         const out = try p.callTool(args[3], args[4]);
@@ -192,7 +220,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     defer p.deinit();
 
     var result = loadPage(&p, alloc, io, url) catch |err| {
-        std.process.fatal("error fetching {s}: {t}", .{ url, err });
+        fatalLoadError("fetching", url, err);
     };
     defer result.deinit();
 
@@ -222,4 +250,10 @@ test "isFailedCallEnvelope detects {ok:false}" {
     try std.testing.expect(isFailedCallEnvelope("{\"ok\":false,\"error\":\"ToolNotFound\"}"));
     try std.testing.expect(isFailedCallEnvelope("{\"ok\": false, \"error\": \"ToolNotFound\"}"));
     try std.testing.expect(!isFailedCallEnvelope("{\"ok\":true,\"value\":{}}"));
+}
+
+test "describeLoadError returns stable messages for common failures" {
+    try std.testing.expectEqualStrings("invalid URL", describeLoadError(error.InvalidUrl));
+    try std.testing.expectEqualStrings("DNS resolution failed", describeLoadError(error.DnsResolutionFailed));
+    try std.testing.expectEqualStrings("file not found", describeLoadError(error.FileNotFound));
 }

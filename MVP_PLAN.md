@@ -1,13 +1,14 @@
-# AWR MVP Plan — WebMCP Mock Server Demo
+# AWR MVP Plan — Historical Record of the Shipped WebMCP v1 Slice
 
-> **Authoritative MVP contract:** `spec/MVP.md` is the fully qualified
-> definition (functional requirements, acceptance tests, stub-closure
-> checklist). This plan describes the **v1 slice** — the in-page WebMCP
-> plumbing — which is ✅ shipped. The production bar (`v2`, "no stubs")
-> lives in `spec/MVP.md` §5/§6.
+> **Historical only. Do not use this file for current execution.**
+> The canonical spec is `spec/MVP.md`.
+> The active work queue is `spec/subspecs/mvp-remainder.md`.
 >
-> **Target (v1):** the WebMCP Mock Server Demo defined by `spec/MVP.md`
-> (and summarised in the "## MVP Definition" section of `spec/PRD.md`) —
+> This file describes the **shipped v1 slice** — the in-page WebMCP
+> plumbing — which is ✅ complete and kept here as project history.
+ >
+ > **Target (v1):** the WebMCP Mock Server Demo defined by `spec/MVP.md`
+ > (and summarised in the "## MVP Definition" section of `spec/PRD.md`) —
 > a self-contained demo showing AWR load a page, discover registered
 > tools, and execute a tool with typed JSON results.
 >

@@ -111,8 +111,9 @@ For a fast operational MVP verification (fixtures + local mock server):
 ./scripts/mvp_smoke.sh
 ```
 
-This script hard-checks AT-1/2/3/5/6/7/8 and runs AT-4 (`https://example.com`)
-as best-effort (warning only in environments where Zig outbound networking is restricted).
+This script runs the repo's current smoke checks for the shipped CLI path and
+browser-runtime MVP path. In restricted environments, network-dependent checks
+may still be best-effort.
 
 ## 4) Build artifacts and repository hygiene
 
@@ -137,17 +138,19 @@ Use this checklist before declaring "MVP-ready" for agent integration:
 
 1. **Build completeness**
    - `zig build -Doptimize=ReleaseSafe` succeeds.
-2. **CLI contract stability**
-   - `awr --version`, `awr <url>`, `awr tools <url>`, and `awr call <url> <tool> <json>` behave per `spec/MVP.md` FR-5.
-3. **WebMCP contract correctness**
-   - Tool discovery + invocation + error envelopes match `spec/MVP.md` FR-4.
-4. **Acceptance validation**
-   - Execute acceptance scenarios in `spec/MVP.md` §3 (AT-1 through AT-11, respecting current MVP vs MVP+1 gating notes in that spec).
+2. **Canonical spec alignment**
+   - `spec/MVP.md` remains the umbrella authority for MVP scope and active-vs-deferred boundaries.
+3. **Runtime closure coverage**
+   - The shipped browser-runtime MVP path is evaluated against `spec/subspecs/mvp-remainder.md`, especially real fetch, script/async closure, DOM fidelity, and doc sync on the primary CLI path.
+4. **CLI and WebMCP baseline behavior**
+   - `awr --version`, `awr <url>`, `awr tools <url>`, and `awr call <url> <tool> <json>` work consistently with the shipped baseline described in `spec/MVP.md`.
 5. **Agent integration readiness**
    - Verify shell-based tool bridge in `docs/agent-integration.md` end-to-end using `experiments/webmcp_mock.html`.
-6. **Stub-closure tracking**
-   - Reconcile open items in `spec/MVP.md` §5 and `DEV_NOTES.md` before claiming production readiness.
+6. **Governance-sensitive doc changes are recorded**
+   - If spec boundaries, document authority, or governance rules changed, update `docs/adr/0001-spec-governance.md` alongside the affected docs.
+7. **Open implementation follow-ups are visible**
+   - Keep `DEV_NOTES.md` and related support docs aligned with the current umbrella/deferred spec map before claiming readiness.
 
 ## 6) Current status note
 
-As of April 21, 2026, WebMCP is implemented and usable through CLI flows, while several broader runtime items (notably fully-owned HTTP/HTTPS paths and some web API stubs) are tracked in the MVP/MVP+1 documentation for continued closure.
+As of April 22, 2026, the primary CLI/browser MVP path is shipped and verified by `zig build test-js`, `zig build test-dom`, `zig build test-page`, `zig build test-client`, and `./scripts/mvp_smoke.sh`. Deferred tracks remain documented separately.

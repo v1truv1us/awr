@@ -9,6 +9,18 @@ Global framing:
 - Use curated WPT and Test262 coverage as the first correctness signal for DOM and JS work
 - Treat WebMCP as a supported layer on top of the browser runtime
 
+Execution specs:
+
+- Canonical umbrella spec: `spec/MVP.md`
+- Active work now: `spec/subspecs/mvp-remainder.md`
+- Deferred tracks: `spec/subspecs/mcp-stdio.md`, `spec/subspecs/browser-tui.md`, `spec/Fingerprint-Plan.md`
+- Historical/background docs: `MVP_PLAN.md`, `MVP_BACKLOG.md`, `spec/PRD.md`
+- Governance ADR: `docs/adr/0001-spec-governance.md`
+
+Change control rule:
+
+- If spec boundaries, canonical-document authority, or documentation governance changes, update `docs/adr/0001-spec-governance.md` in the same change.
+
 ---
 
 ## `src/net/` — Networking Stack
@@ -46,7 +58,7 @@ QuickJS-NG wrapper providing `console.log`, `fetch()`, `setTimeout`, and Promise
 ### Constraints
 - **`use_llvm = true` is required.** Any build target linking QuickJS-NG must set this flag in `build.zig`.
 - **Single file**: `engine.zig` contains the entire JS runtime integration. It's self-contained.
-- **`fetch()` calls back into the Zig HTTP client.** The JS `fetch()` implementation invokes `client.zig` under the hood — it's not a stub.
+- **Timers and `fetch()` ship on the CLI/browser MVP path.** Preserve their current behavior and extend them only with source-backed tests or fixtures.
 - **Promise draining is explicit.** After script execution, the engine drains the microtask queue. This is called from `page.zig`.
 - **Conformance work starts here.** When runtime behavior changes, check whether a curated WPT or Test262 case should be added or updated.
 
@@ -125,11 +137,15 @@ Do not let WebMCP changes regress the CLI browser path.
 ### `mcp_stdio.zig` — MCP Server
 JSON-RPC 2.0 server over stdin/stdout implementing the MCP protocol. Exposes `tools/list` and `tools/call` methods. Wraps `page.zig` for tool discovery and invocation.
 
+This track is currently deferred; treat `spec/subspecs/mcp-stdio.md` as the
+status doc, not this file's existence as proof of product readiness.
+
 ### `browse_heuristics.zig` — Content Extraction
 Readability-style heuristics for extracting main content from web pages. Scores DOM nodes by content density to find the article/main content.
 
 ### `main.zig` — CLI Entry Point
-Parses CLI arguments and dispatches to commands: `fetch` (default), `browse`, `post`, `eval`, `mcp-call`, `mcp-stdio`.
+Parses CLI arguments and dispatches to commands. The shipped browser/WebMCP CLI
+surface includes the default fetch path plus `tools`, `call`, and `mock`.
 
 `awr <url>` is the main product path.
 Keep help text and defaults centered on the browser workflow.

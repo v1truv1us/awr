@@ -109,6 +109,10 @@ fn installNativeCallbacks(eng: *engine.JsEngine) !void {
     inline for (.{
         .{ "querySelector",    querySelectorFn },
         .{ "querySelectorAll", querySelectorAllFn },
+        .{ "querySelectorScoped", querySelectorScopedFn },
+        .{ "querySelectorAllScoped", querySelectorAllScopedFn },
+        .{ "matches",         matchesFn },
+        .{ "closest",         closestFn },
         .{ "getElementById",   getElementByIdFn },
         .{ "getTitle",         getTitleFn },
         .{ "getBody",          getBodyFn },
@@ -255,6 +259,81 @@ fn getElementByIdFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("qui
     const elem = bridge.doc.getElementById(id) orelse return qjs.Value.null;
     var buf: [8192]u8 = undefined;
     const json = elementToJson(bridge, elem, &buf) orelse return qjs.Value.null;
+    return qjs.Value.initStringLen(c, json);
+}
+
+fn querySelectorScopedFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
+    if (args.len < 2) return qjs.Value.null;
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.null;
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.null;
+    const sel_val: qjs.Value = @bitCast(args[1]);
+    const sel_cstr = sel_val.toCString(c) orelse return qjs.Value.null;
+    defer c.freeCString(sel_cstr);
+
+    const found = elem.querySelector(std.mem.span(sel_cstr)) orelse return qjs.Value.null;
+    var buf: [8192]u8 = undefined;
+    const json = elementToJson(bridge, found, &buf) orelse return qjs.Value.null;
+    return qjs.Value.initStringLen(c, json);
+}
+
+fn querySelectorAllScopedFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
+    if (args.len < 2) return qjs.Value.initStringLen(c, "[]");
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.initStringLen(c, "[]");
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.initStringLen(c, "[]");
+    const sel_val: qjs.Value = @bitCast(args[1]);
+    const sel_cstr = sel_val.toCString(c) orelse return qjs.Value.initStringLen(c, "[]");
+    defer c.freeCString(sel_cstr);
+
+    const elems = elem.querySelectorAll(std.mem.span(sel_cstr), bridge.allocator) catch return qjs.Value.initStringLen(c, "[]");
+    defer bridge.allocator.free(elems);
+
+    var buf: [65536]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    w.writeByte('[') catch return qjs.Value.initStringLen(c, "[]");
+    for (elems, 0..) |item, i| {
+        if (i > 0) w.writeByte(',') catch break;
+        var ebuf: [8192]u8 = undefined;
+        if (elementToJson(bridge, item, &ebuf)) |json| {
+            w.writeAll(json) catch break;
+        }
+    }
+    w.writeByte(']') catch {};
+    return qjs.Value.initStringLen(c, w.buffered());
+}
+
+fn matchesFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initBool(false);
+    const c = ctx orelse return qjs.Value.initBool(false);
+    if (args.len < 2) return qjs.Value.initBool(false);
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.initBool(false);
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.initBool(false);
+    const sel_val: qjs.Value = @bitCast(args[1]);
+    const sel_cstr = sel_val.toCString(c) orelse return qjs.Value.initBool(false);
+    defer c.freeCString(sel_cstr);
+    return qjs.Value.initBool(elem.matches(std.mem.span(sel_cstr)));
+}
+
+fn closestFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
+    if (args.len < 2) return qjs.Value.null;
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.null;
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.null;
+    const sel_val: qjs.Value = @bitCast(args[1]);
+    const sel_cstr = sel_val.toCString(c) orelse return qjs.Value.null;
+    defer c.freeCString(sel_cstr);
+
+    const found = elem.closest(std.mem.span(sel_cstr)) orelse return qjs.Value.null;
+    var buf: [8192]u8 = undefined;
+    const json = elementToJson(bridge, found, &buf) orelse return qjs.Value.null;
     return qjs.Value.initStringLen(c, json);
 }
 
@@ -495,10 +574,19 @@ const BRIDGE_POLYFILL =
     \\        return node;
     \\      },
     \\      contains(other) { return false; },
-    \\      querySelector(sel) { return null; },
-    \\      querySelectorAll(sel) { return []; },
-    \\      matches(sel) { return false; },
-    \\      closest(sel) { return null; },
+    \\      querySelector(sel) {
+    \\        const r = __awr_querySelectorScoped__(this._h, String(sel));
+    \\        return r ? makeElement(r) : null;
+    \\      },
+    \\      querySelectorAll(sel) {
+    \\        const r = __awr_querySelectorAllScoped__(this._h, String(sel));
+    \\        try { return (JSON.parse(r) || []).map(makeElement); } catch(e) { return []; }
+    \\      },
+    \\      matches(sel) { return !!__awr_matches__(this._h, String(sel)); },
+    \\      closest(sel) {
+    \\        const r = __awr_closest__(this._h, String(sel));
+    \\        return r ? makeElement(r) : null;
+    \\      },
     \\      getBoundingClientRect() { return {top:0,left:0,bottom:0,right:0,width:0,height:0,x:0,y:0}; },
     \\      focus() {},
     \\      blur() {},
@@ -951,5 +1039,53 @@ test "bridge — DOM mutations reflect into Zig querySelector" {
         \\root.appendChild(n);
     , "<test>");
     const ok = try eng.evalBool("document.querySelector('#added') !== null && document.querySelector('#added').textContent === 'hello'");
+    try std.testing.expect(ok);
+}
+
+test "bridge — element.querySelector scopes to descendants" {
+    var doc = try dom.parseDocument(std.testing.allocator,
+        "<html><body><section id=\"first\"><p class=\"item\">one</p></section><section id=\"scope\"><p class=\"item\">two</p><div><p class=\"item\">three</p></div></section></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    const ok = try eng.evalBool(
+        "document.getElementById('scope').querySelector('.item').textContent === 'two'",
+    );
+    try std.testing.expect(ok);
+}
+
+test "bridge — element.querySelectorAll scopes to descendants" {
+    var doc = try dom.parseDocument(std.testing.allocator,
+        "<html><body><section id=\"first\"><p class=\"item\">one</p></section><section id=\"scope\"><p class=\"item\">two</p><div><p class=\"item\">three</p></div></section></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    const ok = try eng.evalBool(
+        "document.getElementById('scope').querySelectorAll('.item').map(el => el.textContent).join(',') === 'two,three'",
+    );
+    try std.testing.expect(ok);
+}
+
+test "bridge — element.matches and closest use Zig selector engine" {
+    var doc = try dom.parseDocument(std.testing.allocator,
+        "<html><body><section class=\"shell\"><div><p id=\"leaf\" class=\"copy\">hello</p></div></section></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    const ok = try eng.evalBool(
+        "(() => { const leaf = document.getElementById('leaf'); return leaf.matches('p.copy') && leaf.closest('section.shell').tagName === 'SECTION'; })()",
+    );
     try std.testing.expect(ok);
 }

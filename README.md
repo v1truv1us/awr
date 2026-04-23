@@ -3,12 +3,18 @@
 A headless terminal browser for AI agents. Loads pages and runs their
 JavaScript with a CLI-first interface.
 
-> Scope note (April 21, 2026): WebMCP is currently implemented as an
-> experimental feature, but it is **not part of MVP gating**. MVP scope
-> and acceptance criteria are governed by `spec/MVP.md` and `spec/PRD.md`.
+> **Canonical spec:** `spec/MVP.md`
+> **Active work now:** `spec/subspecs/mvp-remainder.md`
+> **Deferred tracks:** `spec/subspecs/mcp-stdio.md`,
+> `spec/subspecs/browser-tui.md`, and `spec/Fingerprint-Plan.md`
+> **Governance ADR:** `docs/adr/0001-spec-governance.md`
 
-**Status:** implementation in progress against the authoritative MVP
-contract in `spec/MVP.md` (with `spec/PRD.md` as product context).
+**Status:** the WebMCP CLI slice and the primary browser-runtime MVP path are
+shipped on the CLI surface. `spec/subspecs/mvp-remainder.md` is now the closure
+record for that work.
+
+If canonical spec boundaries or document authority change, update both
+`spec/MVP.md` and `docs/adr/0001-spec-governance.md` as part of the same change.
 
 ---
 
@@ -52,6 +58,7 @@ Build + test + MVP-readiness runbook: [`docs/BUILD_MVP_READINESS.md`](docs/BUILD
 | `awr <url>` | Load page, run scripts, print full envelope `{url,status,title,body_text,window_data,tools}` |
 | `awr tools <url>` | Print the WebMCP tool array registered by the page |
 | `awr call <url> <tool> <json-args>` | Invoke `<tool>`; print `{ok:true,value:...}` or `{ok:false,error:...,message:...}` |
+| `awr mock` | Serve the local mock fixture for CLI/WebMCP smoke tests |
 
 `<url>` accepts `file://…`, bare filesystem paths, and (once the HTTP
 rewrite lands) `http(s)://…`.
@@ -130,77 +137,28 @@ JS sees real page data through a thin polyfill over five Zig callbacks:
 
 ---
 
-## What's stubbed today ⚠️
+## Current caveats
 
-### HTTP / HTTPS fetch
-
-`awr` CLI commands against `http://` or `https://` URLs currently fail:
-
-- `src/client.zig:122-127` `fetchHttp` → `ConnectionFailed`.
-- `src/client.zig:134-139` `fetchHttpsViaStd` → `TlsNotAvailable`.
-- `src/net/http1.zig:298-340` `readResponse` is dead code in the MVP
-  (5 tests gated as `error.SkipZigTest`).
-
-The MVP runs against `file://` or bare-path fixtures. Durable fix
-tracked as `DEV_NOTES.md` #6: rewrite the owned HTTP/1.1 path against
-`std.Io.Reader` / `std.Io.File` and thread an `Io` handle from
-`main()` through `Page` → `Client`. This is the top item in MVP+1.
-
-### JavaScript Web APIs
-
-- `setTimeout` / `setInterval` return `0` and **never fire**
-  (`src/js/engine.zig:286-293`). Phase 3 wires them to libxev timers.
-- `fetch()` returns a rejected Promise with message `"fetch() not
-  available in Phase 2 — use Client.fetch() at the Zig layer"`
-  (`src/js/engine.zig:304-313`).
-- `structuredClone` is `undefined`.
-
-### DOM bridge
-
-- `<script src="…">` external scripts are **skipped** — only inline
-  `<script>` tags execute. External script loading is a Phase 3 item.
-- DOM mutations from JS (`innerHTML=`, `appendChild`, `textContent=`)
-  update the JS-side element only; they are not reflected back to the
-  Zig DOM tree. Read-mostly agent workflows don't notice this; a
-  WebMCP page that mutates the DOM and then queries it will see its
-  own mutations, but subsequent `awr tools` / `awr call` invocations
-  reload the page fresh.
-- CSS selector support is deliberately minimal:
-  - ✅ `tag`, `#id`, `.class`, `tag#id`, `tag.class`, descendant
-    (`#catalog li`).
-  - ❌ attribute selectors (`[data-id]`), pseudo-classes
-    (`:hover`, `:first-child`), combinators (`>`, `+`, `~`),
-    multi-class (`.a.b`).
-
-### Test runner
-
-On gVisor-backed containers the Zig 0.16 test runner panics with an
-integer overflow inside `std.Progress.start`; the compilation itself
-is fine. Runs cleanly on native Linux/macOS (`DEV_NOTES.md` #7).
+- Native MCP stdio server mode remains deferred; use `awr tools` and `awr call`
+  as the supported integration surface.
+- Browser/TUI work and later fingerprinting remain deferred; `awr <url>` is the
+  main shipped product path.
+- Event handling is still intentionally thin: `addEventListener` and observer
+  APIs exist so pages do not throw, but AWR is not a full event-driven browser.
+- The standalone TLS/TCP tracks still have non-MVP engineering debt; the
+  shipped CLI/browser path is verified with `test-js`, `test-dom`, `test-page`,
+  `test-client`, and `./scripts/mvp_smoke.sh`.
 
 ---
 
-## What's intentionally out of scope (Phase 3 / MVP+1)
+## Deferred tracks
 
-Per `spec/PRD.md` and `MVP_PLAN.md:111-126`:
+See the canonical spec map in `spec/MVP.md`.
 
-**MVP+1 (next):**
-- Stdio MCP server mode (`awr serve`) so Claude Code can attach AWR as
-  a native MCP tool server.
-- Agent stdin/stdout JSON protocol (`awr agent`).
-- Local HTTP server for the mock fixture (`awr mock`).
-- `std.Io`-based HTTP/HTTPS rewrite (DEV_NOTES #6).
-
-**Phase 3 (bot-detection track):**
-- JA4+ TLS fingerprint matching (Chrome 132).
-- H2 SETTINGS / header order fidelity.
-- Canvas / AudioContext / WebGL fingerprint synthesis.
-- libvaxis TUI renderer.
-
-**Phase 3 JS surface:**
-- Real `setTimeout` / `setInterval` dispatch via libxev.
-- `fetch()` wired to the Zig HTTP client.
-- Event loop for `requestAnimationFrame`.
+- **Closure record:** `spec/subspecs/mvp-remainder.md`
+- **Deferred MCP stdio:** `spec/subspecs/mcp-stdio.md`
+- **Deferred browser/TUI:** `spec/subspecs/browser-tui.md`
+- **Deferred fingerprint roadmap:** `spec/Fingerprint-Plan.md`
 
 ---
 
@@ -210,22 +168,25 @@ Per `spec/PRD.md` and `MVP_PLAN.md:111-126`:
 src/
   main.zig          CLI entry; subcommand dispatch
   page.zig          Page (owns HTTP client + JS engine); WebMCP callTool
-  client.zig        Fetch orchestration (HTTP stubs here)
+  client.zig        Fetch orchestration for the shipped CLI/browser path
   dom/
     bridge.zig      JS↔DOM polyfill + WebMCP host
     node.zig        Zig DOM tree (from lexbor); querySelector*
   html/             lexbor parse wrapper
-  js/engine.zig     QuickJS-NG wrapper; console/timer/fetch stubs
+  js/engine.zig     QuickJS-NG wrapper; console/timer/fetch runtime hooks
   net/              HTTP/1.1, H2, TCP, TLS, cookies, URL, CA bundle
 experiments/
   webmcp_mock.html  3-tool mock shop (search_products, get_price, add_to_cart)
 docs/
   agent-integration.md   How to wire AWR into an agent
 spec/
-  PRD.md            Product spec (MVP definition defers to spec/MVP.md)
-  MVP.md            Authoritative MVP contract: FRs, acceptance tests, stub-closure checklist
-  Phase1-Networking-TLS.md
-  Phase2-Plan.md
+  MVP.md            Canonical umbrella spec
+  PRD.md            Product context only; non-canonical for execution
+  Fingerprint-Plan.md
+  subspecs/
+    mvp-remainder.md
+    mcp-stdio.md
+    browser-tui.md
 third_party/lexbor/       Build notes for lexbor dependency
 ```
 
@@ -238,7 +199,7 @@ Highest-priority:
 
 1. #1  `zig-pkg/quickjs_ng/build.zig` patched in-place (cache-wipe fragile).
 2. #2  `libxev` pinned to moving `refs/heads/main.tar.gz`.
-3. #6  HTTP/HTTPS fetch stubbed (MVP+1 unblocker).
+3. #6  standalone network/runtime debt beyond the shipped CLI/browser MVP path.
 4. #9  `JS_Eval` sentinel-termination is caller-enforced — would be
        nicer enforced by the type system (`evalOwned([:0]const u8)`).
 5. #10 CSS selector coverage via lexbor's own selector engine.

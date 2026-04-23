@@ -1,7 +1,10 @@
-# AWR Phase 3 Plan — TLS Fingerprinting & Real Browser Identity
+# AWR Fingerprint Roadmap — Future Work Only
 
-> **Status:** PLANNING — Not yet started
-> **Prerequisite:** Phase 2 complete ✅ — 410/410 tests passing, 30/30 build steps
+> **Status:** DEFERRED ROADMAP — not part of the active work queue.
+> Use `spec/MVP.md` and `spec/subspecs/mvp-remainder.md` for current execution.
+>
+> This file is kept to preserve the future fingerprinting design direction.
+> It should not be used as justification to start fingerprint work now.
 
 ---
 

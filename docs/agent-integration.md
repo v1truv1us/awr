@@ -7,8 +7,8 @@ shell out — Claude Code's Bash tool, Aider, a custom loop — can invoke
 page-hosted tools by calling the AWR CLI.
 
 This guide covers the MVP integration pattern: **agent → CLI → page →
-typed JSON**. A native stdio MCP server (`awr serve`) is tracked as
-MVP+1 in `MVP_PLAN.md:111-126`; until it lands, the CLI envelope
+typed JSON**. A native stdio MCP server remains a deferred track in
+`spec/subspecs/mcp-stdio.md`; until it is re-activated, the CLI envelope
 shape already matches the MCP `tools/list` + `tools/call` shape, so a
 thin shell wrapper is enough.
 
@@ -34,9 +34,7 @@ AWR's CLI is intentionally small so it composes with any agent:
 | `awr --version` | Print the build hash | `0.0.<git_hash>` |
 
 `<url>` can be an `http(s)://` URL, a `file://` URL, or a bare
-filesystem path. (HTTP/HTTPS fetch is currently stubbed on Zig 0.16;
-use `file://` or a local path for the MVP. Durable fix is tracked in
-`DEV_NOTES.md:71-87` (#6).)
+filesystem path.
 
 ## End-to-end demo against the mock fixture
 
@@ -72,7 +70,8 @@ piping into any agent's toolchain.
 
 ## Wiring AWR into Claude Code
 
-Claude Code does not speak MCP stdio to AWR directly yet (that's MVP+1).
+Claude Code does not speak MCP stdio to AWR directly yet (that remains a
+deferred track).
 The reference integration uses Claude Code's **Bash tool** as the
 transport:
 
@@ -155,24 +154,18 @@ chain completes before the envelope is emitted.
 
 ## Limits and gotchas
 
-- **`<script src>` is not fetched** — external scripts are skipped. The
-  MVP targets pages whose WebMCP registration is inline.
-- **HTTP/HTTPS fetch is stubbed** on Zig 0.16 (`src/client.zig:122-139`).
-  Use `file://` or bare paths until the `std.Io`-based rewrite lands
-  (`DEV_NOTES.md:71-87`).
-- **CSS selector support is minimal** — `tag`, `#id`, `.class`,
-  `tag#id`, `tag.class`, and descendant combinators (`#a b c`). Attribute
-  selectors, pseudo-classes, and `>`/`+`/`~` are not supported
-  (`DEV_NOTES.md` #10).
-- **`setTimeout` / `fetch` inside the page are no-ops / rejected** —
-  async work must resolve synchronously or through `Promise.resolve`
-  chains; scheduled callbacks never fire (Phase 3).
+- **Native MCP stdio is still deferred** — use the CLI shell bridge as the
+  supported agent integration surface.
+- **AWR is still a partial browser runtime** — event listeners and observer
+  APIs are present primarily so real pages do not throw, not as a claim of full
+  browser event semantics.
+- **Selector and DOM support are targeted, not exhaustive** — the shipped
+  bridge covers the current fixture/WPT set used by the CLI/browser MVP path.
 
 ## Related specs
 
-- `spec/MVP.md` — authoritative MVP contract (FRs, acceptance tests,
-  stub-closure checklist).
-- `spec/PRD.md` — product spec; the "## MVP Definition" section defers
-  to `spec/MVP.md`.
-- `MVP_PLAN.md` — the 7-step v1 slice this MVP shipped.
-- `DEV_NOTES.md` — patch-debt items and durable-fix plans.
+- `spec/MVP.md` — canonical umbrella spec and top-level change-control point.
+- `spec/subspecs/mvp-remainder.md` — closure record for the shipped browser-runtime MVP path.
+- `spec/subspecs/mcp-stdio.md` — deferred native MCP stdio track.
+- `spec/subspecs/browser-tui.md` and `spec/Fingerprint-Plan.md` — deferred tracks.
+- `DEV_NOTES.md` — implementation notes and durable-fix follow-ups.

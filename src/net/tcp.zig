@@ -159,7 +159,7 @@ pub const TcpConn = struct {
         if (self.state == .closed) return;
         self.state = .draining;
         if (self.socket) |s| {
-            posix.close(s.fd);
+            _ = std.c.close(s.fd);
             self.socket = null;
         }
         self.state = .closed;
@@ -282,23 +282,27 @@ test "TcpConn connect + write + read roundtrip via local echo server" {
 
     const ServerCtx = struct {
         addr: std.Io.net.IpAddress,
-        ready: std.Thread.Semaphore = .{},
+        ready: std.Io.Semaphore = .{},
 
         fn serve(ctx: *@This()) void {
-            var server = ctx.addr.listen(.{ .reuse_address = true }) catch return;
-            defer server.deinit();
-            ctx.ready.post();
-            const connection = server.accept() catch return;
-            defer connection.stream.close();
+            var server = ctx.addr.listen(std.testing.io, .{ .reuse_address = true }) catch return;
+            defer server.deinit(std.testing.io);
+            ctx.ready.post(std.testing.io);
+            const connection = server.accept(std.testing.io) catch return;
+            defer connection.close(std.testing.io);
+            var read_storage: [64]u8 = undefined;
+            var write_storage: [64]u8 = undefined;
+            var reader = connection.reader(std.testing.io, &read_storage);
+            var writer = connection.writer(std.testing.io, &write_storage);
             var echo_buf: [64]u8 = undefined;
-            const n = connection.stream.read(&echo_buf) catch return;
-            _ = connection.stream.write(echo_buf[0..n]) catch {};
+            const n = reader.interface.readSliceShort(&echo_buf) catch return;
+            writer.interface.writeAll(echo_buf[0..n]) catch return;
         }
     };
 
     var ctx = ServerCtx{ .addr = addr };
     const thread = try std.Thread.spawn(.{}, ServerCtx.serve, .{&ctx});
-    ctx.ready.wait();
+    ctx.ready.waitUncancelable(std.testing.io);
     defer thread.join();
 
     var conn = try TcpConn.init(std.testing.allocator, addr);

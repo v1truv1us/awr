@@ -2,7 +2,13 @@
 
 **Version**: 0.1.0
 **Date**: 2026-03-21
-**Status**: Draft — Pre-Implementation
+**Status**: Background product context — non-canonical for execution
+
+> **Use this doc for product rationale, not execution planning.**
+> The canonical implementation spec is `spec/MVP.md`.
+> Active work is tracked in `spec/subspecs/mvp-remainder.md`.
+> Deferred work is tracked in the other sub-specs under `spec/subspecs/` and in
+> `spec/Fingerprint-Plan.md`.
 
 ---
 
