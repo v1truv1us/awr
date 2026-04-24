@@ -41,7 +41,16 @@ pub const TlsConn = struct {
     pub fn connect(ctx: *TlsCtx, fd: std.posix.fd_t, hostname: [*:0]const u8) TlsError!TlsConn {
         const ssl = c.awr_tls_conn_new(ctx.inner, fd, hostname) orelse
             return TlsError.HandshakeFailed;
+        return fromConnectedSsl(ssl, fd);
+    }
 
+    pub fn connectNoAlps(ctx: *TlsCtx, fd: std.posix.fd_t, hostname: [*:0]const u8) TlsError!TlsConn {
+        const ssl = c.awr_tls_conn_new_no_alps(ctx.inner, fd, hostname) orelse
+            return TlsError.HandshakeFailed;
+        return fromConnectedSsl(ssl, fd);
+    }
+
+    fn fromConnectedSsl(ssl: *c.awr_ssl_t, fd: std.posix.fd_t) TlsConn {
         const alpn = blk: {
             var proto: [*c]const u8 = null;
             var proto_len: c_uint = 0;
@@ -94,6 +103,11 @@ pub const TlsCtx = struct {
         return TlsCtx{ .inner = ctx };
     }
 
+    pub fn initCompatHttp11() TlsError!TlsCtx {
+        const ctx = c.awr_tls_ctx_new_compat_http11() orelse return TlsError.CtxAllocFailed;
+        return TlsCtx{ .inner = ctx };
+    }
+
     pub fn deinit(self: *TlsCtx) void {
         c.awr_tls_ctx_free(self.inner);
         self.inner = undefined;
@@ -111,6 +125,15 @@ pub const TlsCtx = struct {
 pub fn initWithBundle() TlsError!TlsCtx {
     const ca_bundle = @import("ca_bundle.zig");
     var ctx = try TlsCtx.init();
+    errdefer ctx.deinit();
+    try ca_bundle.load(&ctx);
+    _ = c.awr_tls_load_default_paths(ctx.inner);
+    return ctx;
+}
+
+pub fn initCompatHttp11WithBundle() TlsError!TlsCtx {
+    const ca_bundle = @import("ca_bundle.zig");
+    var ctx = try TlsCtx.initCompatHttp11();
     errdefer ctx.deinit();
     try ca_bundle.load(&ctx);
     _ = c.awr_tls_load_default_paths(ctx.inner);
@@ -552,7 +575,6 @@ test "integration: comprehensive TLS fingerprint verification against tls.peet.w
     if (root.get("http_version")) |v| {
         try std.testing.expect(std.mem.indexOf(u8, v.string, "HTTP/1.1") != null);
     }
-
 }
 
 test "integration: JA4 proves cipher suite hash matches AWR configuration" {

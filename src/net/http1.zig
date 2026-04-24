@@ -14,6 +14,14 @@ pub const Header = struct {
     value: []const u8,
 };
 
+pub const ReadResponseError = error{
+    EndOfStreamInStatusLine,
+    EndOfStreamInHeaders,
+    EndOfStreamInChunkSize,
+    EndOfStreamInChunkData,
+    EndOfStreamInChunkTerminator,
+};
+
 /// Ordered header list. Insertion order preserved — required for fingerprinting.
 pub const HeaderList = struct {
     items: std.ArrayList(Header) = .empty,
@@ -50,7 +58,7 @@ pub const Method = enum { GET, POST, PUT, DELETE, HEAD, OPTIONS, PATCH };
 
 pub const Request = struct {
     method: Method,
-    path: []const u8,     // e.g. "/index.html" or "/search?q=zig"
+    path: []const u8, // e.g. "/index.html" or "/search?q=zig"
     host: []const u8,
     headers: HeaderList = .{},
     body: ?[]const u8 = null,
@@ -77,30 +85,27 @@ pub const Request = struct {
     /// Add Chrome 132 default headers in canonical fingerprint order.
     pub fn setChrome132Defaults(self: *Request, allocator: std.mem.Allocator) !void {
         // Pseudo-headers first (filtered on write, but stored for H2 reuse)
-        try self.headers.append(allocator, ":method",    @tagName(self.method));
+        try self.headers.append(allocator, ":method", @tagName(self.method));
         try self.headers.append(allocator, ":authority", self.host);
-        try self.headers.append(allocator, ":scheme",    "https");
-        try self.headers.append(allocator, ":path",      self.path);
+        try self.headers.append(allocator, ":scheme", "https");
+        try self.headers.append(allocator, ":path", self.path);
         // HTTP/1.1 Host header — required by RFC 7230 §5.4; skipped in H2
         // because :authority carries the same information.
         try self.headers.append(allocator, "host", self.host);
         // Regular headers in Chrome 132 order
-        try self.headers.append(allocator, "accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
-        try self.headers.append(allocator, "accept-encoding",  "gzip, deflate, br, zstd");
-        try self.headers.append(allocator, "accept-language",  "en-US,en;q=0.9");
-        try self.headers.append(allocator, "cache-control",    "max-age=0");
-        try self.headers.append(allocator, "sec-ch-ua",
-            "\"Not A(Brand\";v=\"8\", \"Chromium\";v=\"132\", \"Google Chrome\";v=\"132\"");
-        try self.headers.append(allocator, "sec-ch-ua-mobile",   "?0");
+        try self.headers.append(allocator, "accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
+        try self.headers.append(allocator, "accept-encoding", "gzip, deflate, br, zstd");
+        try self.headers.append(allocator, "accept-language", "en-US,en;q=0.9");
+        try self.headers.append(allocator, "cache-control", "max-age=0");
+        try self.headers.append(allocator, "sec-ch-ua", "\"Not A(Brand\";v=\"8\", \"Chromium\";v=\"132\", \"Google Chrome\";v=\"132\"");
+        try self.headers.append(allocator, "sec-ch-ua-mobile", "?0");
         try self.headers.append(allocator, "sec-ch-ua-platform", "\"macOS\"");
-        try self.headers.append(allocator, "sec-fetch-dest",     "document");
-        try self.headers.append(allocator, "sec-fetch-mode",     "navigate");
-        try self.headers.append(allocator, "sec-fetch-site",     "none");
-        try self.headers.append(allocator, "sec-fetch-user",     "?1");
+        try self.headers.append(allocator, "sec-fetch-dest", "document");
+        try self.headers.append(allocator, "sec-fetch-mode", "navigate");
+        try self.headers.append(allocator, "sec-fetch-site", "none");
+        try self.headers.append(allocator, "sec-fetch-user", "?1");
         try self.headers.append(allocator, "upgrade-insecure-requests", "1");
-        try self.headers.append(allocator, "user-agent",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36");
+        try self.headers.append(allocator, "user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36");
     }
 };
 
@@ -119,7 +124,7 @@ pub const Response = struct {
 
     pub fn isRedirect(self: *const Response) bool {
         return self.status == 301 or self.status == 302 or
-               self.status == 307 or self.status == 308;
+            self.status == 307 or self.status == 308;
     }
 
     pub fn location(self: *const Response) ?[]const u8 {
@@ -130,24 +135,31 @@ pub const Response = struct {
 /// Parse an HTTP/1.1 response from `reader`. Caller must call `response.deinit()`.
 pub fn readResponse(reader: anytype, allocator: std.mem.Allocator) !Response {
     // Status line: "HTTP/1.1 200 OK\r\n"
-    var status_buf: [256]u8 = undefined;
-    const status_line = try reader.readUntilDelimiter(&status_buf, '\n');
+    var status_buf: [1024]u8 = undefined;
+    const status_line = reader.readUntilDelimiter(&status_buf, '\n') catch |err| switch (err) {
+        error.EndOfStream => return ReadResponseError.EndOfStreamInStatusLine,
+        else => |e| return e,
+    };
     const status = try parseStatus(status_line);
 
     // Headers (response-owned: deinit must free name+value strings)
     var headers = HeaderList{ .owns_strings = true };
+    errdefer headers.deinit(allocator);
     while (true) {
-        var header_buf: [8192]u8 = undefined;
-        const line = try reader.readUntilDelimiter(&header_buf, '\n');
-        const trimmed = std.mem.trimRight(u8, line, "\r");
+        var header_buf: [64 * 1024]u8 = undefined;
+        const line = reader.readUntilDelimiter(&header_buf, '\n') catch |err| switch (err) {
+            error.EndOfStream => return ReadResponseError.EndOfStreamInHeaders,
+            else => |e| return e,
+        };
+        const trimmed = std.mem.trimEnd(u8, line, "\r\n");
         if (trimmed.len == 0) break; // blank line = end of headers
 
         const colon = std.mem.indexOfScalar(u8, trimmed, ':') orelse continue;
-        const name  = std.mem.trim(u8, trimmed[0..colon], " ");
+        const name = std.mem.trim(u8, trimmed[0..colon], " ");
         const value = std.mem.trim(u8, trimmed[colon + 1 ..], " ");
 
         // Allocate copies for the response-owned header strings
-        const name_owned  = try allocator.dupe(u8, name);
+        const name_owned = try allocator.dupe(u8, name);
         errdefer allocator.free(name_owned);
         const value_owned = try allocator.dupe(u8, value);
         errdefer allocator.free(value_owned);
@@ -162,7 +174,7 @@ pub fn readResponse(reader: anytype, allocator: std.mem.Allocator) !Response {
 
 fn parseStatus(line: []const u8) !u16 {
     // "HTTP/1.1 200 OK\r" or "HTTP/1.1 200 OK"
-    const trimmed = std.mem.trimRight(u8, line, "\r");
+    const trimmed = std.mem.trimEnd(u8, line, "\r\n");
     // Find second space
     const first_space = std.mem.indexOfScalar(u8, trimmed, ' ') orelse return error.BadStatusLine;
     const rest = trimmed[first_space + 1 ..];
@@ -172,7 +184,7 @@ fn parseStatus(line: []const u8) !u16 {
 
 fn readBody(reader: anytype, headers: *const HeaderList, allocator: std.mem.Allocator) ![]u8 {
     if (headers.get("transfer-encoding")) |te| {
-        if (std.ascii.eqlIgnoreCase(te, "chunked")) {
+        if (transferEncodingIsChunked(te)) {
             return readChunkedBody(reader, allocator);
         }
     }
@@ -182,38 +194,101 @@ fn readBody(reader: anytype, headers: *const HeaderList, allocator: std.mem.Allo
         try reader.readNoEof(body);
         return body;
     }
-    // No body
-    return allocator.dupe(u8, "");
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(allocator);
+    var buf: [8192]u8 = undefined;
+    while (true) {
+        const n = try reader.read(&buf);
+        if (n == 0) break;
+        try body.appendSlice(allocator, buf[0..n]);
+    }
+    return body.toOwnedSlice(allocator);
+}
+
+fn transferEncodingIsChunked(value: []const u8) bool {
+    var last: []const u8 = "";
+    var it = std.mem.splitScalar(u8, value, ',');
+    while (it.next()) |part| {
+        const coding = std.mem.trim(u8, part, " \t");
+        if (coding.len != 0) last = coding;
+    }
+    return std.ascii.eqlIgnoreCase(last, "chunked");
 }
 
 fn readChunkedBody(reader: anytype, allocator: std.mem.Allocator) ![]u8 {
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    var size_buf: [32]u8 = undefined;
+    var size_buf: [256]u8 = undefined;
     while (true) {
         // Chunk size line (hex)
-        const size_line = try reader.readUntilDelimiter(&size_buf, '\n');
-        const size_str = std.mem.trimRight(u8, size_line, "\r");
+        const size_line = reader.readUntilDelimiter(&size_buf, '\n') catch |err| switch (err) {
+            error.EndOfStream => return ReadResponseError.EndOfStreamInChunkSize,
+            else => |e| return e,
+        };
+        const trimmed_size_line = std.mem.trimEnd(u8, size_line, "\r\n");
+        const ext_start = std.mem.indexOfScalar(u8, trimmed_size_line, ';') orelse trimmed_size_line.len;
+        const size_str = trimmed_size_line[0..ext_start];
         const chunk_size = std.fmt.parseInt(usize, size_str, 16) catch return error.BadChunkSize;
         if (chunk_size == 0) break; // last chunk
 
         const start = buf.items.len;
         try buf.resize(allocator, start + chunk_size);
-        try reader.readNoEof(buf.items[start..]);
+        reader.readNoEof(buf.items[start..]) catch |err| switch (err) {
+            error.EndOfStream => return ReadResponseError.EndOfStreamInChunkData,
+            else => |e| return e,
+        };
 
         // Consume trailing CRLF after chunk data
         var crlf: [2]u8 = undefined;
-        try reader.readNoEof(&crlf);
+        reader.readNoEof(&crlf) catch |err| switch (err) {
+            error.EndOfStream => return ReadResponseError.EndOfStreamInChunkTerminator,
+            else => |e| return e,
+        };
     }
-    // Consume trailing CRLF after "0\r\n"
-    var trailing: [2]u8 = undefined;
-    _ = reader.readNoEof(&trailing) catch {};
+    while (true) {
+        var trailer_buf: [8192]u8 = undefined;
+        const line = reader.readUntilDelimiter(&trailer_buf, '\n') catch break;
+        if (std.mem.trimEnd(u8, line, "\r\n").len == 0) break;
+    }
 
     return buf.toOwnedSlice(allocator);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
+
+const TestReader = struct {
+    data: []const u8,
+    pos: usize = 0,
+
+    fn read(self: *TestReader, dest: []u8) error{}!usize {
+        const remaining = self.data[self.pos..];
+        const n = @min(dest.len, remaining.len);
+        @memcpy(dest[0..n], remaining[0..n]);
+        self.pos += n;
+        return n;
+    }
+
+    fn readUntilDelimiter(self: *TestReader, out: []u8, delim: u8) ![]u8 {
+        var len: usize = 0;
+        while (len < out.len) {
+            const n = try self.read(out[len .. len + 1]);
+            if (n == 0) return error.EndOfStream;
+            len += n;
+            if (out[len - 1] == delim) return out[0..len];
+        }
+        return error.StreamTooLong;
+    }
+
+    fn readNoEof(self: *TestReader, dest: []u8) !void {
+        var filled: usize = 0;
+        while (filled < dest.len) {
+            const n = try self.read(dest[filled..]);
+            if (n == 0) return error.EndOfStream;
+            filled += n;
+        }
+    }
+};
 
 test "Request.write produces correct request line" {
     const allocator = std.testing.allocator;
@@ -289,35 +364,46 @@ test "Request.setChrome132Defaults pseudo-headers come first" {
     defer req.headers.deinit(allocator);
     try req.setChrome132Defaults(allocator);
 
-    try std.testing.expectEqualStrings(":method",    req.headers.items.items[0].name);
+    try std.testing.expectEqualStrings(":method", req.headers.items.items[0].name);
     try std.testing.expectEqualStrings(":authority", req.headers.items.items[1].name);
-    try std.testing.expectEqualStrings(":scheme",    req.headers.items.items[2].name);
-    try std.testing.expectEqualStrings(":path",      req.headers.items.items[3].name);
+    try std.testing.expectEqualStrings(":scheme", req.headers.items.items[2].name);
+    try std.testing.expectEqualStrings(":path", req.headers.items.items[3].name);
 }
 
-// TODO(zig-0.16): std.io.fixedBufferStream + GenericReader are gone and
-// readResponse itself still references readUntilDelimiter/readNoEof from the
-// pre-0.16 Reader. The owned HTTP/1.1 path is currently stubbed in client.zig
-// (see fetchHttp) and these tests are skipped until the stack is rewritten
-// against std.Io.Reader. Tracked in DEV_NOTES.md → "Owned HTTP stack rewrite".
 test "readResponse parses 200 status" {
-    return error.SkipZigTest;
+    var reader = TestReader{ .data = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" };
+    var resp = try readResponse(&reader, std.testing.allocator);
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
 }
 
 test "readResponse parses 301 redirect" {
-    return error.SkipZigTest;
+    var reader = TestReader{ .data = "HTTP/1.1 301 Moved Permanently\r\nLocation: https://example.com/\r\nContent-Length: 0\r\n\r\n" };
+    var resp = try readResponse(&reader, std.testing.allocator);
+    defer resp.deinit();
+    try std.testing.expect(resp.isRedirect());
+    try std.testing.expectEqualStrings("https://example.com/", resp.location().?);
 }
 
 test "readResponse reads content-length body" {
-    return error.SkipZigTest;
+    var reader = TestReader{ .data = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" };
+    var resp = try readResponse(&reader, std.testing.allocator);
+    defer resp.deinit();
+    try std.testing.expectEqualStrings("hello", resp.body);
 }
 
 test "readResponse reads chunked body" {
-    return error.SkipZigTest;
+    var reader = TestReader{ .data = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5;ext=1\r\nhello\r\n0\r\n\r\n" };
+    var resp = try readResponse(&reader, std.testing.allocator);
+    defer resp.deinit();
+    try std.testing.expectEqualStrings("hello", resp.body);
 }
 
-test "readResponse handles keep-alive (no body when Content-Length absent)" {
-    return error.SkipZigTest;
+test "readResponse reads close-delimited body" {
+    var reader = TestReader{ .data = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello" };
+    var resp = try readResponse(&reader, std.testing.allocator);
+    defer resp.deinit();
+    try std.testing.expectEqualStrings("hello", resp.body);
 }
 
 test "HeaderList.get is case-insensitive" {

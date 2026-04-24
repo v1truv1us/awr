@@ -154,6 +154,24 @@ fail:
     return NULL;
 }
 
+awr_ssl_ctx_t *awr_tls_ctx_new_compat_http11(void) {
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) return NULL;
+
+    static const uint8_t h11[] = { 0x08, 'h','t','t','p','/','1','.','1' };
+    if (SSL_CTX_set_alpn_protos(ctx, h11, sizeof(h11)) != 0)
+        goto fail;
+
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+    X509_STORE_set_flags(SSL_CTX_get_cert_store(ctx), X509_V_FLAG_PARTIAL_CHAIN);
+
+    return (awr_ssl_ctx_t *)ctx;
+
+fail:
+    SSL_CTX_free(ctx);
+    return NULL;
+}
+
 void awr_tls_ctx_free(awr_ssl_ctx_t *ctx) {
     SSL_CTX_free((SSL_CTX *)ctx);
 }
@@ -193,7 +211,7 @@ int awr_tls_load_default_paths(awr_ssl_ctx_t *ctx) {
 
 /* ── Connection lifecycle ───────────────────────────────────────────────── */
 
-awr_ssl_t *awr_tls_conn_new(awr_ssl_ctx_t *ctx, int fd, const char *hostname) {
+static awr_ssl_t *awr_tls_conn_new_impl(awr_ssl_ctx_t *ctx, int fd, const char *hostname, int add_alps) {
     SSL *ssl = SSL_new((SSL_CTX *)ctx);
     if (!ssl) return NULL;
 
@@ -204,7 +222,7 @@ awr_ssl_t *awr_tls_conn_new(awr_ssl_ctx_t *ctx, int fd, const char *hostname) {
         goto fail;
 
     /* ALPS for h2 — must be set per-connection, not on SSL_CTX */
-    {
+    if (add_alps) {
         static const uint8_t h2_proto[] = { 'h', '2' };
         uint8_t alps_buf[ALPS_BUF_SIZE];
         awr_h2_alps_encode_settings(alps_buf);
@@ -232,6 +250,14 @@ awr_ssl_t *awr_tls_conn_new(awr_ssl_ctx_t *ctx, int fd, const char *hostname) {
 fail:
     SSL_free(ssl);
     return NULL;
+}
+
+awr_ssl_t *awr_tls_conn_new(awr_ssl_ctx_t *ctx, int fd, const char *hostname) {
+    return awr_tls_conn_new_impl(ctx, fd, hostname, 1);
+}
+
+awr_ssl_t *awr_tls_conn_new_no_alps(awr_ssl_ctx_t *ctx, int fd, const char *hostname) {
+    return awr_tls_conn_new_impl(ctx, fd, hostname, 0);
 }
 
 void awr_tls_conn_free(awr_ssl_t *ssl) {

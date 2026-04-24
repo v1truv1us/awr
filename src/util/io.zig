@@ -32,6 +32,10 @@ pub fn BlockingReader(
         const Self = @This();
         pub const Error = InnerError || error{ EndOfStream, StreamTooLong };
 
+        pub fn read(self: Self, dest: []u8) InnerError!usize {
+            return readFn(self.context, dest);
+        }
+
         /// Read up to one occurrence of `delim` into `buf`, returning
         /// the slice including the delimiter. Returns `StreamTooLong`
         /// if `buf` fills before `delim` is seen, and `EndOfStream`

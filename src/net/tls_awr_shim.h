@@ -37,6 +37,9 @@ extern "C" {
  */
 awr_ssl_ctx_t *awr_tls_ctx_new(void);
 
+/** awr_tls_ctx_new_compat_http11 — default BoringSSL client context for HTTP/1.1 fallback. */
+awr_ssl_ctx_t *awr_tls_ctx_new_compat_http11(void);
+
 /** awr_tls_ctx_free — release an SSL_CTX returned by awr_tls_ctx_new. */
 void awr_tls_ctx_free(awr_ssl_ctx_t *ctx);
 
@@ -73,6 +76,9 @@ int awr_tls_load_default_paths(awr_ssl_ctx_t *ctx);
  * Returns a new SSL* (already past SSL_connect) on success, NULL on failure.
  */
 awr_ssl_t *awr_tls_conn_new(awr_ssl_ctx_t *ctx, int fd, const char *hostname);
+
+/** awr_tls_conn_new_no_alps — TLS handshake without per-connection ALPS settings. */
+awr_ssl_t *awr_tls_conn_new_no_alps(awr_ssl_ctx_t *ctx, int fd, const char *hostname);
 
 /** awr_tls_conn_free — release an SSL* returned by awr_tls_conn_new. */
 void awr_tls_conn_free(awr_ssl_t *ssl);

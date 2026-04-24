@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target   = b.standardTargetOptions(.{});
+    const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     // ── Build options shared with Zig modules ──────────────────────────────
@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
     // ergonomic alternative for CI builds.
     const opts_mod = b.createModule(.{
         .root_source_file = b.path("src/build_opts.zig"),
-        .target   = target,
+        .target = target,
         .optimize = optimize,
     });
 
@@ -32,7 +32,8 @@ pub fn build(b: *std.Build) void {
     // that Debian/Ubuntu install into (plus /usr/local for source builds of
     // libraries that don't ship in apt).
     const host_os = @import("builtin").target.os.tag;
-    const is_mac  = host_os == .macos;
+    const is_mac = host_os == .macos;
+    const supports_boringssl = target.result.os.tag == .macos and target.result.cpu.arch == .aarch64;
     const lexbor_prefix_opt = b.option([]const u8, "lexbor-prefix", "Install prefix containing lexbor include/ and lib/");
 
     const nghttp2_include_sys: std.Build.LazyPath = if (is_mac)
@@ -56,42 +57,42 @@ pub fn build(b: *std.Build) void {
 
     // ── BoringSSL paths (vendored in third_party/) ────────────────────────
     // Pre-built static libs for macOS/arm64. See third_party/boringssl/BUILD_NOTES.md to rebuild.
-    const boringssl_include  = b.path("third_party/boringssl/include");
-    const boringssl_lib_ssl  = b.path("third_party/boringssl/lib/macos-arm64/libssl.a");
+    const boringssl_include = b.path("third_party/boringssl/include");
+    const boringssl_lib_ssl = b.path("third_party/boringssl/lib/macos-arm64/libssl.a");
     const boringssl_lib_crpt = b.path("third_party/boringssl/lib/macos-arm64/libcrypto.a");
 
     // ── Test steps ────────────────────────────────────────────────────────
-    const test_step        = b.step("test",        "Run all unit tests");
-    const test_net_step    = b.step("test-net",    "Run src/net unit tests");
-    const test_js_step     = b.step("test-js",     "Run src/js unit tests");
-    const test_html_step   = b.step("test-html",   "Run src/html unit tests");
-    const test_dom_step    = b.step("test-dom",    "Run src/dom unit tests");
+    const test_step = b.step("test", "Run all unit tests");
+    const test_net_step = b.step("test-net", "Run src/net unit tests");
+    const test_js_step = b.step("test-js", "Run src/js unit tests");
+    const test_html_step = b.step("test-html", "Run src/html unit tests");
+    const test_dom_step = b.step("test-dom", "Run src/dom unit tests");
     const test_client_step = b.step("test-client", "Run src/client unit tests");
-    const test_h2_step     = b.step("test-h2",     "Run h2session and HTTP/2 frame tests");
-    const test_page_step   = b.step("test-page",   "Run src/page tests (unit + integration, requires network)");
-    const test_tls_step    = b.step("test-tls",    "Run BoringSSL smoke + tls_conn unit tests");
-    const test_e2e_step    = b.step("test-e2e",    "Run end-to-end integration tests (requires network)");
-    const test_wpt_step    = b.step("test-wpt",    "Run curated WPT browser-runtime tests");
+    const test_h2_step = b.step("test-h2", "Run h2session and HTTP/2 frame tests");
+    const test_page_step = b.step("test-page", "Run src/page tests (unit + integration, requires network)");
+    const test_tls_step = b.step("test-tls", "Run BoringSSL smoke + tls_conn unit tests");
+    const test_e2e_step = b.step("test-e2e", "Run end-to-end integration tests (requires network)");
+    const test_wpt_step = b.step("test-wpt", "Run curated WPT browser-runtime tests");
     const test_test262_step = b.step("test-test262", "Run curated Test262 JS runtime tests");
 
     // ── Net layer modules (pure-Zig, no C deps) ───────────────────────────
     const pure_net_modules = [_]struct { name: []const u8, src: []const u8 }{
         .{ .name = "fingerprint", .src = "src/net/fingerprint.zig" },
-        .{ .name = "cookie",      .src = "src/net/cookie.zig" },
-        .{ .name = "http1",       .src = "src/net/http1.zig" },
-        .{ .name = "http2",       .src = "src/net/http2.zig" },
-        .{ .name = "pool",        .src = "src/net/pool.zig" },
-        .{ .name = "url",         .src = "src/net/url.zig" },
+        .{ .name = "cookie", .src = "src/net/cookie.zig" },
+        .{ .name = "http1", .src = "src/net/http1.zig" },
+        .{ .name = "http2", .src = "src/net/http2.zig" },
+        .{ .name = "pool", .src = "src/net/pool.zig" },
+        .{ .name = "url", .src = "src/net/url.zig" },
     };
 
     for (pure_net_modules) |m| {
         const mod = b.createModule(.{
             .root_source_file = b.path(m.src),
-            .target   = target,
+            .target = target,
             .optimize = optimize,
         });
         const t = b.addTest(.{
-            .name        = m.name,
+            .name = m.name,
             .root_module = mod,
         });
         const run_t = b.addRunArtifact(t);
@@ -104,12 +105,12 @@ pub fn build(b: *std.Build) void {
     {
         const tcp_mod = b.createModule(.{
             .root_source_file = b.path("src/net/tcp.zig"),
-            .target   = target,
+            .target = target,
             .optimize = optimize,
         });
         tcp_mod.addImport("xev", xev_mod);
         const tcp_test = b.addTest(.{
-            .name        = "tcp",
+            .name = "tcp",
             .root_module = tcp_mod,
         });
         const run_tcp = b.addRunArtifact(tcp_test);
@@ -121,12 +122,12 @@ pub fn build(b: *std.Build) void {
     {
         const h2mod = b.createModule(.{
             .root_source_file = b.path("src/net/h2session.zig"),
-            .target   = target,
+            .target = target,
             .optimize = optimize,
             .link_libc = true,
         });
         h2mod.addCSourceFile(.{
-            .file  = b.path("src/net/h2_shim.c"),
+            .file = b.path("src/net/h2_shim.c"),
             .flags = &.{ "-std=c11", "-Wall" },
         });
         h2mod.addIncludePath(nghttp2_include);
@@ -134,7 +135,7 @@ pub fn build(b: *std.Build) void {
         h2mod.addLibraryPath(nghttp2_lib);
         h2mod.linkSystemLibrary("nghttp2", .{});
         const h2test = b.addTest(.{
-            .name        = "h2session",
+            .name = "h2session",
             .root_module = h2mod,
         });
         const run_h2 = b.addRunArtifact(h2test);
@@ -147,7 +148,7 @@ pub fn build(b: *std.Build) void {
     {
         const js_mod = b.createModule(.{
             .root_source_file = b.path("src/js/engine.zig"),
-            .target   = target,
+            .target = target,
             .optimize = optimize,
         });
         js_mod.addImport("quickjs", qjs_mod);
@@ -155,9 +156,9 @@ pub fn build(b: *std.Build) void {
         js_mod.linkLibrary(qjs_dep.artifact("quickjs-ng"));
 
         const js_test = b.addTest(.{
-            .name        = "js",
+            .name = "js",
             .root_module = js_mod,
-            .use_llvm    = true, // required — QuickJS-NG crashes with self-hosted backend
+            .use_llvm = true, // required — QuickJS-NG crashes with self-hosted backend
         });
         const run_js = b.addRunArtifact(js_test);
         test_step.dependOn(&run_js.step);
@@ -168,7 +169,7 @@ pub fn build(b: *std.Build) void {
     {
         const html_mod = b.createModule(.{
             .root_source_file = b.path("src/html/parser.zig"),
-            .target   = target,
+            .target = target,
             .optimize = optimize,
             .link_libc = true,
         });
@@ -177,7 +178,7 @@ pub fn build(b: *std.Build) void {
         html_mod.linkSystemLibrary("lexbor", .{});
 
         const html_test = b.addTest(.{
-            .name        = "html",
+            .name = "html",
             .root_module = html_mod,
         });
         const run_html = b.addRunArtifact(html_test);
@@ -189,7 +190,7 @@ pub fn build(b: *std.Build) void {
     {
         const dom_mod = b.createModule(.{
             .root_source_file = b.path("src/dom/node.zig"),
-            .target   = target,
+            .target = target,
             .optimize = optimize,
             .link_libc = true,
         });
@@ -198,7 +199,7 @@ pub fn build(b: *std.Build) void {
         dom_mod.linkSystemLibrary("lexbor", .{});
 
         const dom_test = b.addTest(.{
-            .name        = "dom",
+            .name = "dom",
             .root_module = dom_mod,
         });
         const run_dom = b.addRunArtifact(dom_test);
@@ -210,9 +211,10 @@ pub fn build(b: *std.Build) void {
     {
         const page_mod = b.createModule(.{
             .root_source_file = b.path("src/page.zig"),
-            .target   = target,
+            .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .link_libcpp = supports_boringssl,
         });
         page_mod.addImport("xev", xev_mod);
         page_mod.addImport("quickjs", qjs_mod);
@@ -220,11 +222,12 @@ pub fn build(b: *std.Build) void {
         page_mod.addIncludePath(lexbor_include);
         page_mod.addLibraryPath(lexbor_lib);
         page_mod.linkSystemLibrary("lexbor", .{});
+        if (supports_boringssl) addBoringSslSupport(b, page_mod, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
 
         const page_test = b.addTest(.{
-            .name        = "page",
+            .name = "page",
             .root_module = page_mod,
-            .use_llvm    = true, // required for QuickJS-NG
+            .use_llvm = true, // required for QuickJS-NG
         });
         const run_page = b.addRunArtifact(page_test);
         test_step.dependOn(&run_page.step);
@@ -234,12 +237,15 @@ pub fn build(b: *std.Build) void {
     // ── Client module ─────────────────────────────────────────────────────
     const client_mod = b.createModule(.{
         .root_source_file = b.path("src/client.zig"),
-        .target   = target,
+        .target = target,
         .optimize = optimize,
+        .link_libc = supports_boringssl,
+        .link_libcpp = supports_boringssl,
     });
     client_mod.addImport("xev", xev_mod);
+    if (supports_boringssl) addBoringSslSupport(b, client_mod, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
     const client_test = b.addTest(.{
-        .name        = "client",
+        .name = "client",
         .root_module = client_mod,
     });
     const run_client = b.addRunArtifact(client_test);
@@ -252,9 +258,10 @@ pub fn build(b: *std.Build) void {
 
         const exe_page_mod = b.createModule(.{
             .root_source_file = b.path("src/page.zig"),
-            .target   = target,
+            .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .link_libcpp = supports_boringssl,
         });
         exe_page_mod.addImport("xev", xev_mod);
         exe_page_mod.addImport("build_opts", opts_mod);
@@ -263,35 +270,37 @@ pub fn build(b: *std.Build) void {
         exe_page_mod.addIncludePath(lexbor_include);
         exe_page_mod.addLibraryPath(lexbor_lib);
         exe_page_mod.linkSystemLibrary("lexbor", .{});
+        if (supports_boringssl) addBoringSslSupport(b, exe_page_mod, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
 
         const exe_mod = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
-            .target   = target,
+            .target = target,
             .optimize = optimize,
+            .link_libcpp = supports_boringssl,
         });
         exe_mod.addImport("page", exe_page_mod);
         exe_mod.addImport("build_opts", opts_mod);
 
         const exe = b.addExecutable(.{
-            .name        = "awr",
+            .name = "awr",
             .root_module = exe_mod,
-            .use_llvm    = true,
+            .use_llvm = true,
         });
         b.installArtifact(exe);
     }
 
     // ── BoringSSL smoke test (confirms libs link + headers resolve) ───────
     // macOS-only: vendored BoringSSL static libs are macos-arm64 only.
-    if (is_mac) {
+    if (supports_boringssl) {
         const tls_smoke_mod = b.createModule(.{
             .root_source_file = b.path("src/net/tls_smoke_test.zig"),
-            .target   = target,
+            .target = target,
             .optimize = optimize,
-            .link_libc   = true,
+            .link_libc = true,
             .link_libcpp = true, // BoringSSL is C++ (std::variant, exceptions, vtables)
         });
         tls_smoke_mod.addCSourceFile(.{
-            .file  = b.path("src/net/tls_awr_shim.c"),
+            .file = b.path("src/net/tls_awr_shim.c"),
             .flags = &.{ "-std=c11", "-Wall", "-Wextra" },
         });
         tls_smoke_mod.addIncludePath(b.path("src/net"));
@@ -300,7 +309,7 @@ pub fn build(b: *std.Build) void {
         tls_smoke_mod.addObjectFile(boringssl_lib_crpt);
 
         const tls_smoke = b.addTest(.{
-            .name        = "tls",
+            .name = "tls",
             .root_module = tls_smoke_mod,
         });
         const run_tls_smoke = b.addRunArtifact(tls_smoke);
@@ -310,13 +319,13 @@ pub fn build(b: *std.Build) void {
         // ── tls_conn module (BoringSSL Zig wrapper + shim) ────────────────
         const tls_conn_mod = b.createModule(.{
             .root_source_file = b.path("src/net/tls_conn.zig"),
-            .target   = target,
+            .target = target,
             .optimize = optimize,
-            .link_libc   = true,
+            .link_libc = true,
             .link_libcpp = true,
         });
         tls_conn_mod.addCSourceFile(.{
-            .file  = b.path("src/net/tls_awr_shim.c"),
+            .file = b.path("src/net/tls_awr_shim.c"),
             .flags = &.{ "-std=c11", "-Wall", "-Wextra" },
         });
         tls_conn_mod.addIncludePath(b.path("src/net"));
@@ -325,7 +334,7 @@ pub fn build(b: *std.Build) void {
         tls_conn_mod.addObjectFile(boringssl_lib_crpt);
 
         const tls_conn_test = b.addTest(.{
-            .name        = "tls_conn",
+            .name = "tls_conn",
             .root_module = tls_conn_mod,
         });
         const run_tls_conn = b.addRunArtifact(tls_conn_test);
@@ -336,12 +345,15 @@ pub fn build(b: *std.Build) void {
     // ── End-to-end integration tests (network required) ───────────────────
     const e2e_mod = b.createModule(.{
         .root_source_file = b.path("src/test_e2e.zig"),
-        .target   = target,
+        .target = target,
         .optimize = optimize,
+        .link_libc = supports_boringssl,
+        .link_libcpp = supports_boringssl,
     });
     e2e_mod.addImport("xev", xev_mod);
+    if (supports_boringssl) addBoringSslSupport(b, e2e_mod, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
     const e2e_test = b.addTest(.{
-        .name        = "e2e",
+        .name = "e2e",
         .root_module = e2e_mod,
     });
     const run_e2e = b.addRunArtifact(e2e_test);
@@ -354,6 +366,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .link_libcpp = supports_boringssl,
         });
         wpt_mod.addImport("xev", xev_mod);
         wpt_mod.addImport("quickjs", qjs_mod);
@@ -367,6 +380,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .link_libcpp = supports_boringssl,
         });
         page_import.addImport("xev", xev_mod);
         page_import.addImport("quickjs", qjs_mod);
@@ -374,6 +388,7 @@ pub fn build(b: *std.Build) void {
         page_import.addIncludePath(lexbor_include);
         page_import.addLibraryPath(lexbor_lib);
         page_import.linkSystemLibrary("lexbor", .{});
+        if (supports_boringssl) addBoringSslSupport(b, page_import, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
         wpt_mod.addImport("page", page_import);
 
         const wpt_test = b.addTest(.{
@@ -415,4 +430,21 @@ pub fn build(b: *std.Build) void {
         test_test262_step.dependOn(&run_test262.step);
         test_step.dependOn(&run_test262.step);
     }
+}
+
+fn addBoringSslSupport(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    boringssl_include: std.Build.LazyPath,
+    boringssl_lib_ssl: std.Build.LazyPath,
+    boringssl_lib_crpt: std.Build.LazyPath,
+) void {
+    mod.addCSourceFile(.{
+        .file = b.path("src/net/tls_awr_shim.c"),
+        .flags = &.{ "-std=c11", "-Wall", "-Wextra" },
+    });
+    mod.addIncludePath(b.path("src/net"));
+    mod.addIncludePath(boringssl_include);
+    mod.addObjectFile(boringssl_lib_ssl);
+    mod.addObjectFile(boringssl_lib_crpt);
 }
