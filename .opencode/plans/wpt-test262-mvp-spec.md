@@ -1,5 +1,11 @@
 # WPT & Test262 Conformance — MVP Completion Spec
 
+> Status: Superseded / historical record. MVP runtime/conformance closure has
+> landed on `main`, and the closed narrowed surface is now defined by
+> `spec/MVP.md`, `spec/subspecs/mvp-remainder.md`, and
+> `spec/subspecs/wpt-conformance.md`. Do not continue executing the phases
+> below.
+
 ## Goal
 
 Make AWR's browser-runtime MVP correctness measurable through a curated Web
