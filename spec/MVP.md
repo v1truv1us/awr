@@ -2,10 +2,9 @@
 
 > **Canonical execution spec.** If any other planning doc disagrees, this file wins.
 >
-> **Current status:** AWR ships a usable CLI browser-runtime baseline on the
-> primary CLI surface, but **MVP closure is not complete** until the curated WPT
-> and Test262 gates in this document are green and shipped APIs no longer rely
-> on stubs.
+> **Current status:** AWR ships a CLI-first browser-runtime MVP on the primary
+> CLI surface. MVP closure is defined by the curated WPT/Test262 gates in this
+> document and the no-stubs rule for the shipped runtime subset.
 
 ---
 
@@ -63,7 +62,8 @@ These points are treated as already delivered baseline, not deferred wishlist:
 - real page fetch, HTML parsing, DOM construction, JS execution, and terminal
   rendering exist on the CLI path.
 
-This shipped baseline is necessary but **not sufficient** for MVP closure.
+This shipped baseline is the closed MVP surface when the conformance and
+no-stubs gates below remain green.
 
 ---
 
@@ -76,30 +76,35 @@ The MVP is only considered complete when all of the following are true:
 3. `zig build test` is green without hangs or known broken steps on the default
    developer path.
 4. curated WPT coverage is wired into the build and passes for the intended DOM,
-   page, event, observer, storage, XHR, and viewport surface.
+   page, event, storage, GET-only request, history-subset, and viewport surface.
 5. curated Test262 coverage is wired into the build and passes for the intended
    embedded JS runtime surface.
 6. shipped APIs follow the **no-stubs rule**: any exposed surface must be real,
    or removed until it can be implemented correctly.
 
-Until those gates are met, the MVP is an active completion track, not a closed
-program.
+Those gates are the closure definition for the shipped MVP surface.
 
 ---
 
-## 5. Active execution scope
+## 5. Closed MVP surface
 
-The active work queue is:
+The closed MVP surface is:
 
-1. align canonical spec and agent guidance docs before implementation begins;
-2. stabilize the default build/test baseline;
-3. wire WPT and Test262 runners into `build.zig`;
-4. eliminate misleading DOM/bridge stubs and broken surfaces;
-5. implement eventing, observers, storage, XHR, and viewport-backed APIs needed
-   by the curated conformance target;
-6. grow the curated WPT/Test262 corpus until the closure gates are satisfied.
+1. docs aligned to the canonical spec set and governance rules;
+2. a green default baseline (`zig build test`, `zig build test-wpt`,
+   `zig build test-test262`);
+3. authoritative DOM, event, storage, and geometry behavior for the curated
+   conformance target;
+4. explicitly narrowed network/runtime request semantics:
+   `fetch()` and `XMLHttpRequest` are async GET-only on the shipped MVP path;
+5. explicitly narrowed browser-history semantics:
+   `history` is limited to same-origin `pushState` / `replaceState` plus
+   `length` and `state`;
+6. viewport observers (`IntersectionObserver`, `ResizeObserver`) are not part of
+   the shipped MVP surface until real render-backed semantics exist.
 
-The detailed execution order lives in `spec/subspecs/mvp-remainder.md`.
+The closure record and remaining follow-on work live in
+`spec/subspecs/mvp-remainder.md`.
 
 ---
 

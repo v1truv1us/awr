@@ -1,6 +1,6 @@
-# WPT/Test262 conformance — active sub-spec
+# WPT/Test262 conformance — closure authority
 
-> **Status:** ACTIVE
+> **Status:** CLOSED FOR CURRENT MVP SURFACE
 > `spec/MVP.md` is the canonical umbrella spec.
 > This file is the authority for curated conformance runners, corpus scope, and
 > merge gates.
@@ -9,8 +9,8 @@
 
 ## 1. Purpose and authority
 
-This sub-spec defines how AWR proves browser-runtime correctness during the MVP
-completion track.
+This sub-spec defines how AWR proves browser-runtime correctness for the closed
+current MVP surface.
 
 It covers:
 
@@ -80,13 +80,14 @@ Target MVP WPT areas:
 - document and element queries;
 - DOM mutation behavior;
 - event dispatch and lifecycle behavior;
-- mutation and viewport observers;
+- mutation observation;
 - storage;
-- XHR/fetch integration;
+- GET-only XHR/fetch integration;
+- same-origin history subset;
 - terminal-backed geometry and viewport APIs.
 
-The curated WPT corpus should grow to roughly fifty meaningful cases over the
-active MVP completion track.
+The curated WPT corpus should cover the shipped MVP surface and reject or omit
+APIs that are intentionally outside it.
 
 ---
 
@@ -102,8 +103,8 @@ Include a Test262 case only when it:
 2. isolates JS runtime regressions independently from DOM concerns;
 3. runs deterministically in the embedded QuickJS-based runtime.
 
-The curated Test262 corpus should grow to roughly thirty meaningful cases over
-the active MVP completion track.
+The curated Test262 corpus should cover the embedded JS runtime behavior that the
+shipped MVP surface depends on.
 
 ---
 
@@ -180,9 +181,9 @@ surface:
 | Events | `event_add_remove.js`, `event_dispatch_bubble.js`, `event_custom.js`, `event_DOMContentLoaded.js` |
 | MutationObserver | `mutation_observer_childList.js`, `mutation_observer_attributes.js`, `mutation_observer_subtree.js` |
 | Storage | `storage_localStorage.js` |
-| XHR/fetch | `xhr_basic_get.js`, `fetch_basic.js` |
-| Viewport APIs | `viewport_dimensions.js`, `requestAnimationFrame.js`, `intersection_observer.js` |
+| GET-only XHR/fetch | `xhr_basic_get.js`, `xhr_rejects_unsupported.js`, `fetch_basic.js`, `fetch_rejects_unsupported.js` |
+| History subset | `history_push_replace_state.js`, `history_relative_url.js` |
+| Viewport APIs | `viewport_dimensions.js`, `requestAnimationFrame.js`, `element_bounding_client_rect.js` |
 | JS runtime | curated Test262 cases in `tests/test262_runner.zig` |
 
-This mapping is the intended closure surface for the active MVP completion
-track.
+This mapping is the intended closure surface for the shipped MVP.

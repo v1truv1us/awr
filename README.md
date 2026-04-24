@@ -4,14 +4,13 @@ A headless terminal browser for AI agents. Loads pages and runs their
 JavaScript with a CLI-first interface.
 
 > **Canonical spec:** `spec/MVP.md`
-> **Active work now:** `spec/subspecs/mvp-remainder.md`, `spec/subspecs/wpt-conformance.md`
+> **Closure record:** `spec/subspecs/mvp-remainder.md`, `spec/subspecs/wpt-conformance.md`
 > **Deferred tracks:** `spec/subspecs/mcp-stdio.md`,
 > `spec/subspecs/browser-tui.md`, and `spec/Fingerprint-Plan.md`
 > **Governance ADR:** `docs/adr/0001-spec-governance.md`
 
-**Status:** AWR ships a usable CLI browser-runtime baseline, but MVP closure is
-still active and is gated by the canonical WPT/Test262 conformance track and a
-fully green default test baseline.
+**Status:** AWR ships a closed CLI-first browser-runtime MVP gated by curated
+WPT/Test262 coverage and a green default test baseline.
 
 If canonical spec boundaries or document authority change, update both
 `spec/MVP.md` and `docs/adr/0001-spec-governance.md` as part of the same change.
@@ -98,12 +97,15 @@ JS sees real page data through a thin polyfill over five Zig callbacks:
 - Element: `getAttribute` / `setAttribute` / `hasAttribute` /
   `removeAttribute`, `textContent`, `innerHTML`, `outerHTML`, `id`,
   `className`, `classList.{add,remove,contains,toggle}`,
-  `appendChild` / `removeChild` / `insertBefore` (JS-side only — not
-  reflected back to the Zig tree, which is fine for read-mostly agent
-  workflows).
-- `window`, `location`, `navigator` (with `userAgent`), `history`,
-  `screen`, `localStorage` / `sessionStorage`, and other browser-facing APIs on
-  the active conformance path.
+  `appendChild` / `removeChild` / `insertBefore`.
+- `window`, `location`, `navigator` (with `userAgent`), `screen`, and in-memory
+  `localStorage` / `sessionStorage`.
+- `history` is intentionally limited to same-origin `pushState` /
+  `replaceState` plus `length` and `state`.
+- `fetch()` and `XMLHttpRequest` are intentionally limited to async GET-only
+  requests on the shipped MVP path.
+- `IntersectionObserver` and `ResizeObserver` are not exposed on the shipped MVP
+  surface.
 - `window.location` is populated from the requested URL
   (`href`, `hostname`, `pathname`, `origin`, `search`, `protocol`).
 - 17 bridge tests in `src/dom/bridge.zig`.
@@ -141,8 +143,9 @@ JS sees real page data through a thin polyfill over five Zig callbacks:
   as the supported integration surface.
 - Browser/TUI work and later fingerprinting remain deferred; `awr <url>` is the
   main shipped product path.
-- MVP closure is still active: the repo is moving toward WPT/Test262-gated
-  closure and removal of shipped stubs on the browser/runtime surface.
+- The closed MVP surface is intentionally narrower than a full browser API.
+  See `spec/MVP.md` and `spec/subspecs/wpt-conformance.md` for the exact shipped
+  subset.
 
 ---
 
@@ -150,7 +153,7 @@ JS sees real page data through a thin polyfill over five Zig callbacks:
 
 See the canonical spec map in `spec/MVP.md`.
 
-- **Active MVP completion track:** `spec/subspecs/mvp-remainder.md`
+- **MVP closure record:** `spec/subspecs/mvp-remainder.md`
 - **Conformance authority:** `spec/subspecs/wpt-conformance.md`
 - **Deferred MCP stdio:** `spec/subspecs/mcp-stdio.md`
 - **Deferred browser/TUI:** `spec/subspecs/browser-tui.md`

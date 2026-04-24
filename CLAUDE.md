@@ -118,7 +118,7 @@ Browser runtime status:
 - Networking, TLS, cookies, redirects, and H1/H2 routing are implemented
 - Page fetch → parse → DOM → JS → render pipeline is implemented
 - CLI commands for the default fetch path plus `tools`, `call`, and `mock` exist
-- Curated WPT and Test262 coverage exists in-tree, but MVP closure remains gated by wiring, build health, corpus growth, and removal of shipped stubs
+- Curated WPT and Test262 coverage exists in-tree and defines the closed shipped MVP surface
 
 WPT-first status:
 

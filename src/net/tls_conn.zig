@@ -122,6 +122,11 @@ pub fn forceHttp11Alpn(ctx: *TlsCtx) void {
     _ = c.awr_tls_set_alpn_http11_only(ctx.inner);
 }
 
+fn networkTestsEnabled() bool {
+    if (!@hasDecl(std.c, "getenv")) return false;
+    return std.c.getenv("AWR_RUN_NETWORK_TESTS") != null;
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 test "TlsCtx init and deinit do not crash" {
@@ -226,6 +231,7 @@ test "initWithBundle loads CA bundle without error" {
 // }
 
 test "integration: TLS handshake and HTTP GET to example.com" {
+    if (!networkTestsEnabled()) return error.SkipZigTest;
     if (!have_std_net) return;
     const allocator = std.testing.allocator;
 
@@ -265,6 +271,7 @@ test "integration: TLS handshake and HTTP GET to example.com" {
 }
 
 test "integration: JA4 is stable across 3 connections" {
+    if (!networkTestsEnabled()) return error.SkipZigTest;
     if (!have_std_net) return;
     const allocator = std.testing.allocator;
 
@@ -326,6 +333,7 @@ test "integration: JA4 is stable across 3 connections" {
 }
 
 test "integration: JA4 cipher count confirms 15 non-GREASE ciphers" {
+    if (!networkTestsEnabled()) return error.SkipZigTest;
     if (!have_std_net) return;
     const allocator = std.testing.allocator;
 
@@ -378,6 +386,7 @@ test "integration: JA4 cipher count confirms 15 non-GREASE ciphers" {
 }
 
 test "integration: HTTP/1.1-only ALPN falls back from h2" {
+    if (!networkTestsEnabled()) return error.SkipZigTest;
     if (!have_std_net) return;
     const allocator = std.testing.allocator;
 
@@ -414,6 +423,7 @@ test "integration: HTTP/1.1-only ALPN falls back from h2" {
 }
 
 test "integration: fetch tls.peet.ws JA4 fingerprint" {
+    if (!networkTestsEnabled()) return error.SkipZigTest;
     if (!have_std_net) return;
     const allocator = std.testing.allocator;
 
@@ -506,6 +516,7 @@ fn fetchPeetWsJson(allocator: std.mem.Allocator) ?PeetWsResult {
 }
 
 test "integration: comprehensive TLS fingerprint verification against tls.peet.ws" {
+    if (!networkTestsEnabled()) return error.SkipZigTest;
     const allocator = std.testing.allocator;
 
     var result = fetchPeetWsJson(allocator) orelse {
@@ -545,6 +556,7 @@ test "integration: comprehensive TLS fingerprint verification against tls.peet.w
 }
 
 test "integration: JA4 proves cipher suite hash matches AWR configuration" {
+    if (!networkTestsEnabled()) return error.SkipZigTest;
     const allocator = std.testing.allocator;
 
     var result = fetchPeetWsJson(allocator) orelse {
@@ -565,6 +577,7 @@ test "integration: JA4 proves cipher suite hash matches AWR configuration" {
 }
 
 test "integration: JA4 proves extension hash includes ALPS, MLKEM, and other Chrome 132 extensions" {
+    if (!networkTestsEnabled()) return error.SkipZigTest;
     const allocator = std.testing.allocator;
 
     var result = fetchPeetWsJson(allocator) orelse {
@@ -584,6 +597,7 @@ test "integration: JA4 proves extension hash includes ALPS, MLKEM, and other Chr
 }
 
 test "integration: GREASE consistency — JA4 is deterministic across fresh TlsCtx instances" {
+    if (!networkTestsEnabled()) return error.SkipZigTest;
     const allocator = std.testing.allocator;
 
     var ja4_first: ?[]const u8 = null;

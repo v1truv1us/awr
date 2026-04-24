@@ -35,11 +35,13 @@ pub const FetchHost = struct {
         status: u16,
         body:   []u8,
         url:    []u8,
+        headers_json: []u8,
         allocator: std.mem.Allocator,
 
         pub fn deinit(self: *Response) void {
             self.allocator.free(self.body);
             self.allocator.free(self.url);
+            self.allocator.free(self.headers_json);
         }
     };
 
@@ -428,17 +430,19 @@ pub const JsEngine = struct {
         };
         defer resp.deinit();
 
-        // Build {ok, status, url, body}.
+        // Build {ok, status, url, body, headersJson}.
         const obj = qjs.Value.initObject(c);
         const ok_val = qjs.Value.initBool(resp.status >= 200 and resp.status < 300);
         const status_val = qjs.Value.initInt32(@intCast(resp.status));
         const url_val = qjs.Value.initStringLen(c, resp.url);
         const body_val = qjs.Value.initStringLen(c, resp.body);
+        const headers_val = qjs.Value.initStringLen(c, resp.headers_json);
 
         obj.setPropertyStr(c, "ok", ok_val) catch {};
         obj.setPropertyStr(c, "status", status_val) catch {};
         obj.setPropertyStr(c, "url", url_val) catch {};
         obj.setPropertyStr(c, "body", body_val) catch {};
+        obj.setPropertyStr(c, "headersJson", headers_val) catch {};
 
         const rr = promise.resolve.call(c, qjs.Value.undefined, &.{obj});
         rr.deinit(c);
@@ -454,15 +458,40 @@ pub const JsEngine = struct {
         \\  var raw = globalThis.__awr_rawFetch__;
         \\  if (typeof raw !== 'function') return;
         \\  globalThis.fetch = function fetch(resource, init) {
-        \\    var url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
+        \\    if (typeof resource !== 'string') {
+        \\      return Promise.reject(new Error('fetch: only string URLs are currently supported'));
+        \\    }
+        \\    var url = resource;
         \\    init = init || {};
-        \\    return raw(url, init).then(function (r) {
+        \\    if (typeof init !== 'object') {
+        \\      return Promise.reject(new Error('fetch: init must be an object when provided'));
+        \\    }
+        \\    var keys = Object.keys(init);
+        \\    for (var i = 0; i < keys.length; i += 1) {
+        \\      var key = keys[i];
+        \\      if (key !== 'method') {
+        \\        return Promise.reject(new Error('fetch: init.' + key + ' is not currently supported'));
+        \\      }
+        \\    }
+        \\    if (init.method && String(init.method).toUpperCase() !== 'GET') {
+        \\      return Promise.reject(new Error('fetch: only GET is currently supported'));
+        \\    }
+        \\    return raw(url).then(function (r) {
         \\      var body = r.body;
+        \\      var headersMap = {};
+        \\      try { headersMap = r.headersJson ? JSON.parse(r.headersJson) : {}; } catch (e) {}
         \\      return {
         \\        ok: r.ok,
         \\        status: r.status,
         \\        url: r.url,
-        \\        headers: { get: function () { return null; } },
+        \\        __headersMap: headersMap,
+        \\        headers: {
+        \\          get: function (name) {
+        \\            if (!name) return null;
+        \\            var key = String(name).toLowerCase();
+        \\            return Object.prototype.hasOwnProperty.call(headersMap, key) ? headersMap[key] : null;
+        \\          }
+        \\        },
         \\        text:    function () { return Promise.resolve(body); },
         \\        json:    function () { return Promise.resolve(JSON.parse(body)); },
         \\        arrayBuffer: function () { return Promise.resolve(new TextEncoder().encode(body).buffer); },

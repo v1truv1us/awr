@@ -17,7 +17,11 @@ const client = @import("client.zig");
 const engine = @import("js/engine.zig");
 const dom = @import("dom/node.zig"); // parseDocument handles HTML+DOM internally
 const bridge = @import("dom/bridge.zig");
+const render = @import("render.zig");
 const url_mod = @import("net/url.zig");
+
+pub const ScreenModel = render.ScreenModel;
+pub const ScreenLink = render.ScreenLink;
 
 // ── PageResult ────────────────────────────────────────────────────────────
 
@@ -74,6 +78,21 @@ fn writeJsStr(w: anytype, s: []const u8) !void {
     try w.writeByte('\'');
 }
 
+fn appendJsonQuoted(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
+    try list.append(alloc, '"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try list.appendSlice(alloc, "\\\""),
+            '\\' => try list.appendSlice(alloc, "\\\\"),
+            '\n' => try list.appendSlice(alloc, "\\n"),
+            '\r' => try list.appendSlice(alloc, "\\r"),
+            '\t' => try list.appendSlice(alloc, "\\t"),
+            else => try list.append(alloc, c),
+        }
+    }
+    try list.append(alloc, '"');
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────
 
 /// Top-level browser page.  Owns an HTTP client, a JS engine, and the
@@ -90,6 +109,8 @@ pub const Page = struct {
     event_loop: engine.EventLoop,
     base_url: []u8, // duped, may be replaced on each processHtml
     current_doc: ?dom.Document = null,
+    viewport_width: usize = 80,
+    viewport_height: usize = 24,
 
     /// Initialise a new Page with default client options.
     /// `io` is threaded through to the HTTP client for all network fetches
@@ -158,11 +179,13 @@ pub const Page = struct {
             defer resp.deinit();
             const body = try gpa.dupe(u8, resp.body);
             const response_url = try gpa.dupe(u8, resp.url);
+            const headers_json = try headersToJson(gpa, resp.headers.items);
             gpa.free(resolved);
             return .{
                 .status = resp.status,
                 .body = body,
                 .url = response_url,
+                .headers_json = headers_json,
                 .allocator = gpa,
             };
         }
@@ -178,11 +201,28 @@ pub const Page = struct {
                 .status = 200,
                 .body = body,
                 .url = resolved,
+                .headers_json = try gpa.dupe(u8, "{}"),
                 .allocator = gpa,
             };
         }
         gpa.free(resolved);
         return error.UnsupportedScheme;
+    }
+
+    fn headersToJson(allocator: std.mem.Allocator, headers: anytype) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(allocator);
+        try out.append(allocator, '{');
+        for (headers.items, 0..) |header, i| {
+            if (i > 0) try out.append(allocator, ',');
+            const lower_name = try std.ascii.allocLowerString(allocator, header.name);
+            defer allocator.free(lower_name);
+            try appendJsonQuoted(&out, allocator, lower_name);
+            try out.append(allocator, ':');
+            try appendJsonQuoted(&out, allocator, header.value);
+        }
+        try out.append(allocator, '}');
+        return out.toOwnedSlice(allocator);
     }
 
     /// Drain microtasks + tick the event loop until both queues are empty.
@@ -268,15 +308,26 @@ pub const Page = struct {
 
         // ── Populate window.location from the requested URL ───────────────
         self.setLocationFromUrl(url);
+        self.setViewportGlobals();
+        bridge.setDocumentReadyState(&self.js, "loading");
 
         // ── Execute <script> tags (inline + external src=) in document order.
         if (zig_doc.htmlElement()) |root| self.executeScriptsInElement(root, url);
+
+        bridge.setDocumentReadyState(&self.js, "interactive");
+        self.fireLifecycleEvent("document.dispatchEvent(new Event('readystatechange'))", "readystatechange-interactive");
+        self.fireLifecycleEvent("document.dispatchEvent(new Event('DOMContentLoaded'))", "domcontentloaded");
 
         // ── Drain microtask + macrotask queues ────────────────────────────
         // drainAll alternates QuickJS job drain with libxev ticks so that
         // setTimeout callbacks and fetch resolvers run before we extract
         // page state. The cap is generous — long enough for real network
         // fetches, short enough to bail out of a runaway setInterval.
+        self.drainAll(5_000);
+
+        bridge.setDocumentReadyState(&self.js, "complete");
+        self.fireLifecycleEvent("document.dispatchEvent(new Event('readystatechange'))", "readystatechange-complete");
+        self.fireLifecycleEvent("window.dispatchEvent(new Event('load'))", "load");
         self.drainAll(5_000);
 
         // ── Extract window.__awrData__ (if set by page scripts) ───────────
@@ -485,6 +536,55 @@ pub const Page = struct {
         js_inject(&self.js, w.buffered(), "location-init") catch {};
     }
 
+    fn setViewportGlobals(self: *Page) void {
+        bridge.setViewportSize(&self.js, self.viewport_width, self.viewport_height);
+
+        var buf = std.mem.zeroes([2048]u8);
+        var w = std.Io.Writer.fixed(&buf);
+        w.writeAll("window.screen.width=") catch return;
+        w.print("{d}", .{self.viewport_width}) catch return;
+        w.writeByte(';') catch return;
+        w.writeAll("window.screen.height=") catch return;
+        w.print("{d}", .{self.viewport_height}) catch return;
+        w.writeByte(';') catch return;
+        w.writeAll("window.screen.availWidth=") catch return;
+        w.print("{d}", .{self.viewport_width}) catch return;
+        w.writeByte(';') catch return;
+        w.writeAll("window.screen.availHeight=") catch return;
+        w.print("{d}", .{self.viewport_height}) catch return;
+        w.writeByte(';') catch return;
+        w.writeAll("window.innerWidth=") catch return;
+        w.print("{d}", .{self.viewport_width}) catch return;
+        w.writeByte(';') catch return;
+        w.writeAll("window.innerHeight=") catch return;
+        w.print("{d}", .{self.viewport_height}) catch return;
+        w.writeByte(';') catch return;
+        w.writeAll("window.outerWidth=") catch return;
+        w.print("{d}", .{self.viewport_width}) catch return;
+        w.writeByte(';') catch return;
+        w.writeAll("window.outerHeight=") catch return;
+        w.print("{d}", .{self.viewport_height}) catch return;
+        w.writeByte(';') catch return;
+
+        const js_inject = engine.JsEngine.eval;
+        js_inject(&self.js, w.buffered(), "viewport-init") catch {};
+    }
+
+    pub fn setViewportSize(self: *Page, width: usize, height: usize) void {
+        self.viewport_width = width;
+        self.viewport_height = height;
+        self.setViewportGlobals();
+        if (self.current_doc != null) {
+            self.fireLifecycleEvent("window.dispatchEvent(new Event('resize'))", "resize");
+            self.drainAll(5_000);
+        }
+    }
+
+    pub fn renderBrowseModel(self: *Page, allocator: std.mem.Allocator, _: *const PageResult, opts: render.RenderOptions) !render.ScreenModel {
+        const doc_ref = &(self.current_doc orelse return error.NoDocument);
+        return render.renderBrowseModel(allocator, doc_ref, opts);
+    }
+
     // ── Script execution ─────────────────────────────────────────────────
 
     /// Walk the DOM subtree depth-first and execute each `<script>` in
@@ -586,6 +686,11 @@ pub const Page = struct {
         if (builtin.is_test) return;
         std.debug.print(fmt, args);
     }
+
+    fn fireLifecycleEvent(self: *Page, script: []const u8, filename: [:0]const u8) void {
+        const js_inject = engine.JsEngine.eval;
+        js_inject(&self.js, script, filename) catch {};
+    }
 };
 
 // ── URL resolution ────────────────────────────────────────────────────────
@@ -637,6 +742,11 @@ fn resolveUrl(
     try joined.appendSlice(alloc, ref);
 
     return joinAndNormalize(alloc, origin_str, joined.items);
+}
+
+fn networkTestsEnabled() bool {
+    if (!@hasDecl(std.c, "getenv")) return false;
+    return std.c.getenv("AWR_RUN_NETWORK_TESTS") != null;
 }
 
 /// Normalise the `.`/`..` segments of an absolute path and prefix it with
@@ -1121,6 +1231,7 @@ test "WebMCP end-to-end — mock shop page with three tools" {
 // ── Integration test (requires network) ───────────────────────────────────
 
 test "Page.navigate — fetches http://example.com" {
+    if (!networkTestsEnabled()) return error.SkipZigTest;
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.navigate("http://example.com/");

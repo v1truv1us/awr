@@ -43,6 +43,18 @@ pub const ScreenLink = struct {
     line: usize,
 };
 
+pub const ScreenRect = struct {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+};
+
+pub const ScreenBox = struct {
+    element_ptr: usize,
+    rect: ScreenRect,
+};
+
 pub const ScreenLine = struct {
     start: usize,
     end: usize,
@@ -53,12 +65,14 @@ pub const ScreenModel = struct {
     text: []u8,
     lines: []ScreenLine,
     links: []ScreenLink,
+    boxes: []ScreenBox,
 
     pub fn deinit(self: *ScreenModel) void {
         for (self.links) |link| {
             self.allocator.free(link.href);
             self.allocator.free(link.text);
         }
+        self.allocator.free(self.boxes);
         self.allocator.free(self.links);
         self.allocator.free(self.lines);
         self.allocator.free(self.text);
@@ -67,6 +81,14 @@ pub const ScreenModel = struct {
     pub fn lineText(self: *const ScreenModel, index: usize) []const u8 {
         const line = self.lines[index];
         return self.text[line.start..line.end];
+    }
+
+    pub fn rectForElement(self: *const ScreenModel, elem: *const dom.Element) ?ScreenRect {
+        const ptr = @intFromPtr(elem);
+        for (self.boxes) |box| {
+            if (box.element_ptr == ptr) return box.rect;
+        }
+        return null;
     }
 };
 
@@ -77,6 +99,15 @@ const LinkRef = struct {
     href: []const u8,
     text: []const u8,
     line: usize,
+};
+
+const BoxRef = struct {
+    element_ptr: usize,
+    left: usize = 0,
+    top: usize = 0,
+    right: usize = 0,
+    bottom: usize = 0,
+    saw_content: bool = false,
 };
 
 const BufferWriter = struct {
@@ -104,6 +135,8 @@ const RenderState = struct {
     pre_depth: usize = 0,
     hang_indent: usize = 0,
     links: std.ArrayListUnmanaged(LinkRef) = .empty,
+    boxes: std.ArrayListUnmanaged(BoxRef) = .empty,
+    active_boxes: std.ArrayListUnmanaged(usize) = .empty,
 
     fn deinit(self: *RenderState) void {
         for (self.links.items) |link| {
@@ -111,13 +144,45 @@ const RenderState = struct {
             self.allocator.free(link.text);
         }
         self.links.deinit(self.allocator);
+        self.boxes.deinit(self.allocator);
+        self.active_boxes.deinit(self.allocator);
+    }
+
+    fn beginElementBox(self: *RenderState, elem: *const dom.Element) !void {
+        try self.boxes.append(self.allocator, .{ .element_ptr = @intFromPtr(elem) });
+        try self.active_boxes.append(self.allocator, self.boxes.items.len - 1);
+    }
+
+    fn endElementBox(self: *RenderState) void {
+        _ = self.active_boxes.pop();
+    }
+
+    fn noteCell(self: *RenderState, line: usize, col: usize) void {
+        for (self.active_boxes.items) |idx| {
+            var box = &self.boxes.items[idx];
+            if (!box.saw_content) {
+                box.left = col;
+                box.top = line;
+                box.right = col + 1;
+                box.bottom = line + 1;
+                box.saw_content = true;
+                continue;
+            }
+            box.left = @min(box.left, col);
+            box.top = @min(box.top, line);
+            box.right = @max(box.right, col + 1);
+            box.bottom = @max(box.bottom, line + 1);
+        }
     }
 
     /// Emit pending hang-indent whitespace before actual content.
     fn prepareForContent(self: *RenderState, w: anytype) !void {
         if (self.at_line_start and self.hang_indent > 0) {
-            for (0..self.hang_indent) |_| try w.writeByte(' ');
-            self.col = self.hang_indent;
+            for (0..self.hang_indent) |_| {
+                self.noteCell(self.line_index, self.col);
+                try w.writeByte(' ');
+                self.col += 1;
+            }
             self.at_line_start = false;
         }
     }
@@ -131,6 +196,7 @@ const RenderState = struct {
             self.line_index += 1;
         } else {
             try self.prepareForContent(w);
+            self.noteCell(self.line_index, self.col);
             try w.writeByte(byte);
             self.col += 1;
         }
@@ -138,28 +204,7 @@ const RenderState = struct {
 
     /// Write a byte slice, correctly tracking column across newlines.
     fn writeAll(self: *RenderState, w: anytype, bytes: []const u8) !void {
-        var start: usize = 0;
-        for (bytes, 0..) |byte, i| {
-            if (byte == '\n') {
-                if (i > start) {
-                    try self.prepareForContent(w);
-                    try w.writeAll(bytes[start..i]);
-                    self.col += i - start;
-                    self.at_line_start = false;
-                }
-                try w.writeByte('\n');
-                self.col = 0;
-                self.at_line_start = true;
-                self.line_index += 1;
-                start = i + 1;
-            }
-        }
-        if (start < bytes.len) {
-            try self.prepareForContent(w);
-            try w.writeAll(bytes[start..]);
-            self.col += bytes.len - start;
-            self.at_line_start = false;
-        }
+        for (bytes) |byte| try self.writeByte(w, byte);
     }
 
     /// Emit a structural newline (no hang-indent emitted until next content).
@@ -314,7 +359,7 @@ fn renderModelFromRoot(
         }
     }
 
-    return buildScreenModel(allocator, try buf.toOwnedSlice(allocator), state.links.items);
+    return buildScreenModel(allocator, try buf.toOwnedSlice(allocator), state.links.items, state.boxes.items);
 }
 
 pub fn renderHtmlModel(
@@ -331,6 +376,7 @@ fn buildScreenModel(
     allocator: std.mem.Allocator,
     text: []u8,
     link_refs: []const LinkRef,
+    box_refs: []const BoxRef,
 ) !ScreenModel {
     errdefer allocator.free(text);
 
@@ -374,11 +420,26 @@ fn buildScreenModel(
         built_links += 1;
     }
 
+    const boxes = try allocator.alloc(ScreenBox, box_refs.len);
+    errdefer allocator.free(boxes);
+    for (box_refs, 0..) |box, i| {
+        boxes[i] = .{
+            .element_ptr = box.element_ptr,
+            .rect = .{
+                .x = box.left,
+                .y = box.top,
+                .width = if (box.saw_content) box.right - box.left else 0,
+                .height = if (box.saw_content) box.bottom - box.top else 0,
+            },
+        };
+    }
+
     return .{
         .allocator = allocator,
         .text = text,
         .lines = lines,
         .links = links,
+        .boxes = boxes,
     };
 }
 
@@ -435,6 +496,9 @@ fn renderElement(state: *RenderState, w: anytype, elem: *const dom.Element) anye
 
         if (browse_heuristics.shouldSkipForBrowse(elem)) return;
     }
+
+    try state.beginElementBox(elem);
+    defer state.endElementBox();
 
     // ── Heading ──────────────────────────────────────────────────────
     if (headingLevel(tag)) |level| {

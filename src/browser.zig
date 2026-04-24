@@ -37,6 +37,7 @@ pub const BrowserSession = struct {
     prompt_buffer: std.ArrayList(u8),
     status_message: ?[]u8,
     render_width: usize,
+    render_height: usize,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !BrowserSession {
         return .{
@@ -54,6 +55,7 @@ pub const BrowserSession = struct {
             .prompt_buffer = std.ArrayList(u8).empty,
             .status_message = null,
             .render_width = 78,
+            .render_height = 22,
         };
     }
 
@@ -73,10 +75,13 @@ pub const BrowserSession = struct {
         try self.pushHistory(self.current.?.result.url);
     }
 
-    pub fn setViewportWidth(self: *BrowserSession, cols: usize) !void {
-        const desired = browserRenderWidth(cols);
-        if (desired == self.render_width) return;
-        self.render_width = desired;
+    pub fn setViewportSize(self: *BrowserSession, cols: usize, rows: usize) !void {
+        const desired_width = browserRenderWidth(cols);
+        const desired_height = if (rows > 2) rows - 2 else 0;
+        if (desired_width == self.render_width and desired_height == self.render_height) return;
+        self.render_width = desired_width;
+        self.render_height = desired_height;
+        self.page.setViewportSize(self.render_width, self.render_height);
         if (self.current != null) try self.rerenderCurrent();
     }
 
@@ -383,12 +388,13 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, start_url: []const u8) !voi
 
     var session = try BrowserSession.init(allocator, io);
     defer session.deinit();
-    try session.setViewportWidth(terminal.size().cols);
+    const initial_size = terminal.size();
+    try session.setViewportSize(initial_size.cols, initial_size.rows);
     try session.navigateTo(start_url);
 
     while (true) {
         const size = terminal.size();
-        try session.setViewportWidth(size.cols);
+        try session.setViewportSize(size.cols, size.rows);
         session.clampScroll(viewportHeight(size));
         try draw(&terminal, io, &session);
         const key = try terminal.readKey();

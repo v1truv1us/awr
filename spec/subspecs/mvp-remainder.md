@@ -1,20 +1,16 @@
-# MVP remainder — active completion track
+# MVP remainder — closure record and follow-on work
 
-> **Status:** ACTIVE
+> **Status:** CLOSED FOR CURRENT MVP SURFACE
 > `spec/MVP.md` is the canonical umbrella spec.
-> This file defines the active execution order for closing the browser-runtime
-> MVP.
+> This file records the completed MVP closure work and the narrowed shipped
+> browser-runtime surface.
 
 ---
 
 ## Goal
 
-Close the remaining gap between AWR's shipped CLI browser-runtime baseline and a
-fully qualified MVP backed by curated WPT and Test262 coverage.
-
-This track is about making `awr <url>` behave like a real terminal-backed
-browser runtime and proving that behavior through the repo's default test and
-conformance gates.
+Record the work that closed the current CLI browser-runtime MVP and the subset
+that now ships under the curated WPT/Test262 and no-stubs gates.
 
 ---
 
@@ -28,7 +24,7 @@ conformance gates.
 
 ---
 
-## Execution order
+## Closed MVP record
 
 ### Phase -1 — Canonical spec alignment
 
@@ -127,26 +123,31 @@ Exit criteria:
 - curated mutation-observer WPT cases pass;
 - record delivery matches the supported mutation surface.
 
-### Phase 5 — Storage
+### Storage
 
 Implement real in-memory `localStorage` and `sessionStorage` for the page
-lifetime, including same-context storage events.
+lifetime.
 
 Exit criteria:
 
 - curated storage WPT cases pass;
-- no storage method silently no-ops.
+- no storage method silently no-ops;
+- same-window `storage` events are not exposed as supported behavior.
 
-### Phase 6 — XMLHttpRequest
+### Request APIs
 
-Implement real XHR backed by the same transport path as `fetch()`.
+Implement the shipped request subset backed by the same transport path:
+
+- `fetch()` supports string-URL async GET requests only;
+- `XMLHttpRequest` supports async GET only;
+- unsupported request shapes throw or reject explicitly.
 
 Exit criteria:
 
-- curated XHR WPT cases pass;
-- async XHR does not hang the event loop.
+- curated request WPT cases pass;
+- async GET requests do not hang the event loop.
 
-### Phase 7 — Viewport-backed APIs
+### Viewport-backed APIs
 
 Ground geometry and viewport observers in AWR's real terminal render pipeline.
 
@@ -155,15 +156,13 @@ Minimum required work:
 - terminal-cell-accurate geometry metadata in rendered output;
 - `getBoundingClientRect()`;
 - `requestAnimationFrame`;
-- `IntersectionObserver`;
-- `ResizeObserver`;
 - terminal dimension exposure through `window` and `screen`.
 
 Exit criteria:
 
 - curated viewport WPT cases pass;
-- observer behavior is derived from real render metadata, not placeholder
-  values.
+- viewport observer constructors are not exposed until real render-backed
+  semantics exist.
 
 ### Phase 8 — Curated WPT growth
 
@@ -213,23 +212,27 @@ in this order:
 
 ## Verification gates
 
-The track is only complete when the repo can truthfully claim all of the
-following:
+The closed MVP record is only valid while the repo can truthfully claim all of
+the following:
 
 1. `zig build test` is green on the default developer path;
 2. `zig build test-wpt` is green;
 3. `zig build test-test262` is green;
-4. the curated conformance corpus covers the intended MVP surface defined in
+4. the curated conformance corpus covers the intended shipped MVP surface
+   defined in
    `spec/subspecs/wpt-conformance.md`;
 5. shipped APIs on that surface no longer rely on stubs.
 
 ---
 
-## Explicitly not in scope for this active track
+## Explicitly not in scope for the closed MVP surface
 
 - finishing native MCP stdio server mode
 - browser/TUI product-track expansion beyond the viewport-backed APIs needed by
   browser-runtime closure
 - later fingerprinting and browser-identity work
+- `IntersectionObserver` / `ResizeObserver`
+- full browser-history navigation/traversal semantics
+- non-GET request semantics for `fetch()` / `XMLHttpRequest`
 
 Those remain documented, but deferred.

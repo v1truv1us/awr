@@ -1,7 +1,7 @@
 /// bridge.zig — JS↔DOM bindings for AWR Phase 2.
 ///
 /// Installs a `document` global object (and companion window/navigator/
-/// location stubs) into a JsEngine, backed by a Zig DOM Document.
+/// location shims) into a JsEngine, backed by a Zig DOM Document.
 ///
 /// Architecture
 /// ────────────
@@ -13,17 +13,16 @@
 ///   __awr_getBody()               → JSON element or null
 ///
 /// A JS polyfill (BRIDGE_POLYFILL) wraps these primitives in proper
-/// DOM-like objects (document, HTMLElement prototype, MutationObserver
-/// stub, etc.).  This keeps all the idiomatic JS API surface in JS
+/// DOM-like objects (document, HTMLElement prototype, MutationObserver,
+/// etc.). This keeps all the idiomatic JS API surface in JS
 /// while the expensive parts (tree traversal, serialisation) stay in Zig.
 ///
-/// Phase 2 contract
-/// ────────────────
-/// Queries reflect the Zig DOM tree built from the fetched HTML.
-/// Mutations (innerHTML setter, textContent setter, appendChild) are
-/// JS-only and are NOT reflected back to the Zig tree.
-/// That is sufficient for Phase 2: scripts that mutate the DOM will not
-/// crash, and scripts that query it will see real page data.
+/// Active MVP contract
+/// ───────────────────
+/// Queries reflect the authoritative Zig DOM tree built from the fetched HTML.
+/// The active conformance slices progressively move mutations onto that same
+/// authoritative tree so JS queries, page extraction, and rendering observe the
+/// same state.
 ///
 /// Lifetime
 /// ────────
@@ -35,6 +34,7 @@ const std    = @import("std");
 const qjs    = @import("quickjs");
 const dom    = @import("node.zig");
 const engine = @import("../js/engine.zig");
+const render = @import("../render.zig");
 
 // ── BridgeCtx ─────────────────────────────────────────────────────────────
 
@@ -44,6 +44,8 @@ const BridgeCtx = struct {
     allocator: std.mem.Allocator,
     elem_to_handle: std.AutoHashMap(*dom.Element, u32),
     handle_to_elem: std.ArrayList(*dom.Element),
+    viewport_width: usize,
+    viewport_height: usize,
 
     fn init(doc: *dom.Document, allocator: std.mem.Allocator) BridgeCtx {
         return .{
@@ -51,6 +53,8 @@ const BridgeCtx = struct {
             .allocator = allocator,
             .elem_to_handle = std.AutoHashMap(*dom.Element, u32).init(allocator),
             .handle_to_elem = std.ArrayList(*dom.Element).empty,
+            .viewport_width = 80,
+            .viewport_height = 24,
         };
     }
 
@@ -101,6 +105,25 @@ pub fn removeDomBridge(eng: *engine.JsEngine) void {
     host.extension = null;
 }
 
+pub fn setViewportSize(eng: *engine.JsEngine, width: usize, height: usize) void {
+    const host = eng.ctx.getOpaque(engine.EngineHostData) orelse return;
+    const ext = host.extension orelse return;
+    const bctx: *BridgeCtx = @ptrCast(@alignCast(ext));
+    bctx.viewport_width = width;
+    bctx.viewport_height = height;
+}
+
+pub fn setDocumentReadyState(eng: *engine.JsEngine, state: []const u8) void {
+    var buf = std.mem.zeroes([256]u8);
+    var w = std.Io.Writer.fixed(&buf);
+    w.writeAll("globalThis.__awr_document_ready_state__=") catch return;
+    writeJsonStr(&w, state) catch return;
+    w.writeByte(';') catch return;
+
+    const js_inject = engine.JsEngine.eval;
+    js_inject(eng, w.buffered(), "document-ready-state") catch {};
+}
+
 // ── Native callbacks ──────────────────────────────────────────────────────
 
 fn installNativeCallbacks(eng: *engine.JsEngine) !void {
@@ -111,9 +134,15 @@ fn installNativeCallbacks(eng: *engine.JsEngine) !void {
         .{ "querySelectorAll", querySelectorAllFn },
         .{ "querySelectorScoped", querySelectorScopedFn },
         .{ "querySelectorAllScoped", querySelectorAllScopedFn },
+        .{ "getAttribute",     getAttributeFn },
+        .{ "getTextContent",   getTextContentFn },
+        .{ "getChildren",      getChildrenFn },
         .{ "getParent",        getParentFn },
         .{ "getNextSibling",   getNextSiblingFn },
         .{ "getPreviousSibling", getPreviousSiblingFn },
+        .{ "getInnerHTML",     getInnerHTMLFn },
+        .{ "getOuterHTML",     getOuterHTMLFn },
+        .{ "getBoundingClientRect", getBoundingClientRectFn },
         .{ "matches",         matchesFn },
         .{ "closest",         closestFn },
         .{ "contains",        containsFn },
@@ -122,6 +151,8 @@ fn installNativeCallbacks(eng: *engine.JsEngine) !void {
         .{ "setTitle",         setTitleFn },
         .{ "getBody",          getBodyFn },
         .{ "createElement",    createElementFn },
+        .{ "setInnerHTML",     setInnerHTMLFn },
+        .{ "cloneNode",        cloneNodeFn },
         .{ "setAttribute",     setAttributeFn },
         .{ "removeAttribute",  removeAttributeFn },
         .{ "setTextContent",   setTextContentFn },
@@ -206,6 +237,107 @@ fn elementToJson(bridge: *BridgeCtx, elem: *dom.Element, buf: []u8) ?[]const u8 
     w.writeByte('}') catch return null;
 
     return w.buffered();
+}
+
+fn childElementsToJson(bridge: *BridgeCtx, elem: *dom.Element) ?[]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(bridge.allocator);
+
+    out.append(bridge.allocator, '[') catch return null;
+    var first = true;
+    for (elem.children.items) |child| {
+        if (child != .element) continue;
+        if (!first) out.append(bridge.allocator, ',') catch return null;
+        var buf: [8192]u8 = undefined;
+        const json = elementToJson(bridge, child.element, &buf) orelse return null;
+        out.appendSlice(bridge.allocator, json) catch return null;
+        first = false;
+    }
+    out.append(bridge.allocator, ']') catch return null;
+    return out.toOwnedSlice(bridge.allocator) catch return null;
+}
+
+const SerializeError = error{OutOfMemory};
+
+fn appendEscapedHtmlText(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8) SerializeError!void {
+    for (text) |ch| {
+        switch (ch) {
+            '&' => try out.appendSlice(allocator, "&amp;"),
+            '<' => try out.appendSlice(allocator, "&lt;"),
+            '>' => try out.appendSlice(allocator, "&gt;"),
+            else => try out.append(allocator, ch),
+        }
+    }
+}
+
+fn appendEscapedHtmlAttr(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8) SerializeError!void {
+    for (text) |ch| {
+        switch (ch) {
+            '&' => try out.appendSlice(allocator, "&amp;"),
+            '<' => try out.appendSlice(allocator, "&lt;"),
+            '>' => try out.appendSlice(allocator, "&gt;"),
+            '"' => try out.appendSlice(allocator, "&quot;"),
+            else => try out.append(allocator, ch),
+        }
+    }
+}
+
+fn isVoidElementTag(tag: []const u8) bool {
+    inline for (.{ "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr" }) |name| {
+        if (std.ascii.eqlIgnoreCase(tag, name)) return true;
+    }
+    return false;
+}
+
+fn appendSerializedNode(out: *std.ArrayList(u8), allocator: std.mem.Allocator, node: dom.Node) SerializeError!void {
+    switch (node) {
+        .element => |elem| try appendSerializedElement(out, allocator, elem),
+        .text => |text| try appendEscapedHtmlText(out, allocator, text.data),
+        .comment => |comment| {
+            try out.appendSlice(allocator, "<!--");
+            try out.appendSlice(allocator, comment.data);
+            try out.appendSlice(allocator, "-->");
+        },
+        else => {},
+    }
+}
+
+fn appendSerializedChildren(out: *std.ArrayList(u8), allocator: std.mem.Allocator, elem: *const dom.Element) SerializeError!void {
+    for (elem.children.items) |child| {
+        try appendSerializedNode(out, allocator, child);
+    }
+}
+
+fn appendSerializedElement(out: *std.ArrayList(u8), allocator: std.mem.Allocator, elem: *const dom.Element) SerializeError!void {
+    try out.append(allocator, '<');
+    try out.appendSlice(allocator, elem.tag);
+    for (elem.attributes) |attr| {
+        try out.append(allocator, ' ');
+        try out.appendSlice(allocator, attr.name);
+        try out.appendSlice(allocator, "=\"");
+        try appendEscapedHtmlAttr(out, allocator, attr.value);
+        try out.append(allocator, '"');
+    }
+    try out.append(allocator, '>');
+    if (isVoidElementTag(elem.tag)) return;
+    try appendSerializedChildren(out, allocator, elem);
+    try out.appendSlice(allocator, "</");
+    try out.appendSlice(allocator, elem.tag);
+    try out.append(allocator, '>');
+}
+
+fn serializeInnerHtml(bridge: *BridgeCtx, elem: *const dom.Element) SerializeError![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(bridge.allocator);
+    try appendSerializedChildren(&out, bridge.allocator, elem);
+    return out.toOwnedSlice(bridge.allocator);
+}
+
+fn serializeOuterHtml(bridge: *BridgeCtx, elem: *const dom.Element) SerializeError![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(bridge.allocator);
+    try appendSerializedElement(&out, bridge.allocator, elem);
+    return out.toOwnedSlice(bridge.allocator);
 }
 
 fn querySelectorFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
@@ -312,6 +444,45 @@ fn querySelectorAllScopedFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @imp
     return qjs.Value.initStringLen(c, w.buffered());
 }
 
+fn getAttributeFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
+    if (args.len < 2) return qjs.Value.null;
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.null;
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.null;
+    const name_v: qjs.Value = @bitCast(args[1]);
+    const name_c = name_v.toCString(c) orelse return qjs.Value.null;
+    defer c.freeCString(name_c);
+
+    const value = elem.getAttribute(std.mem.span(name_c)) orelse return qjs.Value.null;
+    return qjs.Value.initStringLen(c, value);
+}
+
+fn getTextContentFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(ctx orelse return qjs.Value.undefined, "");
+    const c = ctx orelse return qjs.Value.undefined;
+    if (args.len == 0) return qjs.Value.initStringLen(c, "");
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.initStringLen(c, "");
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.initStringLen(c, "");
+    const text = elem.textContent(bridge.allocator) catch return qjs.Value.initStringLen(c, "");
+    defer bridge.allocator.free(text);
+    return qjs.Value.initStringLen(c, text);
+}
+
+fn getChildrenFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(ctx orelse return qjs.Value.undefined, "[]");
+    const c = ctx orelse return qjs.Value.undefined;
+    if (args.len == 0) return qjs.Value.initStringLen(c, "[]");
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.initStringLen(c, "[]");
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.initStringLen(c, "[]");
+    const json = childElementsToJson(bridge, elem) orelse return qjs.Value.initStringLen(c, "[]");
+    defer bridge.allocator.free(json);
+    return qjs.Value.initStringLen(c, json);
+}
+
 fn getParentFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
     const bridge = getBridge(ctx) orelse return qjs.Value.null;
     const c = ctx orelse return qjs.Value.null;
@@ -373,6 +544,55 @@ fn getPreviousSiblingFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import(
         }
     }
     return qjs.Value.null;
+}
+
+fn getInnerHTMLFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(ctx orelse return qjs.Value.undefined, "");
+    const c = ctx orelse return qjs.Value.undefined;
+    if (args.len == 0) return qjs.Value.initStringLen(c, "");
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.initStringLen(c, "");
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.initStringLen(c, "");
+    const html = serializeInnerHtml(bridge, elem) catch return qjs.Value.initStringLen(c, "");
+    defer bridge.allocator.free(html);
+    return qjs.Value.initStringLen(c, html);
+}
+
+fn getOuterHTMLFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(ctx orelse return qjs.Value.undefined, "");
+    const c = ctx orelse return qjs.Value.undefined;
+    if (args.len == 0) return qjs.Value.initStringLen(c, "");
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.initStringLen(c, "");
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.initStringLen(c, "");
+    const html = serializeOuterHtml(bridge, elem) catch return qjs.Value.initStringLen(c, "");
+    defer bridge.allocator.free(html);
+    return qjs.Value.initStringLen(c, html);
+}
+
+fn getBoundingClientRectFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(ctx orelse return qjs.Value.undefined, "null");
+    const c = ctx orelse return qjs.Value.undefined;
+    if (args.len == 0) return qjs.Value.initStringLen(c, "null");
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.initStringLen(c, "null");
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.initStringLen(c, "null");
+
+    var model = render.renderModel(bridge.allocator, bridge.doc, .{
+        .max_width = bridge.viewport_width,
+        .ansi_colors = false,
+        .show_links = true,
+        .show_images = true,
+    }) catch return qjs.Value.initStringLen(c, "null");
+    defer model.deinit();
+
+    const rect = model.rectForElement(elem) orelse return qjs.Value.initStringLen(c, "null");
+    var buf: [256]u8 = undefined;
+    const json = std.fmt.bufPrint(&buf,
+        "{{\"top\":{d},\"left\":{d},\"bottom\":{d},\"right\":{d},\"width\":{d},\"height\":{d},\"x\":{d},\"y\":{d}}}",
+        .{ rect.y, rect.x, rect.y + rect.height, rect.x + rect.width, rect.width, rect.height, rect.x, rect.y },
+    ) catch return qjs.Value.initStringLen(c, "null");
+    return qjs.Value.initStringLen(c, json);
 }
 
 fn matchesFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
@@ -587,6 +807,112 @@ fn setTextContentFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("qui
     return qjs.Value.initBool(true);
 }
 
+fn clearChildren(elem: *dom.Element) void {
+    for (elem.children.items) |child| {
+        switch (child) {
+            .element => |e| e.parent = null,
+            .text => |t| t.parent = null,
+            .comment => |cmt| cmt.parent = null,
+            else => {},
+        }
+    }
+    elem.children.clearRetainingCapacity();
+}
+
+fn cloneAttributes(alloc: std.mem.Allocator, attrs: []const dom.Attribute) ![]dom.Attribute {
+    const out = try alloc.alloc(dom.Attribute, attrs.len);
+    for (attrs, 0..) |attr, i| {
+        out[i] = .{
+            .name = try alloc.dupe(u8, attr.name),
+            .value = try alloc.dupe(u8, attr.value),
+        };
+    }
+    return out;
+}
+
+fn cloneNodeIntoDoc(alloc: std.mem.Allocator, node: dom.Node, parent: ?*dom.Element, deep: bool) !dom.Node {
+    return switch (node) {
+        .element => |elem| blk: {
+            const cloned = try alloc.create(dom.Element);
+            cloned.* = .{
+                .tag = try alloc.dupe(u8, elem.tag),
+                .attributes = try cloneAttributes(alloc, elem.attributes),
+                .children = .empty,
+                .parent = parent,
+            };
+            if (deep) {
+                for (elem.children.items) |child| {
+                    try cloned.children.append(alloc, try cloneNodeIntoDoc(alloc, child, cloned, true));
+                }
+            }
+            break :blk .{ .element = cloned };
+        },
+        .text => |text| blk: {
+            const cloned = try alloc.create(dom.Text);
+            cloned.* = .{ .data = try alloc.dupe(u8, text.data), .parent = parent };
+            break :blk .{ .text = cloned };
+        },
+        .comment => |comment| blk: {
+            const cloned = try alloc.create(dom.Comment);
+            cloned.* = .{ .data = try alloc.dupe(u8, comment.data), .parent = parent };
+            break :blk .{ .comment = cloned };
+        },
+        else => .{ .other = {} },
+    };
+}
+
+fn setInnerHTMLFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initBool(false);
+    const c = ctx orelse return qjs.Value.initBool(false);
+    if (args.len < 2) return qjs.Value.initBool(false);
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.initBool(false);
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.initBool(false);
+    const html_v: qjs.Value = @bitCast(args[1]);
+    const html_c = html_v.toCString(c) orelse return qjs.Value.initBool(false);
+    defer c.freeCString(html_c);
+
+    const wrapped = std.fmt.allocPrint(bridge.allocator, "<html><body>{s}</body></html>", .{std.mem.span(html_c)}) catch {
+        return qjs.Value.initBool(false);
+    };
+    defer bridge.allocator.free(wrapped);
+
+    var parsed = dom.parseDocument(bridge.allocator, wrapped) catch return qjs.Value.initBool(false);
+    defer parsed.deinit();
+
+    clearChildren(elem);
+
+    if (parsed.body()) |body| {
+        const alloc = bridge.doc.arena.allocator();
+        for (body.children.items) |child| {
+            elem.children.append(alloc, cloneNodeIntoDoc(alloc, child, elem, true) catch return qjs.Value.initBool(false)) catch {
+                return qjs.Value.initBool(false);
+            };
+        }
+    }
+    return qjs.Value.initBool(true);
+}
+
+fn cloneNodeFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
+    if (args.len == 0) return qjs.Value.null;
+
+    const h = parseHandleArg(c, args[0]) orelse return qjs.Value.null;
+    const elem = getElemByHandle(bridge, h) orelse return qjs.Value.null;
+    const deep = if (args.len >= 2) blk: {
+        const deep_v: qjs.Value = @bitCast(args[1]);
+        break :blk deep_v.toBool(c) catch false;
+    } else false;
+
+    const alloc = bridge.doc.arena.allocator();
+    const cloned_node = cloneNodeIntoDoc(alloc, .{ .element = elem }, null, deep) catch return qjs.Value.null;
+    const cloned = cloned_node.element;
+    var buf: [8192]u8 = undefined;
+    const json = elementToJson(bridge, cloned, &buf) orelse return qjs.Value.null;
+    return qjs.Value.initStringLen(c, json);
+}
+
 fn detachChild(parent: *dom.Element, child: *dom.Element) bool {
     for (parent.children.items, 0..) |n, i| {
         if (n == .element and n.element == child) {
@@ -652,6 +978,180 @@ const BRIDGE_POLYFILL =
     \\(function() {
     \\  'use strict';
     \\
+    \\  const __awr_event_listeners__ = Object.create(null);
+    \\  let __awr_next_listener_key__ = 1;
+    \\  const __awr_mutation_observers__ = [];
+    \\  let __awr_mutation_flush_scheduled__ = false;
+    \\
+    \\  function __awr_listener_key__(target) {
+    \\    if (!target || (typeof target !== 'object' && typeof target !== 'function')) return null;
+    \\    if (target === globalThis) return 'window';
+    \\    if (target === document) return 'document';
+    \\    if (target && target._h) return 'h:' + String(target._h);
+    \\    if (!target.__awr_listener_key__) {
+    \\      Object.defineProperty(target, '__awr_listener_key__', {
+    \\        value: 'local:' + String(__awr_next_listener_key__++),
+    \\        enumerable: false,
+    \\        configurable: false,
+    \\        writable: false,
+    \\      });
+    \\    }
+    \\    return target.__awr_listener_key__;
+    \\  }
+    \\
+    \\  function __awr_listener_list__(target, type, create) {
+    \\    const key = __awr_listener_key__(target);
+    \\    if (!key) return [];
+    \\    let byType = __awr_event_listeners__[key];
+    \\    if (!byType) {
+    \\      if (!create) return [];
+    \\      byType = Object.create(null);
+    \\      __awr_event_listeners__[key] = byType;
+    \\    }
+    \\    let list = byType[type];
+    \\    if (!list) {
+    \\      if (!create) return [];
+    \\      list = [];
+    \\      byType[type] = list;
+    \\    }
+    \\    return list;
+    \\  }
+    \\
+    \\  function __awr_normalize_event_options__(options) {
+    \\    if (options === true) return { capture: true, once: false };
+    \\    if (!options) return { capture: false, once: false };
+    \\    return { capture: !!options.capture, once: !!options.once };
+    \\  }
+    \\
+    \\  function __awr_add_event_listener__(target, type, callback, options) {
+    \\    if (typeof callback !== 'function') return;
+    \\    const opts = __awr_normalize_event_options__(options);
+    \\    const list = __awr_listener_list__(target, String(type), true);
+    \\    for (const entry of list) {
+    \\      if (entry.callback === callback && entry.capture === opts.capture) return;
+    \\    }
+    \\    list.push({ callback: callback, capture: opts.capture, once: opts.once });
+    \\  }
+    \\
+    \\  function __awr_remove_event_listener__(target, type, callback, options) {
+    \\    if (typeof callback !== 'function') return;
+    \\    const opts = __awr_normalize_event_options__(options);
+    \\    const list = __awr_listener_list__(target, String(type), false);
+    \\    for (let i = 0; i < list.length; i += 1) {
+    \\      const entry = list[i];
+    \\      if (entry.callback === callback && entry.capture === opts.capture) {
+    \\        list.splice(i, 1);
+    \\        break;
+    \\      }
+    \\    }
+    \\  }
+    \\
+    \\  function __awr_event_parent__(target) {
+    \\    if (!target || target === globalThis) return null;
+    \\    if (target === document) return globalThis;
+    \\    if (target && target._h) {
+    \\      const parent = __awr_getParent__(target._h);
+    \\      if (parent) return makeElement(parent);
+    \\      const root = document.documentElement;
+    \\      if (root && root._h === target._h) return document;
+    \\    }
+    \\    return null;
+    \\  }
+    \\
+    \\  function __awr_event_path__(target) {
+    \\    const path = [target];
+    \\    let cur = __awr_event_parent__(target);
+    \\    while (cur) {
+    \\      path.push(cur);
+    \\      cur = __awr_event_parent__(cur);
+    \\    }
+    \\    return path;
+    \\  }
+    \\
+    \\  function __awr_invoke_listeners__(target, event, capture) {
+    \\    const list = __awr_listener_list__(target, event.type, false).slice();
+    \\    for (const entry of list) {
+    \\      if (!!entry.capture !== !!capture) continue;
+    \\      event.currentTarget = target;
+    \\      if (entry.once) __awr_remove_event_listener__(target, event.type, entry.callback, { capture: entry.capture });
+    \\      entry.callback.call(target, event);
+    \\      if (event.__stopImmediate) return true;
+    \\    }
+    \\    return event.__stop;
+    \\  }
+    \\
+    \\  function __awr_dispatch_event__(target, event) {
+    \\    if (!event || typeof event.type !== 'string' || event.type.length === 0) {
+    \\      throw new TypeError('dispatchEvent requires an Event with a type');
+    \\    }
+    \\    const path = __awr_event_path__(target);
+    \\    event.target = target;
+    \\    event.currentTarget = null;
+    \\    event.__stop = false;
+    \\    event.__stopImmediate = false;
+    \\
+    \\    for (let i = path.length - 1; i > 0; i -= 1) {
+    \\      event.eventPhase = 1;
+    \\      if (__awr_invoke_listeners__(path[i], event, true)) break;
+    \\      if (event.__stop) break;
+    \\    }
+    \\
+    \\    event.eventPhase = 2;
+    \\    __awr_invoke_listeners__(target, event, true);
+    \\    if (!event.__stopImmediate) __awr_invoke_listeners__(target, event, false);
+    \\
+    \\    if (event.bubbles && !event.__stop) {
+    \\      for (let i = 1; i < path.length; i += 1) {
+    \\        event.eventPhase = 3;
+    \\        if (__awr_invoke_listeners__(path[i], event, false)) break;
+    \\        if (event.__stop) break;
+    \\      }
+    \\    }
+    \\
+    \\    event.eventPhase = 0;
+    \\    event.currentTarget = null;
+    \\    return !event.defaultPrevented;
+    \\  }
+    \\
+    \\  function __awr_mutation_target_matches__(observation, target) {
+    \\    if (!observation.target || !target || !observation.target._h || !target._h) return false;
+    \\    if (observation.target._h === target._h) return true;
+    \\    if (!observation.options.subtree) return false;
+    \\    return !!__awr_contains__(observation.target._h, target._h);
+    \\  }
+    \\
+    \\  function __awr_queue_mutation_record__(target, record) {
+    \\    for (const observer of __awr_mutation_observers__) {
+    \\      for (const observation of observer.__observations) {
+    \\        if (!__awr_mutation_target_matches__(observation, target)) continue;
+    \\        if (record.type === 'childList' && !observation.options.childList) continue;
+    \\        if (record.type === 'attributes' && !observation.options.attributes) continue;
+    \\        if (record.type === 'characterData' && !observation.options.characterData) continue;
+    \\        observer.__records.push({
+    \\          type: record.type,
+    \\          target: record.target,
+    \\          addedNodes: record.addedNodes || [],
+    \\          removedNodes: record.removedNodes || [],
+    \\          previousSibling: record.previousSibling || null,
+    \\          nextSibling: record.nextSibling || null,
+    \\          attributeName: record.attributeName || null,
+    \\          oldValue: observation.options.attributeOldValue || observation.options.characterDataOldValue ? (record.oldValue == null ? null : record.oldValue) : null,
+    \\        });
+    \\      }
+    \\    }
+    \\    if (!__awr_mutation_flush_scheduled__) {
+    \\      __awr_mutation_flush_scheduled__ = true;
+    \\      Promise.resolve().then(function() {
+    \\        __awr_mutation_flush_scheduled__ = false;
+    \\        for (const observer of __awr_mutation_observers__) {
+    \\          if (!observer.__records.length) continue;
+    \\          const records = observer.takeRecords();
+    \\          if (records.length) observer.__callback(records, observer);
+    \\        }
+    \\      });
+    \\    }
+    \\  }
+    \\
     \\  function makeElement(data) {
     \\    if (data === null || data === undefined) return null;
     \\    const d = typeof data === 'string' ? JSON.parse(data) : data;
@@ -665,21 +1165,84 @@ const BRIDGE_POLYFILL =
     \\      _attrs: attrs,
     \\      _text: d.text || '',
     \\      _children: [],
-    \\      getAttribute(name) { return this._attrs[name.toLowerCase()] != null ? this._attrs[name.toLowerCase()] : null; },
-    \\      setAttribute(name, value) { this._attrs[name.toLowerCase()] = String(value); __awr_setAttribute__(this._h, String(name), String(value)); },
-    \\      removeAttribute(name) { delete this._attrs[name.toLowerCase()]; __awr_removeAttribute__(this._h, String(name)); },
+    \\      getAttribute(name) {
+    \\        if (this._h) {
+    \\          const value = __awr_getAttribute__(this._h, String(name));
+    \\          return value === undefined ? null : value;
+    \\        }
+    \\        return this._attrs[name.toLowerCase()] != null ? this._attrs[name.toLowerCase()] : null;
+    \\      },
+    \\      setAttribute(name, value) {
+    \\        const key = name.toLowerCase();
+    \\        const oldValue = this._attrs[key] != null ? this._attrs[key] : null;
+    \\        this._attrs[key] = String(value);
+    \\        __awr_setAttribute__(this._h, String(name), String(value));
+    \\        __awr_queue_mutation_record__(this, { type: 'attributes', target: this, attributeName: String(name), oldValue: oldValue });
+    \\      },
+    \\      removeAttribute(name) {
+    \\        const key = name.toLowerCase();
+    \\        const oldValue = this._attrs[key] != null ? this._attrs[key] : null;
+    \\        delete this._attrs[key];
+    \\        __awr_removeAttribute__(this._h, String(name));
+    \\        __awr_queue_mutation_record__(this, { type: 'attributes', target: this, attributeName: String(name), oldValue: oldValue });
+    \\      },
     \\      hasAttribute(name) { return name.toLowerCase() in this._attrs; },
-    \\      get textContent() { return this._text; },
-    \\      set textContent(v) { this._text = String(v); this._innerHTML = String(v); __awr_setTextContent__(this._h, String(v)); },
-    \\      get innerHTML() { return this._innerHTML != null ? this._innerHTML : this._text; },
-    \\      set innerHTML(v) { this._innerHTML = String(v); },
-    \\      get outerHTML() { return '<' + this.tagName.toLowerCase() + '>' + this.innerHTML + '</' + this.tagName.toLowerCase() + '>'; },
+    \\      get textContent() { return this._h ? __awr_getTextContent__(this._h) : this._text; },
+    \\      set textContent(v) {
+    \\        const oldValue = this._text;
+    \\        this._text = String(v);
+    \\        this._innerHTML = String(v);
+    \\        __awr_setTextContent__(this._h, String(v));
+    \\        __awr_queue_mutation_record__(this, { type: 'characterData', target: this, oldValue: oldValue });
+    \\      },
+    \\      get innerHTML() {
+    \\        if (this._h) return __awr_getInnerHTML__(this._h);
+    \\        return this._innerHTML != null ? this._innerHTML : this._text;
+    \\      },
+    \\      set innerHTML(v) {
+    \\        this._innerHTML = String(v);
+    \\        this._text = '';
+    \\        this._children = [];
+    \\        __awr_setInnerHTML__(this._h, String(v));
+    \\        __awr_queue_mutation_record__(this, { type: 'childList', target: this, addedNodes: [], removedNodes: [] });
+    \\      },
+    \\      get outerHTML() {
+    \\        if (this._h) return __awr_getOuterHTML__(this._h);
+    \\        return '<' + this.tagName.toLowerCase() + '>' + this.innerHTML + '</' + this.tagName.toLowerCase() + '>';
+    \\      },
     \\      get id() { return this._attrs.id || ''; },
-    \\      set id(v) { this._attrs.id = String(v); __awr_setAttribute__(this._h, 'id', String(v)); },
+    \\      set id(v) {
+    \\        const value = String(v);
+    \\        const oldValue = this.getAttribute('id');
+    \\        this._attrs.id = value;
+    \\        __awr_setAttribute__(this._h, 'id', value);
+    \\        __awr_queue_mutation_record__(this, { type: 'attributes', target: this, attributeName: 'id', oldValue: oldValue });
+    \\      },
     \\      get className() { return this._attrs.class || ''; },
-    \\      set className(v) { this._attrs.class = String(v); __awr_setAttribute__(this._h, 'class', String(v)); },
-    \\      get style() { return this._style || (this._style = {}); },
-    \\      get dataset() { return this._dataset || (this._dataset = {}); },
+    \\      set className(v) {
+    \\        const value = String(v);
+    \\        const oldValue = this.getAttribute('class');
+    \\        this._attrs.class = value;
+    \\        __awr_setAttribute__(this._h, 'class', value);
+    \\        __awr_queue_mutation_record__(this, { type: 'attributes', target: this, attributeName: 'class', oldValue: oldValue });
+    \\      },
+    \\      get dataset() {
+    \\        const owner = this;
+    \\        if (!this._datasetProxy) {
+    \\          this._datasetProxy = new Proxy({}, {
+    \\            get(_, prop) {
+    \\              const key = 'data-' + String(prop).replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());
+    \\              return owner.getAttribute(key);
+    \\            },
+    \\            set(_, prop, value) {
+    \\              const key = 'data-' + String(prop).replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());
+    \\              owner.setAttribute(key, String(value));
+    \\              return true;
+    \\            },
+    \\          });
+    \\        }
+    \\        return this._datasetProxy;
+    \\      },
     \\      get classList() {
     \\        const owner = this;
     \\        const tokens = function() {
@@ -714,19 +1277,22 @@ const BRIDGE_POLYFILL =
     \\          },
     \\        };
     \\      },
-    \\      addEventListener() {},
-    \\      removeEventListener() {},
-    \\      dispatchEvent() { return true; },
+    \\      addEventListener(type, callback, options) { __awr_add_event_listener__(this, type, callback, options); },
+    \\      removeEventListener(type, callback, options) { __awr_remove_event_listener__(this, type, callback, options); },
+    \\      dispatchEvent(event) { return __awr_dispatch_event__(this, event); },
     \\      appendChild(child) {
+    \\        const previousSibling = this._children.length ? this._children[this._children.length - 1] : null;
     \\        this._children.push(child);
     \\        if (child) child._parent = this;
     \\        if (child && child._h) __awr_appendChild__(this._h, child._h);
+    \\        __awr_queue_mutation_record__(this, { type: 'childList', target: this, addedNodes: child ? [child] : [], removedNodes: [], previousSibling: previousSibling, nextSibling: null });
     \\        return child;
     \\      },
     \\      removeChild(child) {
     \\        this._children = this._children.filter(c => c !== child);
     \\        if (child) child._parent = null;
     \\        if (child && child._h) __awr_removeChild__(this._h, child._h);
+    \\        __awr_queue_mutation_record__(this, { type: 'childList', target: this, addedNodes: [], removedNodes: child ? [child] : [] });
     \\        return child;
     \\      },
     \\      insertBefore(node, ref) {
@@ -734,6 +1300,7 @@ const BRIDGE_POLYFILL =
     \\        if (idx >= 0) this._children.splice(idx, 0, node); else this._children.unshift(node);
     \\        if (node) node._parent = this;
     \\        __awr_insertBefore__(this._h, node && node._h ? node._h : 0, ref && ref._h ? ref._h : 0);
+    \\        __awr_queue_mutation_record__(this, { type: 'childList', target: this, addedNodes: node ? [node] : [], removedNodes: [], nextSibling: ref || null });
     \\        return node;
     \\      },
     \\      contains(other) { return !!(other && other._h && __awr_contains__(this._h, other._h)); },
@@ -750,13 +1317,18 @@ const BRIDGE_POLYFILL =
     \\        const r = __awr_closest__(this._h, String(sel));
     \\        return r ? makeElement(r) : null;
     \\      },
-    \\      getBoundingClientRect() { return {top:0,left:0,bottom:0,right:0,width:0,height:0,x:0,y:0}; },
-    \\      focus() {},
-    \\      blur() {},
-    \\      click() {},
-    \\      scrollIntoView() {},
-    \\      get children() { return this._children; },
-    \\      get childNodes() { return this._children; },
+    \\      getBoundingClientRect() {
+    \\        const r = __awr_getBoundingClientRect__(this._h);
+    \\        try { return r ? JSON.parse(r) : {top:0,left:0,bottom:0,right:0,width:0,height:0,x:0,y:0}; } catch (e) { return {top:0,left:0,bottom:0,right:0,width:0,height:0,x:0,y:0}; }
+    \\      },
+    \\      focus() { this.dispatchEvent(new FocusEvent('focus')); },
+    \\      blur() { this.dispatchEvent(new FocusEvent('blur')); },
+    \\      click() { return this.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); },
+    \\      get children() {
+    \\        if (!this._h) return this._children;
+    \\        try { return (JSON.parse(__awr_getChildren__(this._h)) || []).map(makeElement); } catch (e) { return []; }
+    \\      },
+    \\      get childNodes() { return this.children; },
     \\      get parentNode() {
     \\        if (this._parent) return this._parent;
     \\        const r = __awr_getParent__(this._h);
@@ -771,10 +1343,19 @@ const BRIDGE_POLYFILL =
     \\        const r = __awr_getPreviousSibling__(this._h);
     \\        return r ? makeElement(r) : null;
     \\      },
-    \\      get firstChild() { return this._children[0] || null; },
-    \\      get lastChild() { return this._children[this._children.length - 1] || null; },
+    \\      get firstChild() {
+    \\        const children = this.children;
+    \\        return children.length ? children[0] : null;
+    \\      },
+    \\      get lastChild() {
+    \\        const children = this.children;
+    \\        return children.length ? children[children.length - 1] : null;
+    \\      },
     \\      get nodeValue() { return null; },
-    \\      cloneNode() { return makeElement(d); },
+    \\      cloneNode(deep) {
+    \\        const r = __awr_cloneNode__(this._h, !!deep);
+    \\        return r ? makeElement(r) : null;
+    \\      },
     \\    };
     \\    return el;
     \\  }
@@ -795,26 +1376,23 @@ const BRIDGE_POLYFILL =
     \\    get head() { return this.querySelector('head'); },
     \\    get documentElement() { return this.querySelector('html'); },
     \\    createElement(tag) { const r = __awr_createElement__(String(tag)); return r ? makeElement(r) : makeElement({tag: tag, attrs: [], text: ''}); },
-    \\    createTextNode(text) { return {nodeType: 3, textContent: String(text), nodeValue: String(text), data: String(text)}; },
-    \\    createDocumentFragment() { const f = {_ch:[], appendChild(c){this._ch.push(c);return c;}, querySelectorAll(){return [];}}; return f; },
-    \\    createComment(text) { return {nodeType: 8, nodeValue: text}; },
-    \\    addEventListener() {},
-    \\    removeEventListener() {},
-    \\    dispatchEvent() { return true; },
-    \\    createEvent() { return {initEvent(){}, initCustomEvent(){}}; },
-    \\    createRange() { return {selectNodeContents(){}, toString(){return '';}, getBoundingClientRect(){return {top:0,left:0,width:0,height:0};}}; },
-    \\    execCommand() { return false; },
-    \\    get cookie() { return ''; },
-    \\    set cookie(v) {},
-    \\    get readyState() { return 'complete'; },
+    \\    addEventListener(type, callback, options) { __awr_add_event_listener__(this, type, callback, options); },
+    \\    removeEventListener(type, callback, options) { __awr_remove_event_listener__(this, type, callback, options); },
+    \\    dispatchEvent(event) { return __awr_dispatch_event__(this, event); },
+    \\    createEvent(type) { return new globalThis.Event(type || ''); },
+    \\    get readyState() { return globalThis.__awr_document_ready_state__ || 'loading'; },
     \\    get visibilityState() { return 'visible'; },
     \\    get hidden() { return false; },
     \\    get location() { return globalThis.location; },
     \\    get defaultView() { return globalThis; },
     \\  };
     \\
+    \\  globalThis.__awr_document_ready_state__ = globalThis.__awr_document_ready_state__ || 'loading';
     \\  globalThis.document  = document;
     \\  globalThis.window    = globalThis;
+    \\  globalThis.addEventListener = function(type, callback, options) { __awr_add_event_listener__(globalThis, type, callback, options); };
+    \\  globalThis.removeEventListener = function(type, callback, options) { __awr_remove_event_listener__(globalThis, type, callback, options); };
+    \\  globalThis.dispatchEvent = function(event) { return __awr_dispatch_event__(globalThis, event); };
     \\
     \\  if (!globalThis.navigator) {
     \\    globalThis.navigator = {
@@ -824,43 +1402,262 @@ const BRIDGE_POLYFILL =
     \\      platform: 'MacIntel', vendor: 'Google Inc.', maxTouchPoints: 0,
     \\    };
     \\  }
-    \\  if (!globalThis.location) {
-    \\    globalThis.location = { href: '', origin: '', pathname: '/', search: '', hash: '', hostname: '', protocol: 'https:', assign(){}, replace(){}, reload(){} };
+    \\  function __awr_resolve_history_url__(value) {
+    \\    value = String(value || '');
+    \\    if (!value) return globalThis.location.href;
+    \\    if (value.indexOf('://') >= 0) {
+    \\      if (!globalThis.location.origin || value.slice(0, globalThis.location.origin.length) !== globalThis.location.origin || (value.length > globalThis.location.origin.length && value[globalThis.location.origin.length] !== '/' && value[globalThis.location.origin.length] !== '?' && value[globalThis.location.origin.length] !== '#')) {
+    \\        throw new TypeError('history: only same-origin URLs are currently supported');
+    \\      }
+    \\      return value;
+    \\    }
+    \\    if (value[0] === '/') return globalThis.location.origin + value;
+    \\    const current = globalThis.location.pathname || '/';
+    \\    const slash = current.lastIndexOf('/');
+    \\    const dir = slash >= 0 ? current.slice(0, slash + 1) : '/';
+    \\    return globalThis.location.origin + dir + value;
     \\  }
-    \\  globalThis.history = { length: 1, state: null, pushState(){}, replaceState(){}, back(){}, forward(){}, go(){} };
-    \\  globalThis.screen  = { width: 1920, height: 1080, availWidth: 1920, availHeight: 1080, colorDepth: 24, pixelDepth: 24 };
+    \\  function __awr_apply_location__(href) {
+    \\    const hashIndex = href.indexOf('#');
+    \\    const hash = hashIndex >= 0 ? href.slice(hashIndex) : '';
+    \\    const withoutHash = hashIndex >= 0 ? href.slice(0, hashIndex) : href;
+    \\    const queryIndex = withoutHash.indexOf('?');
+    \\    const search = queryIndex >= 0 ? withoutHash.slice(queryIndex) : '';
+    \\    const withoutSearch = queryIndex >= 0 ? withoutHash.slice(0, queryIndex) : withoutHash;
+    \\    const schemeSplit = withoutSearch.indexOf('://');
+    \\    const protocol = schemeSplit >= 0 ? withoutSearch.slice(0, schemeSplit + 1) : globalThis.location.protocol;
+    \\    const authorityAndPath = schemeSplit >= 0 ? withoutSearch.slice(schemeSplit + 3) : withoutSearch;
+    \\    const slashIndex = authorityAndPath.indexOf('/');
+    \\    const authority = slashIndex >= 0 ? authorityAndPath.slice(0, slashIndex) : authorityAndPath;
+    \\    const pathname = slashIndex >= 0 ? authorityAndPath.slice(slashIndex) : '/';
+    \\    const colonIndex = authority.lastIndexOf(':');
+    \\    const hostname = colonIndex >= 0 ? authority.slice(0, colonIndex) : authority;
+    \\    const port = colonIndex >= 0 ? authority.slice(colonIndex + 1) : '';
+    \\    globalThis.location.href = href;
+    \\    globalThis.location.origin = protocol + '//' + authority;
+    \\    globalThis.location.pathname = pathname;
+    \\    globalThis.location.search = search;
+    \\    globalThis.location.hash = hash;
+    \\    globalThis.location.hostname = hostname;
+    \\    globalThis.location.host = authority;
+    \\    globalThis.location.port = port;
+    \\    globalThis.location.protocol = protocol;
+    \\  }
+    \\  if (!globalThis.location) {
+    \\    globalThis.location = { href: '', origin: '', pathname: '/', search: '', hash: '', hostname: '', host: '', port: '', protocol: 'https:' };
+    \\  }
+    \\  const __awr_history_entries__ = [{ url: globalThis.location.href || '', state: null }];
+    \\  globalThis.history = {
+    \\    length: 1,
+    \\    state: null,
+    \\    pushState(state, unused, url) {
+    \\      const nextUrl = url == null ? globalThis.location.href : __awr_resolve_history_url__(url);
+    \\      __awr_history_entries__.push({ url: nextUrl, state: state == null ? null : state });
+    \\      this.length = __awr_history_entries__.length;
+    \\      this.state = state == null ? null : state;
+    \\      __awr_apply_location__(nextUrl);
+    \\    },
+    \\    replaceState(state, unused, url) {
+    \\      const nextUrl = url == null ? globalThis.location.href : __awr_resolve_history_url__(url);
+    \\      __awr_history_entries__[__awr_history_entries__.length - 1] = { url: nextUrl, state: state == null ? null : state };
+    \\      this.state = state == null ? null : state;
+    \\      __awr_apply_location__(nextUrl);
+    \\    },
+    \\  };
+    \\  globalThis.screen  = { width: 80, height: 24, availWidth: 80, availHeight: 24, colorDepth: 24, pixelDepth: 24 };
     \\  globalThis.devicePixelRatio = 1;
-    \\  globalThis.innerWidth  = 1920;
-    \\  globalThis.innerHeight = 1080;
+    \\  globalThis.innerWidth  = 80;
+    \\  globalThis.innerHeight = 24;
+    \\  globalThis.outerWidth  = 80;
+    \\  globalThis.outerHeight = 24;
     \\
-    \\  globalThis.requestAnimationFrame  = function(cb) { return 0; };
-    \\  globalThis.cancelAnimationFrame   = function() {};
-    \\  globalThis.requestIdleCallback    = function(cb, opts) { return 0; };
-    \\  globalThis.cancelIdleCallback     = function() {};
+    \\  globalThis.requestAnimationFrame  = function(cb) { return setTimeout(function() { cb(Date.now()); }, 16); };
+    \\  globalThis.cancelAnimationFrame   = function(id) { clearTimeout(id); };
+    \\  globalThis.requestIdleCallback    = function(cb) { return setTimeout(function() { cb({ didTimeout: false, timeRemaining: function() { return 50; } }); }, 1); };
+    \\  globalThis.cancelIdleCallback     = function(id) { clearTimeout(id); };
     \\
-    \\  globalThis.MutationObserver = function() { return { observe(){}, disconnect(){}, takeRecords(){ return []; } }; };
-    \\  globalThis.IntersectionObserver = function(cb, opts) { return { observe(){}, disconnect(){}, unobserve(){} }; };
-    \\  globalThis.ResizeObserver = function(cb) { return { observe(){}, disconnect(){}, unobserve(){} }; };
-    \\  globalThis.PerformanceObserver = function(cb) { return { observe(){}, disconnect(){} }; };
+    \\  function __awr_viewport_rect__() {
+    \\    return { top: 0, left: 0, right: window.innerWidth, bottom: window.innerHeight, width: window.innerWidth, height: window.innerHeight, x: 0, y: 0 };
+    \\  }
     \\
-    \\  globalThis.CustomEvent = function(type, opts) {
-    \\    return { type, detail: (opts && opts.detail) || null, bubbles: false, cancelable: false };
+    \\  globalThis.MutationObserver = function(callback) {
+    \\    this.__callback = callback;
+    \\    this.__records = [];
+    \\    this.__observations = [];
+    \\    __awr_mutation_observers__.push(this);
     \\  };
+    \\  globalThis.MutationObserver.prototype.observe = function(target, options) {
+    \\    options = options || {};
+    \\    this.__observations = this.__observations.filter(entry => entry.target !== target);
+    \\    this.__observations.push({ target: target, options: {
+    \\      childList: !!options.childList,
+    \\      attributes: !!options.attributes,
+    \\      characterData: !!options.characterData,
+    \\      subtree: !!options.subtree,
+    \\      attributeOldValue: !!options.attributeOldValue,
+    \\      characterDataOldValue: !!options.characterDataOldValue,
+    \\    } });
+    \\  };
+    \\  globalThis.MutationObserver.prototype.disconnect = function() {
+    \\    this.__records = [];
+    \\    this.__observations = [];
+    \\  };
+    \\  globalThis.MutationObserver.prototype.takeRecords = function() {
+    \\    const out = this.__records.slice();
+    \\    this.__records.length = 0;
+    \\    return out;
+    \\  };
+    \\  globalThis.performance = globalThis.performance || { now: function() { return Date.now(); } };
+    \\
     \\  globalThis.Event = function(type, opts) {
-    \\    return { type, bubbles: (opts && opts.bubbles) || false, cancelable: (opts && opts.cancelable) || false,
-    \\             preventDefault(){}, stopPropagation(){}, stopImmediatePropagation(){} };
+    \\    opts = opts || {};
+    \\    this.type = String(type || '');
+    \\    this.bubbles = !!opts.bubbles;
+    \\    this.cancelable = !!opts.cancelable;
+    \\    this.defaultPrevented = false;
+    \\    this.target = null;
+    \\    this.currentTarget = null;
+    \\    this.eventPhase = 0;
+    \\    this.isTrusted = false;
+    \\    this.timeStamp = Date.now();
+    \\    this.__stop = false;
+    \\    this.__stopImmediate = false;
     \\  };
+    \\  globalThis.Event.prototype.preventDefault = function() {
+    \\    if (this.cancelable) this.defaultPrevented = true;
+    \\  };
+    \\  globalThis.Event.prototype.stopPropagation = function() {
+    \\    this.__stop = true;
+    \\  };
+    \\  globalThis.Event.prototype.stopImmediatePropagation = function() {
+    \\    this.__stop = true;
+    \\    this.__stopImmediate = true;
+    \\  };
+    \\  globalThis.CustomEvent = function(type, opts) {
+    \\    globalThis.Event.call(this, type, opts);
+    \\    this.detail = (opts && opts.detail) || null;
+    \\  };
+    \\  globalThis.CustomEvent.prototype = Object.create(globalThis.Event.prototype);
+    \\  globalThis.CustomEvent.prototype.constructor = globalThis.CustomEvent;
     \\  globalThis.MouseEvent = globalThis.Event;
     \\  globalThis.KeyboardEvent = globalThis.Event;
     \\  globalThis.TouchEvent = globalThis.Event;
     \\  globalThis.FocusEvent = globalThis.Event;
     \\
-    \\  globalThis.localStorage  = { getItem(){ return null; }, setItem(){}, removeItem(){}, clear(){}, length: 0 };
-    \\  globalThis.sessionStorage = globalThis.localStorage;
+    \\  globalThis.StorageEvent = function(type, opts) {
+    \\    opts = opts || {};
+    \\    globalThis.Event.call(this, type, opts);
+    \\    this.key = opts.key == null ? null : opts.key;
+    \\    this.oldValue = opts.oldValue == null ? null : opts.oldValue;
+    \\    this.newValue = opts.newValue == null ? null : opts.newValue;
+    \\    this.url = opts.url || '';
+    \\    this.storageArea = opts.storageArea || null;
+    \\  };
+    \\  globalThis.StorageEvent.prototype = Object.create(globalThis.Event.prototype);
+    \\  globalThis.StorageEvent.prototype.constructor = globalThis.StorageEvent;
+    \\
+    \\  function __awr_make_storage__() {
+    \\    const data = Object.create(null);
+    \\    const storage = {
+    \\      get length() { return Object.keys(data).length; },
+    \\      key(index) {
+    \\        const keys = Object.keys(data);
+    \\        return index >= 0 && index < keys.length ? keys[index] : null;
+    \\      },
+    \\      getItem(key) {
+    \\        key = String(key);
+    \\        return Object.prototype.hasOwnProperty.call(data, key) ? data[key] : null;
+    \\      },
+    \\      setItem(key, value) {
+    \\        key = String(key);
+    \\        value = String(value);
+    \\        const oldValue = this.getItem(key);
+    \\        data[key] = value;
+    \\      },
+    \\      removeItem(key) {
+    \\        key = String(key);
+    \\        const oldValue = this.getItem(key);
+    \\        delete data[key];
+    \\      },
+    \\      clear() {
+    \\        for (const key of Object.keys(data)) delete data[key];
+    \\      },
+    \\    };
+    \\    return storage;
+    \\  }
+    \\
+    \\  globalThis.localStorage = __awr_make_storage__();
+    \\  globalThis.sessionStorage = __awr_make_storage__();
     \\
     \\  globalThis.XMLHttpRequest = function() {
-    \\    return { open(){}, send(){}, setRequestHeader(){}, addEventListener(){},
-    \\             readyState: 4, status: 0, responseText: '' };
+    \\    this.readyState = 0;
+    \\    this.status = 0;
+    \\    this.statusText = '';
+    \\    this.responseText = '';
+    \\    this.responseURL = '';
+    \\    this.__method = 'GET';
+    \\    this.__url = '';
+    \\    this.__headers = Object.create(null);
+    \\  };
+    \\  globalThis.XMLHttpRequest.prototype.open = function(method, url) {
+    \\    if (arguments.length > 2 && arguments[2] === false) {
+    \\      throw new Error('XMLHttpRequest: sync mode is not currently supported');
+    \\    }
+    \\    if (arguments.length > 3) {
+    \\      throw new Error('XMLHttpRequest: credentialed requests are not currently supported');
+    \\    }
+    \\    this.__method = String(method || 'GET').toUpperCase();
+    \\    if (this.__method !== 'GET') {
+    \\      throw new Error('XMLHttpRequest: only async GET is currently supported');
+    \\    }
+    \\    this.__url = String(url || '');
+    \\    this.readyState = 1;
+    \\    this.dispatchEvent(new Event('readystatechange'));
+    \\  };
+    \\  globalThis.XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+    \\    throw new Error('XMLHttpRequest: request headers are not currently supported');
+    \\  };
+    \\  globalThis.XMLHttpRequest.prototype.abort = function() {
+    \\    this.readyState = 4;
+    \\    this.dispatchEvent(new Event('readystatechange'));
+    \\    this.dispatchEvent(new Event('loadend'));
+    \\  };
+    \\  globalThis.XMLHttpRequest.prototype.getResponseHeader = function(name) {
+    \\    const key = String(name || '').toLowerCase();
+    \\    return this.__responseHeadersMap && Object.prototype.hasOwnProperty.call(this.__responseHeadersMap, key) ? this.__responseHeadersMap[key] : null;
+    \\  };
+    \\  globalThis.XMLHttpRequest.prototype.getAllResponseHeaders = function() {
+    \\    if (!this.__responseHeadersMap) return '';
+    \\    return Object.keys(this.__responseHeadersMap).map((key) => key + ': ' + this.__responseHeadersMap[key]).join('\r\n');
+    \\  };
+    \\  globalThis.XMLHttpRequest.prototype.addEventListener = function(type, callback, options) { __awr_add_event_listener__(this, type, callback, options); };
+    \\  globalThis.XMLHttpRequest.prototype.removeEventListener = function(type, callback, options) { __awr_remove_event_listener__(this, type, callback, options); };
+    \\  globalThis.XMLHttpRequest.prototype.dispatchEvent = function(event) { return __awr_dispatch_event__(this, event); };
+    \\  globalThis.XMLHttpRequest.prototype.send = function(body) {
+    \\    if (body != null) {
+    \\      throw new Error('XMLHttpRequest: request bodies are not currently supported');
+    \\    }
+    \\    const self = this;
+    \\    fetch(this.__url)
+    \\      .then(function(response) {
+        \\        self.status = response.status;
+        \\        self.responseURL = response.url || self.__url;
+        \\        self.__responseHeadersMap = response.__headersMap || {};
+    \\        return response.text();
+    \\      })
+    \\      .then(function(text) {
+    \\        self.responseText = text;
+    \\        self.readyState = 4;
+    \\        self.dispatchEvent(new Event('readystatechange'));
+    \\        self.dispatchEvent(new Event('load'));
+    \\        self.dispatchEvent(new Event('loadend'));
+    \\      }, function() {
+    \\        self.status = 0;
+    \\        self.readyState = 4;
+    \\        self.dispatchEvent(new Event('readystatechange'));
+    \\        self.dispatchEvent(new Event('error'));
+    \\        self.dispatchEvent(new Event('loadend'));
+    \\      });
     \\  };
     \\
     \\  // ── WebMCP (navigator.modelContext) ────────────────────────────────
@@ -1183,7 +1980,7 @@ test "bridge — MutationObserver is constructable" {
     try eng.eval("const mo = new MutationObserver(function(){}); mo.observe(document.body, {});", "<test>");
 }
 
-test "bridge — localStorage stub does not throw" {
+test "bridge — localStorage set/get works" {
     var doc = try dom.parseDocument(std.testing.allocator, "<html><body></body></html>");
     defer doc.deinit();
 

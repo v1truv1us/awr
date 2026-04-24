@@ -93,6 +93,18 @@ documentation governance.
 - Recorded that README and agent-facing guidance files must be updated when the
   canonical execution boundary changes.
 
+### 2026-04-23 — Closed MVP surface narrowing
+
+- Recorded the closed shipped MVP surface as a narrower browser-runtime subset
+  rather than a generic browser API.
+- Removed `IntersectionObserver` and `ResizeObserver` from the shipped MVP
+  surface until real render-backed semantics exist.
+- Narrowed `history` to same-origin `pushState` / `replaceState` plus `length`
+  and `state`.
+- Narrowed `fetch()` and `XMLHttpRequest` to explicit async GET-only semantics.
+- Updated README and canonical specs together so the closure claim matches the
+  runtime and curated WPT corpus.
+
 ### Template for future amendments
 
 - Date:
