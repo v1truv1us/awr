@@ -1358,3 +1358,223 @@ test "Page.navigate — fetches http://example.com" {
     try std.testing.expect(result.title != null);
     try std.testing.expect(std.mem.indexOf(u8, result.body_text, "Example Domain") != null);
 }
+
+// ── <form method="post"> end-to-end integration test ──────────────────────
+//
+// Backs spec/subspecs/agent-browser.md §4 row 5 ("<form method="post"> parse
+// + submit"). Exercises the full chain: parse HTML → walk DOM ancestry to
+// resolve `<form>` method/action → assemble URL-encoded body from input
+// `value` attributes (CSRF round-trip) → POST through `Page.navigatePost`
+// (the same path `BrowserSession.loadPostUrl` uses) → wire-level capture by
+// an in-process `std.http.Server`. Together with the JS WPT case
+// `tests/wpt/form_method_post.js` (DOM-side parse coverage), this proves
+// the full pipe.
+
+// Server-thread writer, test-thread reader. The capture struct is filled
+// before the response is flushed; the test reads it after `navigatePost`
+// returns. Atomic length stores publish the buffer writes via release-acquire.
+const FormPostCapture = struct {
+    method: [16]u8 = std.mem.zeroes([16]u8),
+    method_len: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    content_type: [128]u8 = std.mem.zeroes([128]u8),
+    content_type_len: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    body: [1024]u8 = std.mem.zeroes([1024]u8),
+    body_len: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    target: [128]u8 = std.mem.zeroes([128]u8),
+    target_len: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+
+    fn record(self: *FormPostCapture, method: []const u8, target: []const u8, ct: []const u8, body: []const u8) void {
+        const m_len = @min(method.len, self.method.len);
+        @memcpy(self.method[0..m_len], method[0..m_len]);
+        const t_len = @min(target.len, self.target.len);
+        @memcpy(self.target[0..t_len], target[0..t_len]);
+        const c_len = @min(ct.len, self.content_type.len);
+        @memcpy(self.content_type[0..c_len], ct[0..c_len]);
+        const b_len = @min(body.len, self.body.len);
+        @memcpy(self.body[0..b_len], body[0..b_len]);
+        // Release-publish: lengths becoming non-zero implies buffers are written.
+        self.method_len.store(m_len, .release);
+        self.target_len.store(t_len, .release);
+        self.content_type_len.store(c_len, .release);
+        self.body_len.store(b_len, .release);
+    }
+
+    fn methodSlice(self: *FormPostCapture) []const u8 {
+        return self.method[0..self.method_len.load(.acquire)];
+    }
+    fn targetSlice(self: *FormPostCapture) []const u8 {
+        return self.target[0..self.target_len.load(.acquire)];
+    }
+    fn contentTypeSlice(self: *FormPostCapture) []const u8 {
+        return self.content_type[0..self.content_type_len.load(.acquire)];
+    }
+    fn bodySlice(self: *FormPostCapture) []const u8 {
+        return self.body[0..self.body_len.load(.acquire)];
+    }
+};
+
+const FormPostServer = struct {
+    addr: std.Io.net.IpAddress,
+    ready: std.Io.Semaphore = .{},
+    stop_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    thread: std.Thread = undefined,
+    capture: *FormPostCapture,
+
+    fn start(self: *FormPostServer, capture: *FormPostCapture, port: u16) !void {
+        self.* = .{
+            .addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port),
+            .capture = capture,
+        };
+        self.thread = try std.Thread.spawn(.{}, serve, .{self});
+        self.ready.waitUncancelable(std.testing.io);
+    }
+
+    fn shutdown(self: *FormPostServer) void {
+        self.stop_flag.store(true, .release);
+        if (std.Io.net.IpAddress.connect(&self.addr, std.testing.io, .{ .mode = .stream })) |stream| {
+            var s = stream;
+            s.close(std.testing.io);
+        } else |_| {}
+        self.thread.join();
+    }
+
+    fn serve(self: *FormPostServer) void {
+        var listener = self.addr.listen(std.testing.io, .{ .reuse_address = true }) catch return;
+        defer listener.deinit(std.testing.io);
+        self.ready.post(std.testing.io);
+        while (!self.stop_flag.load(.acquire)) {
+            var stream = listener.accept(std.testing.io) catch continue;
+            defer stream.close(std.testing.io);
+            if (self.stop_flag.load(.acquire)) return;
+            handleConnection(self.capture, &stream) catch {};
+        }
+    }
+
+    fn handleConnection(capture: *FormPostCapture, stream: *std.Io.net.Stream) !void {
+        var read_storage: [16 * 1024]u8 = undefined;
+        var write_storage: [4 * 1024]u8 = undefined;
+        var net_reader = stream.reader(std.testing.io, &read_storage);
+        var net_writer = stream.writer(std.testing.io, &write_storage);
+
+        var http_server: std.http.Server = .init(&net_reader.interface, &net_writer.interface);
+        var request = http_server.receiveHead() catch return;
+
+        // Capture content-type from headers before they're invalidated by readerExpectContinue.
+        var ct_buf: [128]u8 = undefined;
+        var ct_len: usize = 0;
+        var hdr_it = request.iterateHeaders();
+        while (hdr_it.next()) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "content-type")) {
+                ct_len = @min(h.value.len, ct_buf.len);
+                @memcpy(ct_buf[0..ct_len], h.value[0..ct_len]);
+                break;
+            }
+        }
+
+        const target = request.head.target;
+        const method = @tagName(request.head.method);
+
+        var body_buf: [4 * 1024]u8 = undefined;
+        const body_reader = request.readerExpectContinue(&body_buf) catch return;
+        var body_storage: [1024]u8 = undefined;
+        var body_writer: std.Io.Writer = .fixed(&body_storage);
+        const body_len = body_reader.streamRemaining(&body_writer) catch 0;
+        const body = body_storage[0..body_len];
+
+        capture.record(method, target, ct_buf[0..ct_len], body);
+
+        try request.respond("ok", .{
+            .status = .ok,
+            .extra_headers = &.{
+                .{ .name = "content-type", .value = "text/plain; charset=utf-8" },
+            },
+        });
+    }
+};
+
+test "<form method=post> end-to-end submits hidden + edited fields to wire" {
+    const port: u16 = 18489;
+    const allocator = std.testing.allocator;
+
+    var capture = FormPostCapture{};
+    var server: FormPostServer = undefined;
+    try server.start(&capture, port);
+    defer server.shutdown();
+
+    const fixture_html =
+        "<html><body><form method=\"post\" action=\"/submit\">" ++
+        "<input type=\"hidden\" name=\"csrf\" value=\"tok123\" />" ++
+        "<input type=\"text\" name=\"user\" value=\"alice\" />" ++
+        "<input type=\"submit\" value=\"Send\" />" ++
+        "</form></body></html>";
+
+    var page = try Page.init(allocator, std.testing.io);
+    defer page.deinit();
+
+    const page_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/form.html", .{port});
+    defer allocator.free(page_url);
+
+    var fetch_result = try page.processHtml(page_url, 200, fixture_html);
+    defer fetch_result.deinit();
+
+    var screen = try page.renderBrowseModel(allocator, &fetch_result, .{
+        .max_width = 80,
+        .ansi_colors = false,
+        .show_links = false,
+        .show_images = false,
+    });
+    defer screen.deinit();
+
+    // Reproduce the BrowserSession.submitForm body assembly: walk fields,
+    // skip submit, fall back to the input's `value` attribute when no edit
+    // exists. Hidden CSRF tokens depend on this fallback per agent-browser §2.
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(allocator);
+    var meta: ?Page.FormMeta = null;
+    var first = true;
+    for (screen.fields) |field| {
+        if (field.is_submit) continue;
+        if (field.name.len == 0) continue;
+        if (meta == null) meta = page.formMetaForField(field);
+        const val: []const u8 = page.fieldValueAttr(field) orelse "";
+        if (!first) try body.append(allocator, '&');
+        first = false;
+        try appendUrlEncodedTest(allocator, &body, field.name);
+        try body.append(allocator, '=');
+        try appendUrlEncodedTest(allocator, &body, val);
+    }
+
+    try std.testing.expect(meta != null);
+    try std.testing.expect(meta.?.method == .POST);
+    const action_raw = meta.?.action orelse return error.MissingAction;
+    try std.testing.expectEqualStrings("/submit", action_raw);
+
+    const target_url = try page.resolveUrl(page_url, action_raw);
+    defer allocator.free(target_url);
+
+    var post_result = try page.navigatePost(target_url, body.items);
+    defer post_result.deinit();
+    try std.testing.expectEqual(@as(u16, 200), post_result.status);
+
+    // Wire-level assertions on what the server actually received.
+    try std.testing.expectEqualStrings("POST", capture.methodSlice());
+    try std.testing.expectEqualStrings("/submit", capture.targetSlice());
+    try std.testing.expectEqualStrings("application/x-www-form-urlencoded", capture.contentTypeSlice());
+    const got_body = capture.bodySlice();
+    // Order is fields[] order: csrf first, user second.
+    try std.testing.expectEqualStrings("csrf=tok123&user=alice", got_body);
+}
+
+fn appendUrlEncodedTest(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            'A'...'Z', 'a'...'z', '0'...'9', '-', '_', '.', '~' => try buf.append(allocator, c),
+            ' ' => try buf.append(allocator, '+'),
+            else => {
+                const hex = try std.fmt.allocPrint(allocator, "%{X:0>2}", .{c});
+                defer allocator.free(hex);
+                try buf.appendSlice(allocator, hex);
+            },
+        }
+    }
+}

@@ -812,10 +812,19 @@ fn trimmedTextLen(text: []const u8) usize {
     return count;
 }
 
+fn isUserVisibleField(field: page_mod.ScreenField) bool {
+    if (field.is_submit) return false;
+    // Hidden inputs are kept in the model for form submission (CSRF round-trip
+    // per spec/subspecs/agent-browser.md §2) but must not appear in the user's
+    // tab order or field counts.
+    if (std.mem.eql(u8, field.field_type, "hidden")) return false;
+    return true;
+}
+
 fn countEditableFields(model: *const page_mod.ScreenModel) usize {
     var count: usize = 0;
     for (model.fields) |field| {
-        if (!field.is_submit) count += 1;
+        if (isUserVisibleField(field)) count += 1;
     }
     return count;
 }
@@ -823,7 +832,7 @@ fn countEditableFields(model: *const page_mod.ScreenModel) usize {
 fn editableFieldAt(model: *const page_mod.ScreenModel, idx: usize) ?page_mod.ScreenField {
     var i: usize = 0;
     for (model.fields) |field| {
-        if (field.is_submit) continue;
+        if (!isUserVisibleField(field)) continue;
         if (i == idx) return field;
         i += 1;
     }

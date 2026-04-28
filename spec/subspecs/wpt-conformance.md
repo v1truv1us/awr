@@ -175,24 +175,61 @@ why the case was invalid.
 
 ## 8. Mapping from API areas to test files
 
-The exact file list may grow, but these areas define the intended MVP conformance
-surface:
+> **Current status (as of 2026-04-28):** 65 active curated WPT cases pass via
+> `zig build test-wpt`. 29 Test262 cases pass via `zig build test-test262`.
+> All `spec/subspecs/agent-browser.md §4` closure-gate cases are active.
+> Only one form/cookie row remains deferred — see §8b.
 
-| Area | Representative curated cases |
+### §8a. Active curated cases
+
+| Area | Active curated cases |
 |---|---|
-| DOM queries | `document_title.js`, `document_querySelector.js`, `document_querySelectorAll.js` |
-| Selector semantics | descendant selectors, attribute selectors, combinators, `:not`, multi-class |
-| DOM mutation | `mutation_create_append.js`, `mutation_innerHTML_setter.js`, `mutation_removeChild.js` |
-| DOM relationships | `element_parentNode.js`, `element_siblings.js`, `element_contains.js`, `element_cloneNode.js` |
-| Events | `event_add_remove.js`, `event_dispatch_bubble.js`, `event_custom.js`, `event_DOMContentLoaded.js` |
-| MutationObserver | `mutation_observer_childList.js`, `mutation_observer_attributes.js`, `mutation_observer_subtree.js` |
-| Storage | `storage_localStorage.js` |
+| DOM queries | `document_title.js`, `document_title_location.js`, `document_title_create_missing.js`, `document_getElementById.js`, `document_dynamic_getElementById.js`, `document_querySelector.js`, `document_querySelectorAll.js`, `document_getElementsBy.js`, `document_body_head.js`, `document_readyState.js`, `document_createElement.js` |
+| Selector semantics | `descendant_selectors.js`, `element_scoped_selectors.js` |
+| DOM mutation | `element_innerHTML_setter.js`, `element_cloneNode.js` |
+| Element attributes | `element_getAttribute_textContent.js`, `element_hasAttribute.js`, `element_id_className.js`, `element_classList.js`, `element_outerHTML.js`, `element_dom_getters_authoritative.js` |
+| DOM relationships | `element_parentNode.js`, `element_siblings.js`, `element_contains.js`, `element_matches_closest.js` |
+| Element interaction | `element_click_focus_blur.js`, `element_bounding_client_rect.js` |
+| Events | `event_add_remove.js`, `event_dispatch_bubble.js`, `event_custom.js`, `event_DOMContentLoaded.js`, `event_prevent_default.js`, `event_stop_propagation.js` |
+| MutationObserver | `mutation_observer_childList.js`, `mutation_observer_attributes.js`, `mutation_observer_subtree.js`, `mutation_observer_takeRecords.js`, `mutation_observer_reflected_attributes.js` |
+| Storage | `storage_localStorage.js`, `session_storage_distinct.js`, `storage_event_payload.js` |
 | XHR (GET + POST) | `xhr_basic_get.js`, `xhr_post_basic.js`, `xhr_post_form_encoded.js`, `xhr_rejects_unsupported.js` |
 | `fetch()` (GET + POST) | `fetch_basic.js`, `fetch_post_basic.js`, `fetch_post_form_encoded.js`, `fetch_rejects_unsupported.js` |
-| Form submission | `form_method_post.js` (plus Zig-side integration test for end-to-end submit) |
-| Cookie persistence | `cookies_persistence_roundtrip.js` |
-| History subset | `history_push_replace_state.js`, `history_relative_url.js` |
-| Viewport APIs | `viewport_dimensions.js`, `requestAnimationFrame.js`, `element_bounding_client_rect.js` |
-| JS runtime | curated Test262 cases in `tests/test262_runner.zig` |
+| Forms (DOM) | `form_input_value_type.js`, `form_textarea_value.js`, `form_document_forms.js`, `form_button_select.js`, `form_method_post.js` |
+| History | `history_push_replace_state.js`, `history_relative_url.js` |
+| Viewport / observers | `viewport_dimensions.js`, `requestAnimationFrame.js`, `request_idle_callback.js`, `request_idle_callback_cancel.js`, `intersection_observer.js`, `resize_observer.js` |
+| Harness / misc | `promise_test_basics.js`, `console_namespace.js` |
+| JS runtime | 29 curated Test262 cases in `tests/test262_runner.zig` |
+
+POST round-trip cases (`fetch_post_basic.js`, `fetch_post_form_encoded.js`,
+`xhr_post_basic.js`, `xhr_post_form_encoded.js`) use an in-process echo server
+(`EchoServer` in `tests/wpt_runner.zig`) that listens on `127.0.0.1:18488` and
+returns `{METHOD}|{BODY}` for any request. The echo server is started once
+before the test loop and shut down after.
+
+`URLSearchParams` is provided by a polyfill installed at JS engine boot
+(`src/js/url_search_params.js`, wired in `src/js/engine.zig`) — QuickJS-NG
+does not ship URLSearchParams natively. The polyfill is required by the
+`*_form_encoded` cases and by `spec/subspecs/agent-browser.md §2`.
+
+`<form method="post">` end-to-end submission (parse → DOM ancestry walk →
+URL-encoded body assembly with hidden-input CSRF round-trip → wire-level POST
+through `Page.navigatePost`) is covered by the Zig integration test
+`<form method=post> end-to-end submits hidden + edited fields to wire` in
+`src/page.zig`. This complements `form_method_post.js` (DOM-side parse
+coverage) and together they prove the full pipe per
+`spec/subspecs/agent-browser.md §4` last paragraph.
+
+### §8b. Deferred cases
+
+The following test file exists in `tests/wpt/` but is not registered in the
+curated case list because it requires a runtime feature outside MVP scope.
+
+| Test file | Blocking gap |
+|---|---|
+| `cookies_persistence_roundtrip.js` (not yet written) | Requires either `document.cookie` (not in MVP) or a harness-only binding; the cookie-jar serialize/deserialize/expiry/HttpOnly_ contract is exercised today by inline Zig tests in `src/net/cookie.zig` per `spec/subspecs/agent-browser.md §4` last row. |
+
+When the blocking gap is resolved, register the case in `curated_cases` and
+verify `zig build test-wpt` stays green.
 
 This mapping is the intended closure surface for the shipped MVP.

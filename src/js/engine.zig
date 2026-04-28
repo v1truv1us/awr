@@ -233,6 +233,7 @@ pub const JsEngine = struct {
         try self.installTimers();
         try self.installFetch();
         try self.installStructuredClone();
+        try self.installUrlSearchParams();
     }
 
     /// Called by Page after constructing its EventLoop.
@@ -577,6 +578,18 @@ pub const JsEngine = struct {
     fn installStructuredClone(self: *JsEngine) JsError!void {
         try self.eval(STRUCTURED_CLONE_POLYFILL, "<structured-clone>");
     }
+
+    // ── URLSearchParams polyfill ────────────────────────────────────────
+    //
+    // Required by spec/subspecs/agent-browser.md §2. QuickJS-NG ships no
+    // URLSearchParams; without this polyfill, the fetch() and XHR body
+    // shapes documented in the spec cannot be constructed by callers.
+
+    fn installUrlSearchParams(self: *JsEngine) JsError!void {
+        try self.eval(URLSEARCHPARAMS_POLYFILL, "<url-search-params>");
+    }
+
+    const URLSEARCHPARAMS_POLYFILL = @embedFile("url_search_params.js");
 
     const STRUCTURED_CLONE_POLYFILL =
         \\(function () {

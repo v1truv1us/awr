@@ -127,6 +127,44 @@ documentation governance.
   `spec/subspecs/mvp-remainder.md`, `spec/subspecs/wpt-conformance.md`,
   `AGENTS.md`, `CLAUDE.md`, `README.md`, this ADR.
 
+### 2026-04-28 — Agent-browser closure gates closed
+
+- Closed `spec/subspecs/agent-browser.md §5` gates by registering all five
+  required curated WPT cases (`fetch_post_basic.js`,
+  `fetch_post_form_encoded.js`, `xhr_post_basic.js`,
+  `xhr_post_form_encoded.js`, `form_method_post.js`) in
+  `tests/wpt_runner.zig`'s `curated_cases` array. POST round-trips run
+  against an in-process echo server (`EchoServer` in the same file) on
+  `127.0.0.1:18488`.
+- Landed a `URLSearchParams` polyfill at `src/js/url_search_params.js` wired
+  through `JsEngine.installWebApis` — required because QuickJS-NG ships no
+  native `URLSearchParams` and the spec body-shape constraint is unusable
+  without it.
+- Fixed hidden-input round-trip in `src/render.zig` (register `type=hidden`
+  fields with `field_type="hidden"` instead of skipping them) and
+  `src/browser.zig` (added `isUserVisibleField` helper to keep hidden
+  fields out of tab order while keeping them available for form
+  submission). This implements the CSRF-token round-trip required by
+  `agent-browser.md §2`.
+- Added Zig-side end-to-end form-post integration test in `src/page.zig`
+  that drives `processHtml → formMetaForField → fieldValueAttr →
+  navigatePost` against a localhost `std.http.Server` on port `18489`.
+  Verifies wire-level method/target/content-type/body, including hidden
+  CSRF round-trip.
+- Updated `spec/subspecs/wpt-conformance.md §8` mapping: 65 active curated
+  WPT cases (was 61); only `cookies_persistence_roundtrip.js` remains
+  deferred (requires `document.cookie` or harness binding, both out of
+  MVP scope).
+- Amended `spec/MVP.md §4.4` closure-gate phrasing from "GET-only request"
+  to "GET+POST request, form-submission" to keep the canonical spec
+  consistent with the closed gates.
+- Reason: agent-browser.md §5 closure was the next concrete piece of MVP
+  remainder work; the in-flight POST/form WPT files committed in
+  `a2639bb` were unregistered pending the echo-server fixture and
+  URLSearchParams polyfill.
+- Documents updated: `spec/MVP.md`, `spec/subspecs/wpt-conformance.md`,
+  this ADR.
+
 ### Template for future amendments
 
 - Date:

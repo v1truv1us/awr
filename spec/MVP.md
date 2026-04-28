@@ -77,7 +77,9 @@ The MVP is only considered complete when all of the following are true:
 3. `zig build test` is green without hangs or known broken steps on the default
    developer path.
 4. curated WPT coverage is wired into the build and passes for the intended DOM,
-   page, event, storage, GET-only request, history-subset, and viewport surface.
+   page, event, storage, GET+POST request, form-submission, history-subset, and
+   viewport surface (POST/forms scope governed by
+   `spec/subspecs/agent-browser.md`).
 5. curated Test262 coverage is wired into the build and passes for the intended
    embedded JS runtime surface.
 6. shipped APIs follow the **no-stubs rule**: any exposed surface must be real,

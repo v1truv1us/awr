@@ -861,7 +861,24 @@ fn renderInput(state: *RenderState, w: anytype, elem: *const dom.Element) anyerr
     const input_type = elem.getAttribute("type") orelse "text";
     const name = elem.getAttribute("name") orelse "";
 
-    if (eql(input_type, "hidden")) return;
+    if (eql(input_type, "hidden")) {
+        // Hidden inputs are invisible to the renderer but must still be
+        // registered as fields so `BrowserSession.submitForm` can include
+        // their `value` attribute in the encoded body — this is the
+        // CSRF-token round-trip required by spec/subspecs/agent-browser.md §2.
+        // Visible-nav helpers in `browser.zig` filter hidden fields out so
+        // they do not show up in tab order or status counts.
+        _ = state.registerField(
+            @intFromPtr(elem),
+            name,
+            "hidden",
+            "",
+            state.col,
+            0,
+            false,
+        ) catch {};
+        return;
+    }
     if (eql(input_type, "submit") or eql(input_type, "reset") or eql(input_type, "button")) {
         const label = elem.getAttribute("value") orelse if (eql(input_type, "submit")) "Submit" else if (eql(input_type, "reset")) "Reset" else "Button";
         const col = state.col;

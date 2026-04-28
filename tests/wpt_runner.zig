@@ -3,11 +3,87 @@ const page_mod = @import("page");
 
 const testharness_shim = @embedFile("wpt/testharness_shim.js");
 
+/// Port for the in-process POST echo server fixture. Hard-coded contract
+/// shared with `tests/wpt/{fetch,xhr}_post_*.js`. Do not change without
+/// updating those JS test files in lockstep.
+const echo_server_port: u16 = 18488;
+const echo_server_host = "127.0.0.1";
+
 const WptCase = struct {
     filename: []const u8,
     html: []const u8,
     script: []const u8,
     url: []const u8 = "http://example.com/",
+};
+
+/// In-process HTTP/1.1 echo server used by the curated POST WPT cases.
+/// Listens on 127.0.0.1:18488 and replies `200 text/plain` with body
+/// `"{METHOD}|{REQUEST_BODY}"` so JS can round-trip-assert that fetch/XHR
+/// transmitted the right method and bytes through `std.http.Client`.
+const EchoServer = struct {
+    addr: std.Io.net.IpAddress,
+    ready: std.Io.Semaphore = .{},
+    stop_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    thread: std.Thread = undefined,
+    allocator: std.mem.Allocator = undefined,
+
+    fn start(self: *EchoServer, allocator: std.mem.Allocator) !void {
+        self.* = .{
+            .addr = try std.Io.net.IpAddress.parseIp4(echo_server_host, echo_server_port),
+            .allocator = allocator,
+        };
+        self.thread = try std.Thread.spawn(.{}, serve, .{self});
+        self.ready.waitUncancelable(std.testing.io);
+    }
+
+    fn shutdown(self: *EchoServer) void {
+        self.stop_flag.store(true, .release);
+        // Wake the blocked `accept()` by connecting once.
+        if (std.Io.net.IpAddress.connect(&self.addr, std.testing.io, .{ .mode = .stream })) |stream| {
+            var s = stream;
+            s.close(std.testing.io);
+        } else |_| {}
+        self.thread.join();
+    }
+
+    fn serve(self: *EchoServer) void {
+        var listener = self.addr.listen(std.testing.io, .{ .reuse_address = true }) catch return;
+        defer listener.deinit(std.testing.io);
+        self.ready.post(std.testing.io);
+        while (!self.stop_flag.load(.acquire)) {
+            var stream = listener.accept(std.testing.io) catch continue;
+            defer stream.close(std.testing.io);
+            if (self.stop_flag.load(.acquire)) return;
+            handleConnection(self.allocator, &stream) catch {};
+        }
+    }
+
+    fn handleConnection(allocator: std.mem.Allocator, stream: *std.Io.net.Stream) !void {
+        var read_storage: [16 * 1024]u8 = undefined;
+        var write_storage: [8 * 1024]u8 = undefined;
+        var net_reader = stream.reader(std.testing.io, &read_storage);
+        var net_writer = stream.writer(std.testing.io, &write_storage);
+
+        var http_server: std.http.Server = .init(&net_reader.interface, &net_writer.interface);
+        var request = http_server.receiveHead() catch return;
+
+        var body_buf: [4 * 1024]u8 = undefined;
+        const body_reader = request.readerExpectContinue(&body_buf) catch return;
+        const body = body_reader.allocRemaining(allocator, .limited(64 * 1024)) catch
+            try allocator.dupe(u8, "");
+        defer allocator.free(body);
+
+        const method = @tagName(request.head.method);
+        const payload = try std.fmt.allocPrint(allocator, "{s}|{s}", .{ method, body });
+        defer allocator.free(payload);
+
+        try request.respond(payload, .{
+            .status = .ok,
+            .extra_headers = &.{
+                .{ .name = "content-type", .value = "text/plain; charset=utf-8" },
+            },
+        });
+    }
 };
 
 const curated_cases = [_]WptCase{
@@ -310,6 +386,36 @@ const curated_cases = [_]WptCase{
         .html = "<html><body><form id=\"f\"><button id=\"btn\" name=\"go\" value=\"go_val\">Go</button><button id=\"reset\" type=\"reset\">Reset</button><select id=\"choice\" name=\"color\"><option value=\"r\">Red</option><option value=\"b\">Blue</option></select><input id=\"sub\" type=\"submit\" value=\"Send\" /></form></body></html>",
         .script = @embedFile("wpt/form_button_select.js"),
     },
+    .{
+        .filename = "fetch_post_basic.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/fetch_post_basic.js"),
+        .url = "http://127.0.0.1:18488/",
+    },
+    .{
+        .filename = "fetch_post_form_encoded.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/fetch_post_form_encoded.js"),
+        .url = "http://127.0.0.1:18488/",
+    },
+    .{
+        .filename = "xhr_post_basic.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/xhr_post_basic.js"),
+        .url = "http://127.0.0.1:18488/",
+    },
+    .{
+        .filename = "xhr_post_form_encoded.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/xhr_post_form_encoded.js"),
+        .url = "http://127.0.0.1:18488/",
+    },
+    .{
+        .filename = "form_method_post.js",
+        .html = "<html><body><form id=\"f1\" method=\"post\" action=\"/submit\"><input name=\"x\" value=\"1\" /></form><form id=\"f2\" action=\"/search\"><input name=\"q\" /></form><form id=\"f3\" method=\"PoSt\" action=\"http://other.example/api\"><input name=\"y\" value=\"2\" /></form></body></html>",
+        .script = @embedFile("wpt/form_method_post.js"),
+        .url = "http://127.0.0.1:18488/forms",
+    },
 };
 
 fn buildCaseHtml(allocator: std.mem.Allocator, case: WptCase) ![]u8 {
@@ -357,6 +463,10 @@ fn runCase(allocator: std.mem.Allocator, case: WptCase) !void {
 }
 
 test "curated WPT DOM corpus passes" {
+    var echo: EchoServer = undefined;
+    try echo.start(std.testing.allocator);
+    defer echo.shutdown();
+
     for (curated_cases) |case| {
         try runCase(std.testing.allocator, case);
     }
