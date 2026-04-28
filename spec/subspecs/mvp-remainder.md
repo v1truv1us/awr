@@ -147,6 +147,9 @@ Exit criteria:
 - curated request WPT cases pass;
 - async GET requests do not hang the event loop.
 
+POST request semantics are no longer deferred; they land under the active
+`spec/subspecs/agent-browser.md` track and widen §5.4 of `spec/MVP.md`.
+
 ### Viewport-backed APIs
 
 Ground geometry and viewport observers in AWR's real terminal render pipeline.
@@ -233,6 +236,11 @@ the following:
 - later fingerprinting and browser-identity work
 - `IntersectionObserver` / `ResizeObserver`
 - full browser-history navigation/traversal semantics
-- non-GET request semantics for `fetch()` / `XMLHttpRequest`
 
 Those remain documented, but deferred.
+
+## Follow-on closed tracks
+
+- `spec/subspecs/agent-browser.md` — POST in `fetch`/`XMLHttpRequest`,
+  `<form method="post">` end-to-end, and cookie jar disk persistence. Active
+  track, WPT-gated, widens `spec/MVP.md §5.4`.

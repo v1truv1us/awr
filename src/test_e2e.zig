@@ -8,7 +8,7 @@
 ///
 ///   zig build test-e2e     # run only integration tests
 ///   zig build test         # unit tests only (no network)
-const std    = @import("std");
+const std = @import("std");
 const client = @import("client.zig");
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -18,8 +18,8 @@ const client = @import("client.zig");
 /// which would give a compressed body we cannot parse here.
 fn getPlain(allocator: std.mem.Allocator, url: []const u8) !client.Response {
     var c = client.Client.init(allocator, std.testing.io, .{
-        .follow_redirects   = true,
-        .max_redirects      = 5,
+        .follow_redirects = true,
+        .max_redirects = 5,
         .use_chrome_headers = false,
     });
     defer c.deinit();
@@ -29,8 +29,8 @@ fn getPlain(allocator: std.mem.Allocator, url: []const u8) !client.Response {
 /// Make a GET with Chrome-132 headers (compressed response — body not checked).
 fn getChrome(allocator: std.mem.Allocator, url: []const u8) !client.Response {
     var c = client.Client.init(allocator, std.testing.io, .{
-        .follow_redirects   = true,
-        .max_redirects      = 5,
+        .follow_redirects = true,
+        .max_redirects = 5,
         .use_chrome_headers = true,
     });
     defer c.deinit();
@@ -47,7 +47,7 @@ test "e2e: GET http://example.com/ returns 200 with HTML body" {
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(resp.body.len > 0);
     const has_html = std.mem.indexOfPos(u8, resp.body, 0, "<html") != null or
-                     std.mem.indexOfPos(u8, resp.body, 0, "<HTML") != null;
+        std.mem.indexOfPos(u8, resp.body, 0, "<HTML") != null;
     try std.testing.expect(has_html);
 }
 

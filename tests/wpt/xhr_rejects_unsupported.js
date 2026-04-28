@@ -1,13 +1,15 @@
 test(() => {
+  // GET and POST are accepted per spec/subspecs/agent-browser.md §2.
+  // Other methods (PUT/DELETE/PATCH/HEAD/OPTIONS) still throw at open().
   const xhr = new XMLHttpRequest();
   let message = '';
   try {
-    xhr.open('POST', './xhr_basic.txt');
+    xhr.open('PUT', './xhr_basic.txt');
   } catch (error) {
     message = String(error && error.message || error);
   }
-  assert_true(message.includes('only async GET'));
-}, 'XMLHttpRequest rejects non-GET methods');
+  assert_true(message.includes('GET and POST'));
+}, 'XMLHttpRequest rejects methods other than GET and POST');
 
 test(() => {
   const xhr = new XMLHttpRequest();
@@ -33,6 +35,8 @@ test(() => {
 }, 'XMLHttpRequest rejects request headers');
 
 test(() => {
+  // GET requests still cannot carry a body — the new restriction is on the
+  // method/body combination, not on bodies existing in general.
   const xhr = new XMLHttpRequest();
   xhr.open('GET', './xhr_basic.txt');
   let message = '';
@@ -41,5 +45,5 @@ test(() => {
   } catch (error) {
     message = String(error && error.message || error);
   }
-  assert_true(message.includes('request bodies'));
-}, 'XMLHttpRequest rejects request bodies');
+  assert_true(message.includes('GET requests cannot have a body'));
+}, 'XMLHttpRequest rejects GET with body');

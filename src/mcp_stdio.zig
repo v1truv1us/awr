@@ -263,7 +263,7 @@ fn writeErrorResponse(allocator: std.mem.Allocator, out: anytype, id: std.json.V
 fn writeFramedMessage(out: anytype, payload: []const u8) !void {
     var header_buf: [64]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buf, "Content-Length: {d}\r\n\r\n", .{payload.len});
-    std.debug.print("{s}{s}", .{header, payload});
+    std.debug.print("{s}{s}", .{ header, payload });
     try out.flush();
 }
 

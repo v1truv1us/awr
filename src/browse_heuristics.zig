@@ -31,16 +31,22 @@ pub fn chooseContentRoot(doc: *const dom.Document) ?*const dom.Element {
     const body = doc.body() orelse return doc.htmlElement();
 
     if (findFirstByTag(body, "main")) |elem| {
-        if (bestLinkListContainer(elem)) |inner| return inner;
-        return elem;
+        if (hasMeaningfulContent(elem)) {
+            if (bestLinkListContainer(elem)) |inner| return inner;
+            return elem;
+        }
     }
     if (findFirstByTag(body, "article")) |elem| {
-        if (bestLinkListContainer(elem)) |inner| return inner;
-        return elem;
+        if (hasMeaningfulContent(elem)) {
+            if (bestLinkListContainer(elem)) |inner| return inner;
+            return elem;
+        }
     }
     if (findFirstByRole(body, "main")) |elem| {
-        if (bestLinkListContainer(elem)) |inner| return inner;
-        return elem;
+        if (hasMeaningfulContent(elem)) {
+            if (bestLinkListContainer(elem)) |inner| return inner;
+            return elem;
+        }
     }
     if (bestLinkListContainer(body)) |elem| return elem;
 
@@ -168,6 +174,11 @@ fn scoreLinkListContainer(elem: *const dom.Element) f64 {
     return score;
 }
 
+fn hasMeaningfulContent(elem: *const dom.Element) bool {
+    const metrics = analyzeElement(elem);
+    return metrics.text_bytes > 0 or metrics.link_count > 0 or metrics.table_row_count > 0;
+}
+
 fn collectMetrics(elem: *const dom.Element, in_link: bool, metrics: *Metrics) void {
     metrics.element_count += 1;
     if (eql(elem.tag, "a")) metrics.link_count += 1;
@@ -223,7 +234,7 @@ fn isLinkListCandidate(elem: *const dom.Element) bool {
 }
 
 fn isRegionCandidate(tag: []const u8) bool {
-    return eql(tag, "body") or eql(tag, "main") or eql(tag, "article") or eql(tag, "section") or eql(tag, "div") or eql(tag, "header") or eql(tag, "nav") or eql(tag, "aside") or eql(tag, "footer");
+    return eql(tag, "body") or eql(tag, "main") or eql(tag, "article") or eql(tag, "section") or eql(tag, "header") or eql(tag, "nav") or eql(tag, "aside") or eql(tag, "footer");
 }
 
 fn isBoilerplateTag(tag: []const u8) bool {
@@ -309,6 +320,15 @@ test "chooseContentRoot prefers article over sidebar-like containers" {
 
     const root = chooseContentRoot(&doc) orelse return error.SkipZigTest;
     try std.testing.expectEqualStrings("article", root.tag);
+}
+
+test "chooseContentRoot ignores empty main and falls back to useful body content" {
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><main></main><div id=\"fallback\"><p>Useful fallback content appears outside the empty app shell. It has enough words, punctuation, and context to be selected.</p><p>A second paragraph confirms this is readable page content.</p></div></body></html>");
+    defer doc.deinit();
+
+    const root = chooseContentRoot(&doc) orelse return error.SkipZigTest;
+    try std.testing.expect(!std.ascii.eqlIgnoreCase(root.tag, "main"));
+    try std.testing.expectEqualStrings("fallback", root.getAttribute("id").?);
 }
 
 test "chooseContentRoot falls back to highest scoring container" {

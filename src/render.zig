@@ -36,6 +36,24 @@ pub const RenderOptions = struct {
     profile: RenderProfile = .default,
 };
 
+pub const ScreenField = struct {
+    index: usize,
+    element_ptr: usize,
+    name: []const u8,
+    field_type: []const u8,
+    label: []const u8,
+    line: usize,
+    col: usize,
+    width: usize,
+    is_submit: bool,
+
+    pub fn deinit(self: *const ScreenField, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.field_type);
+        allocator.free(self.label);
+    }
+};
+
 pub const ScreenLink = struct {
     index: usize,
     href: []const u8,
@@ -66,12 +84,17 @@ pub const ScreenModel = struct {
     lines: []ScreenLine,
     links: []ScreenLink,
     boxes: []ScreenBox,
+    fields: []ScreenField,
 
     pub fn deinit(self: *ScreenModel) void {
         for (self.links) |link| {
             self.allocator.free(link.href);
             self.allocator.free(link.text);
         }
+        for (self.fields) |field| {
+            field.deinit(self.allocator);
+        }
+        self.allocator.free(self.fields);
         self.allocator.free(self.boxes);
         self.allocator.free(self.links);
         self.allocator.free(self.lines);
@@ -93,6 +116,18 @@ pub const ScreenModel = struct {
 };
 
 // ── Internal types ────────────────────────────────────────────────────────
+
+const FieldRef = struct {
+    index: usize,
+    element_ptr: usize,
+    name: []const u8,
+    field_type: []const u8,
+    label: []const u8,
+    line: usize,
+    col: usize,
+    width: usize,
+    is_submit: bool,
+};
 
 const LinkRef = struct {
     index: usize,
@@ -135,6 +170,7 @@ const RenderState = struct {
     pre_depth: usize = 0,
     hang_indent: usize = 0,
     links: std.ArrayListUnmanaged(LinkRef) = .empty,
+    fields: std.ArrayListUnmanaged(FieldRef) = .empty,
     boxes: std.ArrayListUnmanaged(BoxRef) = .empty,
     active_boxes: std.ArrayListUnmanaged(usize) = .empty,
 
@@ -144,6 +180,12 @@ const RenderState = struct {
             self.allocator.free(link.text);
         }
         self.links.deinit(self.allocator);
+        for (self.fields.items) |field| {
+            self.allocator.free(field.name);
+            self.allocator.free(field.field_type);
+            self.allocator.free(field.label);
+        }
+        self.fields.deinit(self.allocator);
         self.boxes.deinit(self.allocator);
         self.active_boxes.deinit(self.allocator);
     }
@@ -236,6 +278,31 @@ const RenderState = struct {
             .href = try self.allocator.dupe(u8, href),
             .text = try self.allocator.dupe(u8, text),
             .line = self.line_index,
+        });
+        return idx;
+    }
+
+    fn registerField(
+        self: *RenderState,
+        element_ptr: usize,
+        name: []const u8,
+        field_type: []const u8,
+        label: []const u8,
+        col: usize,
+        width: usize,
+        is_submit: bool,
+    ) !usize {
+        const idx = self.fields.items.len;
+        try self.fields.append(self.allocator, .{
+            .index = idx,
+            .element_ptr = element_ptr,
+            .name = try self.allocator.dupe(u8, name),
+            .field_type = try self.allocator.dupe(u8, field_type),
+            .label = try self.allocator.dupe(u8, label),
+            .line = self.line_index,
+            .col = col,
+            .width = width,
+            .is_submit = is_submit,
         });
         return idx;
     }
@@ -359,7 +426,7 @@ fn renderModelFromRoot(
         }
     }
 
-    return buildScreenModel(allocator, try buf.toOwnedSlice(allocator), state.links.items, state.boxes.items);
+    return buildScreenModel(allocator, try buf.toOwnedSlice(allocator), state.links.items, state.fields.items, state.boxes.items);
 }
 
 pub fn renderHtmlModel(
@@ -376,6 +443,7 @@ fn buildScreenModel(
     allocator: std.mem.Allocator,
     text: []u8,
     link_refs: []const LinkRef,
+    field_refs: []const FieldRef,
     box_refs: []const BoxRef,
 ) !ScreenModel {
     errdefer allocator.free(text);
@@ -434,11 +502,35 @@ fn buildScreenModel(
         };
     }
 
+    const fields = try allocator.alloc(ScreenField, field_refs.len);
+    var built_fields: usize = 0;
+    errdefer {
+        for (fields[0..built_fields]) |field| {
+            field.deinit(allocator);
+        }
+        allocator.free(fields);
+    }
+    for (field_refs, 0..) |field, i| {
+        fields[i] = .{
+            .index = field.index,
+            .element_ptr = field.element_ptr,
+            .name = try allocator.dupe(u8, field.name),
+            .field_type = try allocator.dupe(u8, field.field_type),
+            .label = try allocator.dupe(u8, field.label),
+            .line = field.line,
+            .col = field.col,
+            .width = field.width,
+            .is_submit = field.is_submit,
+        };
+        built_fields += 1;
+    }
+
     return .{
         .allocator = allocator,
         .text = text,
         .lines = lines,
         .links = links,
+        .fields = fields,
         .boxes = boxes,
     };
 }
@@ -559,6 +651,24 @@ fn renderElement(state: *RenderState, w: anytype, elem: *const dom.Element) anye
         return;
     }
 
+    // ── Form elements ────────────────────────────────────────────────
+    if (eql(tag, "input")) {
+        try renderInput(state, w, elem);
+        return;
+    }
+    if (eql(tag, "button")) {
+        try renderButton(state, w, elem);
+        return;
+    }
+    if (eql(tag, "select")) {
+        try renderSelect(state, w, elem);
+        return;
+    }
+    if (eql(tag, "textarea")) {
+        try renderTextarea(state, w, elem);
+        return;
+    }
+
     // ── Image ────────────────────────────────────────────────────────
     if (eql(tag, "img")) {
         try renderImage(state, w, elem);
@@ -629,7 +739,6 @@ fn renderParagraph(state: *RenderState, w: anytype, elem: *const dom.Element) an
 }
 
 fn renderLink(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
-    // Render visible text (underlined)
     try state.ansi(w, UNDERLINE);
     try renderChildren(state, w, elem);
     try state.ansi(w, RESET);
@@ -640,13 +749,11 @@ fn renderLink(state: *RenderState, w: anytype, elem: *const dom.Element) anyerro
             const raw_text = elem.textContent(state.allocator) catch return;
             defer state.allocator.free(raw_text);
             const idx = state.registerLink(href, std.mem.trim(u8, raw_text, " \t\r\n")) catch return;
-            if (state.opts.profile == .default) {
-                const ref = try std.fmt.allocPrint(state.allocator, "[{d}]", .{idx});
-                defer state.allocator.free(ref);
-                try state.ansi(w, DIM);
-                try state.writeAll(w, ref);
-                try state.ansi(w, RESET);
-            }
+            const ref = try std.fmt.allocPrint(state.allocator, "[{d}]", .{idx});
+            defer state.allocator.free(ref);
+            try state.ansi(w, DIM);
+            try state.writeAll(w, ref);
+            try state.ansi(w, RESET);
         }
     }
 }
@@ -750,6 +857,191 @@ fn renderImage(state: *RenderState, w: anytype, elem: *const dom.Element) anyerr
     }
 }
 
+fn renderInput(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
+    const input_type = elem.getAttribute("type") orelse "text";
+    const name = elem.getAttribute("name") orelse "";
+
+    if (eql(input_type, "hidden")) return;
+    if (eql(input_type, "submit") or eql(input_type, "reset") or eql(input_type, "button")) {
+        const label = elem.getAttribute("value") orelse if (eql(input_type, "submit")) "Submit" else if (eql(input_type, "reset")) "Reset" else "Button";
+        const col = state.col;
+        try state.prepareForContent(w);
+        try state.ansi(w, BOLD);
+        try state.writeAll(w, "[");
+        try state.writeAll(w, label);
+        try state.writeAll(w, "]");
+        try state.ansi(w, RESET);
+        const width = label.len + 2;
+        _ = state.registerField(
+            @intFromPtr(elem),
+            name,
+            input_type,
+            label,
+            col,
+            width,
+            true,
+        ) catch {};
+        return;
+    }
+
+    if (eql(input_type, "checkbox") or eql(input_type, "radio")) {
+        try state.prepareForContent(w);
+        try state.writeAll(w, "[ ]");
+        _ = state.registerField(
+            @intFromPtr(elem),
+            name,
+            input_type,
+            "",
+            state.col - 3,
+            3,
+            false,
+        ) catch {};
+        return;
+    }
+
+    const field_width: usize = 20;
+    const value = elem.getAttribute("value") orelse "";
+    const col = state.col;
+    try state.prepareForContent(w);
+    try state.writeAll(w, "[");
+    if (eql(input_type, "password")) {
+        for (0..@min(value.len, field_width)) |_| {
+            try state.writeByte(w, '*');
+        }
+    } else {
+        const shown = if (value.len > field_width) value[0..field_width] else value;
+        try state.writeAll(w, shown);
+    }
+    const remaining = field_width - @min(value.len, field_width);
+    for (0..remaining) |_| {
+        try state.writeByte(w, '_');
+    }
+    try state.writeAll(w, "]");
+    _ = state.registerField(
+        @intFromPtr(elem),
+        name,
+        if (eql(input_type, "password")) "password" else "text",
+        "",
+        col,
+        field_width + 2,
+        false,
+    ) catch {};
+}
+
+fn renderButton(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
+    const label = elem.textContent(state.allocator) catch "Button";
+    defer state.allocator.free(label);
+    const trimmed = std.mem.trim(u8, label, " \t\r\n");
+    const col = state.col;
+    try state.prepareForContent(w);
+    try state.ansi(w, BOLD);
+    try state.writeAll(w, "[");
+    try state.writeAll(w, trimmed);
+    try state.writeAll(w, "]");
+    try state.ansi(w, RESET);
+    const name = elem.getAttribute("name") orelse "";
+    const btn_type = elem.getAttribute("type") orelse "submit";
+    _ = state.registerField(
+        @intFromPtr(elem),
+        name,
+        btn_type,
+        trimmed,
+        col,
+        trimmed.len + 2,
+        eql(btn_type, "submit"),
+    ) catch {};
+}
+
+fn renderSelect(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
+    var first_option: ?[]const u8 = null;
+    for (elem.children.items) |child| {
+        if (child == .element and eql(child.element.tag, "option")) {
+            const text = child.element.textContent(state.allocator) catch continue;
+            defer state.allocator.free(text);
+            const trimmed = std.mem.trim(u8, text, " \t\r\n");
+            if (trimmed.len > 0) {
+                first_option = try state.allocator.dupe(u8, trimmed);
+                break;
+            }
+        }
+    }
+    defer if (first_option) |opt| state.allocator.free(opt);
+
+    const display = first_option orelse "";
+    const col = state.col;
+    try state.prepareForContent(w);
+    try state.writeAll(w, "[");
+    try state.writeAll(w, display);
+    try state.writeAll(w, " ▼]");
+    const name = elem.getAttribute("name") orelse "";
+    _ = state.registerField(
+        @intFromPtr(elem),
+        name,
+        "select",
+        display,
+        col,
+        display.len + 4,
+        false,
+    ) catch {};
+}
+
+fn renderTextarea(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
+    const value = elem.textContent(state.allocator) catch "";
+    defer state.allocator.free(value);
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    const name = elem.getAttribute("name") orelse "";
+    const col = state.col;
+    const rows: usize = blk: {
+        const rows_str = elem.getAttribute("rows") orelse "2";
+        break :blk std.fmt.parseInt(usize, rows_str, 10) catch 2;
+    };
+    const cols: usize = blk: {
+        const cols_str = elem.getAttribute("cols") orelse "20";
+        break :blk std.fmt.parseInt(usize, cols_str, 10) catch 20;
+    };
+    try state.prepareForContent(w);
+    try state.writeAll(w, "+");
+    for (0..cols) |_| try state.writeByte(w, '-');
+    try state.writeAll(w, "+");
+    try state.newline(w);
+    var line_idx: usize = 0;
+    var byte_idx: usize = 0;
+    while (line_idx < rows) : (line_idx += 1) {
+        try state.prepareForContent(w);
+        try state.writeByte(w, '|');
+        var char_count: usize = 0;
+        while (char_count < cols and byte_idx < trimmed.len) {
+            if (trimmed[byte_idx] == '\n') {
+                byte_idx += 1;
+                break;
+            }
+            try state.writeByte(w, trimmed[byte_idx]);
+            byte_idx += 1;
+            char_count += 1;
+        }
+        while (char_count < cols) {
+            try state.writeByte(w, ' ');
+            char_count += 1;
+        }
+        try state.writeByte(w, '|');
+        if (line_idx < rows - 1) try state.newline(w);
+    }
+    try state.newline(w);
+    try state.prepareForContent(w);
+    try state.writeAll(w, "+");
+    for (0..cols) |_| try state.writeByte(w, '-');
+    try state.writeAll(w, "+");
+    _ = state.registerField(
+        @intFromPtr(elem),
+        name,
+        "textarea",
+        "",
+        col,
+        cols + 2,
+        false,
+    ) catch {};
+}
+
 fn renderBrowseStrongLandmark(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
     try ensureSectionBreak(state, w);
     try renderChildren(state, w, elem);
@@ -835,7 +1127,6 @@ fn renderTextNode(state: *RenderState, w: anytype, text_node: *const dom.Text) a
 
 // ── Table renderer ────────────────────────────────────────────────────────
 
-
 fn countTableLinkMetricsInner(
     elem: *const dom.Element,
     in_link: bool,
@@ -879,8 +1170,6 @@ fn isLinkListTable(elem: *const dom.Element) bool {
     const density = if (text_bytes == 0) @as(f64, 0.0) else @as(f64, @floatFromInt(link_text_bytes)) / @as(f64, @floatFromInt(text_bytes));
     return density >= 0.35;
 }
-
-
 
 fn renderTable(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
     try state.ensureNewline(w);
@@ -1160,7 +1449,7 @@ fn isCellTag(tag: []const u8) bool {
 
 fn isHiddenTag(tag: []const u8) bool {
     inline for (.{
-        "script", "style", "noscript", "head", "template", "svg", "math",
+        "script", "style", "noscript", "head", "svg", "math",
     }) |h| {
         if (std.ascii.eqlIgnoreCase(tag, h)) return true;
     }
@@ -1367,6 +1656,17 @@ test "render — skips script and style content" {
     try std.testing.expect(std.mem.indexOf(u8, out, "color") == null);
 }
 
+test "render browse profile can surface template content after empty main fallback" {
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><main></main><template><section><h1>Streamed title</h1><p>Server-rendered fallback text.</p></section></template></body></html>");
+    defer doc.deinit();
+
+    var model = try renderBrowseModel(std.testing.allocator, &doc, .{ .ansi_colors = false });
+    defer model.deinit();
+
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Streamed title") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Server-rendered fallback text") != null);
+}
+
 test "render — blockquote content is present" {
     var doc = try dom.parseDocument(std.testing.allocator, "<html><body><blockquote><p>Quoted text.</p></blockquote></body></html>");
     defer doc.deinit();
@@ -1538,7 +1838,7 @@ test "render browse profile omits references but keeps interactive links" {
     defer model.deinit();
 
     try std.testing.expect(std.mem.indexOf(u8, model.text, "References:") == null);
-    try std.testing.expect(std.mem.indexOf(u8, model.text, "[1]") == null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "[1]") != null);
     try std.testing.expect(std.mem.indexOf(u8, model.text, "next page") != null);
     try std.testing.expectEqual(@as(usize, 1), model.links.len);
     try std.testing.expectEqualStrings("/next", model.links[0].href);

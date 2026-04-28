@@ -13,6 +13,7 @@ Execution specs:
 
 - Canonical umbrella spec: `spec/MVP.md`
 - Closure record: `spec/subspecs/mvp-remainder.md`, `spec/subspecs/wpt-conformance.md`
+- Active agent-browser scope: `spec/subspecs/agent-browser.md` (POST in `fetch`/XHR, `<form method=post>`, cookie persistence)
 - Deferred tracks: `spec/subspecs/mcp-stdio.md`, `spec/subspecs/browser-tui.md`, `spec/Fingerprint-Plan.md`
 - Historical/background docs: `MVP_PLAN.md`, `MVP_BACKLOG.md`, `spec/PRD.md`
 - Governance ADR: `docs/adr/0001-spec-governance.md`

@@ -102,8 +102,10 @@ JS sees real page data through a thin polyfill over five Zig callbacks:
   `localStorage` / `sessionStorage`.
 - `history` is intentionally limited to same-origin `pushState` /
   `replaceState` plus `length` and `state`.
-- `fetch()` and `XMLHttpRequest` are intentionally limited to async GET-only
-  requests on the shipped MVP path.
+- `fetch()` and `XMLHttpRequest` accept async GET and POST requests. POST
+  bodies are strings or `URLSearchParams` instances stringified to
+  `application/x-www-form-urlencoded`. Other methods, init keys, and body
+  shapes still throw. See `spec/subspecs/agent-browser.md`.
 - `IntersectionObserver` and `ResizeObserver` are not exposed on the shipped MVP
   surface.
 - `window.location` is populated from the requested URL

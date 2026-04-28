@@ -137,11 +137,11 @@ fn readFileUnder(
 fn mimeFor(path: []const u8) []const u8 {
     if (std.mem.endsWith(u8, path, ".html") or std.mem.endsWith(u8, path, ".htm"))
         return "text/html; charset=utf-8";
-    if (std.mem.endsWith(u8, path, ".js"))   return "application/javascript; charset=utf-8";
+    if (std.mem.endsWith(u8, path, ".js")) return "application/javascript; charset=utf-8";
     if (std.mem.endsWith(u8, path, ".json")) return "application/json; charset=utf-8";
-    if (std.mem.endsWith(u8, path, ".css"))  return "text/css; charset=utf-8";
-    if (std.mem.endsWith(u8, path, ".svg"))  return "image/svg+xml";
-    if (std.mem.endsWith(u8, path, ".txt"))  return "text/plain; charset=utf-8";
+    if (std.mem.endsWith(u8, path, ".css")) return "text/css; charset=utf-8";
+    if (std.mem.endsWith(u8, path, ".svg")) return "image/svg+xml";
+    if (std.mem.endsWith(u8, path, ".txt")) return "text/plain; charset=utf-8";
     return "application/octet-stream";
 }
 

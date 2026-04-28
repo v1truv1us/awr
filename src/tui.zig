@@ -17,6 +17,10 @@ pub const Key = union(enum) {
     arrow_right,
     tab,
     shift_tab,
+    /// Ctrl+C / Ctrl+D — raw-mode quit signal. The TUI disables ISIG so the
+    /// kernel does not deliver SIGINT; the run loop must treat this key as a
+    /// universal exit so the terminal is always restored cleanly.
+    interrupt,
 };
 
 pub const Size = struct {
@@ -92,8 +96,18 @@ pub const Terminal = struct {
     }
 
     pub fn readKey(self: *Terminal) !Key {
-        const first = try self.readByte();
+        return (try self.readKeyTimeout(-1)) orelse error.EndOfStream;
+    }
+
+    /// Wait up to `timeout_ms` for a key. Returns null on timeout. Pass -1 to
+    /// block indefinitely (matches readKey). The run loop uses a finite timeout
+    /// so it can re-check terminal size between user keystrokes — without this
+    /// path SIGWINCH-equivalent resize events (iOS↔SSH↔tmux) are invisible to
+    /// the renderer until the next keystroke arrives.
+    pub fn readKeyTimeout(self: *Terminal, timeout_ms: i32) !?Key {
+        const first = (try self.readByteWithTimeout(timeout_ms)) orelse return null;
         switch (first) {
+            0x03, 0x04 => return .interrupt,
             '\r', '\n' => return .enter,
             0x7f, 0x08 => return .backspace,
             '\t' => return .tab,

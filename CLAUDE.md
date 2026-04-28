@@ -140,5 +140,6 @@ WPT-first status:
 - `spec/MVP.md` — canonical umbrella spec and closure rules
 - `spec/subspecs/mvp-remainder.md` — active MVP completion track
 - `spec/subspecs/wpt-conformance.md` — conformance runner/corpus authority
+- `spec/subspecs/agent-browser.md` — active agent-browser scope (POST in `fetch`/XHR, `<form method=post>`, cookie persistence)
 - `docs/adr/0001-spec-governance.md` — spec governance record
 - `spec/PRD.md` — product context only; not execution authority

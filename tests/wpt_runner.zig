@@ -290,6 +290,26 @@ const curated_cases = [_]WptCase{
         .html = "<html><body></body></html>",
         .script = @embedFile("wpt/document_readyState.js"),
     },
+    .{
+        .filename = "form_input_value_type.js",
+        .html = "<html><body><form id=\"f1\"><input id=\"name\" name=\"username\" type=\"text\" value=\"Alice\" placeholder=\"Enter name\" required /><input id=\"pw\" name=\"pw\" type=\"password\" /><input id=\"cb\" name=\"agree\" type=\"checkbox\" /><input id=\"hidden\" name=\"token\" type=\"hidden\" value=\"tok123\" /><input id=\"submit\" name=\"go\" type=\"submit\" value=\"Send\" /></form></body></html>",
+        .script = @embedFile("wpt/form_input_value_type.js"),
+    },
+    .{
+        .filename = "form_textarea_value.js",
+        .html = "<html><body><textarea id=\"comment\" name=\"comment\" placeholder=\"Write here\">Hello world</textarea><textarea id=\"crlf\">a\r\nb\rc\n</textarea></body></html>",
+        .script = @embedFile("wpt/form_textarea_value.js"),
+    },
+    .{
+        .filename = "form_document_forms.js",
+        .html = "<html><body><form id=\"form1\" action=\"/submit\" method=\"post\"><input name=\"x\" /></form><form id=\"form2\" action=\"/search\"><input name=\"q\" /></form></body></html>",
+        .script = @embedFile("wpt/form_document_forms.js"),
+    },
+    .{
+        .filename = "form_button_select.js",
+        .html = "<html><body><form id=\"f\"><button id=\"btn\" name=\"go\" value=\"go_val\">Go</button><button id=\"reset\" type=\"reset\">Reset</button><select id=\"choice\" name=\"color\"><option value=\"r\">Red</option><option value=\"b\">Blue</option></select><input id=\"sub\" type=\"submit\" value=\"Send\" /></form></body></html>",
+        .script = @embedFile("wpt/form_button_select.js"),
+    },
 };
 
 fn buildCaseHtml(allocator: std.mem.Allocator, case: WptCase) ![]u8 {

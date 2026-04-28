@@ -82,9 +82,15 @@ Target MVP WPT areas:
 - event dispatch and lifecycle behavior;
 - mutation observation;
 - storage;
-- GET-only XHR/fetch integration;
+- request integration (GET and POST) — `fetch()` and `XMLHttpRequest`;
+- form submission (GET and POST) — `<form>` parse, render, and submit;
+- cookie persistence across simulated process restart;
 - same-origin history subset;
 - terminal-backed geometry and viewport APIs.
+
+The form-submission and cookie-persistence rows are governed by
+`spec/subspecs/agent-browser.md`; they remain inside this conformance file's
+inclusion rules and merge gates.
 
 The curated WPT corpus should cover the shipped MVP surface and reject or omit
 APIs that are intentionally outside it.
@@ -181,7 +187,10 @@ surface:
 | Events | `event_add_remove.js`, `event_dispatch_bubble.js`, `event_custom.js`, `event_DOMContentLoaded.js` |
 | MutationObserver | `mutation_observer_childList.js`, `mutation_observer_attributes.js`, `mutation_observer_subtree.js` |
 | Storage | `storage_localStorage.js` |
-| GET-only XHR/fetch | `xhr_basic_get.js`, `xhr_rejects_unsupported.js`, `fetch_basic.js`, `fetch_rejects_unsupported.js` |
+| XHR (GET + POST) | `xhr_basic_get.js`, `xhr_post_basic.js`, `xhr_post_form_encoded.js`, `xhr_rejects_unsupported.js` |
+| `fetch()` (GET + POST) | `fetch_basic.js`, `fetch_post_basic.js`, `fetch_post_form_encoded.js`, `fetch_rejects_unsupported.js` |
+| Form submission | `form_method_post.js` (plus Zig-side integration test for end-to-end submit) |
+| Cookie persistence | `cookies_persistence_roundtrip.js` |
 | History subset | `history_push_replace_state.js`, `history_relative_url.js` |
 | Viewport APIs | `viewport_dimensions.js`, `requestAnimationFrame.js`, `element_bounding_client_rect.js` |
 | JS runtime | curated Test262 cases in `tests/test262_runner.zig` |

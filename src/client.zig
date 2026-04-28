@@ -23,6 +23,20 @@ const tls_conn = if (boringssl_fallback) @import("net/tls_conn.zig") else struct
 
 pub const Url = url_mod.Url;
 
+// ── Request shape ─────────────────────────────────────────────────────────
+
+pub const Method = enum { GET, POST };
+
+/// Request descriptor used by `Client.fetchRequest`. `body` must be null for
+/// GET; for POST the bytes are sent verbatim with `Content-Type:
+/// application/x-www-form-urlencoded` (the only POST content type in MVP per
+/// `spec/subspecs/agent-browser.md §2`).
+pub const Request = struct {
+    url: []const u8,
+    method: Method = .GET,
+    body: ?[]const u8 = null,
+};
+
 // ── Options ───────────────────────────────────────────────────────────────
 
 pub const ClientOptions = struct {
@@ -34,6 +48,11 @@ pub const ClientOptions = struct {
     user_agent: []const u8 = "AWR/0.1",
     /// When true, setChrome132Defaults() is called on every request.
     use_chrome_headers: bool = true,
+    /// When true and `cookie_jar_path` is non-null, Client.init reads the
+    /// jar from disk on startup and Client.deinit writes it back. Caller
+    /// owns `cookie_jar_path`; Client borrows the slice.
+    persist_cookies: bool = false,
+    cookie_jar_path: ?[]const u8 = null,
 };
 
 // ── Response ──────────────────────────────────────────────────────────────
@@ -73,6 +92,32 @@ pub const FetchError = error{
     OutOfMemory,
 };
 
+// ── Cookie persistence helpers ────────────────────────────────────────────
+
+const COOKIE_JAR_MAX_BYTES: usize = 1 * 1024 * 1024;
+
+fn loadCookiesFromDisk(jar: *cookie.CookieJar, io: std.Io, path: []const u8) !void {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, jar.allocator, .limited(COOKIE_JAR_MAX_BYTES)) catch |err| switch (err) {
+        error.FileNotFound => return, // first run is not an error
+        else => return err,
+    };
+    defer jar.allocator.free(bytes);
+    try jar.deserializeBytes(bytes);
+}
+
+fn saveCookiesToDisk(jar: *const cookie.CookieJar, io: std.Io, path: []const u8) !void {
+    var aw: std.Io.Writer.Allocating = .init(jar.allocator);
+    defer aw.deinit();
+    try jar.serialize(&aw.writer);
+
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{
+        .truncate = true,
+        .permissions = .fromMode(0o600),
+    });
+    defer file.close(io);
+    try file.writeStreamingAll(io, aw.written());
+}
+
 // ── Client ────────────────────────────────────────────────────────────────
 
 pub const Client = struct {
@@ -83,28 +128,53 @@ pub const Client = struct {
     options: ClientOptions,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: ClientOptions) Client {
-        return Client{
+        var c = Client{
             .allocator = allocator,
             .io = io,
             .cookies = cookie.CookieJar.init(allocator),
             .conns = pool.ConnectionPool.init(allocator),
             .options = options,
         };
+        if (options.persist_cookies) {
+            if (options.cookie_jar_path) |path| loadCookiesFromDisk(&c.cookies, io, path) catch |err| {
+                std.log.warn("cookie jar load from {s} failed: {s}", .{ path, @errorName(err) });
+            };
+        }
+        return c;
     }
 
     pub fn deinit(self: *Client) void {
+        if (self.options.persist_cookies) {
+            if (self.options.cookie_jar_path) |path| saveCookiesToDisk(&self.cookies, self.io, path) catch |err| {
+                std.log.warn("cookie jar save to {s} failed: {s}", .{ path, @errorName(err) });
+            };
+        }
         self.conns.deinit();
         self.cookies.deinit();
     }
 
-    /// Fetch a URL. Caller must call response.deinit() on success.
+    /// Fetch a URL via GET. Backwards-compat wrapper for callers that don't
+    /// need POST. Caller must call response.deinit() on success.
     pub fn fetch(self: *Client, url_str: []const u8) anyerror!Response {
-        var current_url = try self.allocator.dupe(u8, url_str);
+        return self.fetchRequest(.{ .url = url_str });
+    }
+
+    /// Full fetch entry — accepts a `Request` with method and body. Follows
+    /// redirects per `options.follow_redirects`. On 30x responses to a POST,
+    /// per RFC 7231 §6.4.2/3 the body is dropped and the next hop becomes a
+    /// GET (303 always; 301/302 in practice). 307/308 preserve method+body.
+    pub fn fetchRequest(self: *Client, req: Request) anyerror!Response {
+        var current_url = try self.allocator.dupe(u8, req.url);
         defer self.allocator.free(current_url);
+
+        // Body is borrowed from the caller; once redirects strip it (303 etc.)
+        // we drop the reference. We never free the caller's slice.
+        var current_method = req.method;
+        var current_body = req.body;
 
         var redirects: u8 = 0;
         while (true) {
-            var resp = try self.fetchOnce(current_url);
+            var resp = try self.fetchOnce(current_url, current_method, current_body);
             if (!self.options.follow_redirects or !resp.isRedirect()) return resp;
             const location = resp.location() orelse return resp;
             if (redirects >= self.options.max_redirects) {
@@ -116,6 +186,15 @@ pub const Client = struct {
                 resp.deinit();
                 return err;
             };
+            // Per RFC 7231: 301/302/303 demote POST→GET and drop the body.
+            // 307/308 preserve method+body. status is on the Response.
+            switch (resp.status) {
+                301, 302, 303 => if (current_method == .POST) {
+                    current_method = .GET;
+                    current_body = null;
+                },
+                else => {},
+            }
             resp.deinit();
             self.allocator.free(current_url);
             current_url = next_url;
@@ -123,17 +202,17 @@ pub const Client = struct {
         }
     }
 
-    fn fetchOnce(self: *Client, url_str: []const u8) anyerror!Response {
-        return self.fetchOnceStd(url_str) catch |err| switch (err) {
+    fn fetchOnce(self: *Client, url_str: []const u8, method: Method, body: ?[]const u8) anyerror!Response {
+        return self.fetchOnceStd(url_str, method, body) catch |err| switch (err) {
             FetchError.TlsNotAvailable => if (boringsslFallbackAllowed(url_str))
-                self.fetchOnceBoringSslHttp1(url_str) catch |fallback_err| return mapFetchError(fallback_err)
+                self.fetchOnceBoringSslHttp1(url_str, method, body) catch |fallback_err| return mapFetchError(fallback_err)
             else
                 return err,
             else => return err,
         };
     }
 
-    fn fetchOnceStd(self: *Client, url_str: []const u8) anyerror!Response {
+    fn fetchOnceStd(self: *Client, url_str: []const u8, method: Method, body: ?[]const u8) anyerror!Response {
         // Validate via our own URL parser so bad inputs surface as InvalidUrl
         // before std.http.Client parses and returns its own error.
         const uri = std.Uri.parse(url_str) catch return FetchError.InvalidUrl;
@@ -183,13 +262,33 @@ pub const Client = struct {
             extra_header_count += 1;
         }
 
-        var req = std_client.request(.GET, uri, .{
+        // For POST, Content-Type is required by most servers and Content-Length
+        // is set automatically by std.http.Client when we use sendBodyComplete.
+        if (method == .POST) {
+            extra_headers[extra_header_count] = .{ .name = "content-type", .value = "application/x-www-form-urlencoded" };
+            extra_header_count += 1;
+        }
+
+        const std_method: std.http.Method = switch (method) {
+            .GET => .GET,
+            .POST => .POST,
+        };
+        var req = std_client.request(std_method, uri, .{
             .redirect_behavior = .unhandled,
             .extra_headers = extra_headers[0..extra_header_count],
         }) catch |err| return mapFetchError(err);
         defer req.deinit();
 
-        req.sendBodiless() catch |err| return mapFetchError(err);
+        if (method == .POST) {
+            // std.http.Client.Request.sendBodyComplete takes []u8 (mutable),
+            // so dupe the const slice into a temporary owned buffer.
+            const body_const = body orelse "";
+            const body_bytes = try self.allocator.dupe(u8, body_const);
+            defer self.allocator.free(body_bytes);
+            req.sendBodyComplete(body_bytes) catch |err| return mapFetchError(err);
+        } else {
+            req.sendBodiless() catch |err| return mapFetchError(err);
+        }
 
         var result = req.receiveHead(&.{}) catch |err| return mapFetchError(err);
 
@@ -219,19 +318,19 @@ pub const Client = struct {
 
         var body_list = body_buf.toArrayList();
         errdefer body_list.deinit(self.allocator);
-        const body = try body_list.toOwnedSlice(self.allocator);
-        errdefer self.allocator.free(body);
+        const resp_body = try body_list.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(resp_body);
 
         return Response{
             .status = @intFromEnum(result.head.status),
             .url = effective_url,
             .headers = headers,
-            .body = body,
+            .body = resp_body,
             .allocator = self.allocator,
         };
     }
 
-    fn fetchOnceBoringSslHttp1(self: *Client, url_str: []const u8) anyerror!Response {
+    fn fetchOnceBoringSslHttp1(self: *Client, url_str: []const u8, method: Method, body: ?[]const u8) anyerror!Response {
         if (!boringssl_fallback) return FetchError.TlsNotAvailable;
 
         const u = url_mod.Url.parse(url_str) catch return FetchError.InvalidUrl;
@@ -256,16 +355,29 @@ pub const Client = struct {
         const path = try pathWithQueryAlloc(self.allocator, &u);
         defer self.allocator.free(path);
 
+        const method_str: []const u8 = switch (method) {
+            .GET => "GET",
+            .POST => "POST",
+        };
+
         var req_buf: std.Io.Writer.Allocating = .init(self.allocator);
         defer req_buf.deinit();
-        try req_buf.writer.print("GET {s} HTTP/1.0\r\n", .{path});
+        try req_buf.writer.print("{s} {s} HTTP/1.0\r\n", .{ method_str, path });
         try req_buf.writer.print("Host: {s}\r\n", .{host_header});
         try req_buf.writer.print("User-Agent: {s}\r\n", .{effectiveUserAgent(self.options)});
         try req_buf.writer.writeAll("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n");
         try req_buf.writer.writeAll("Accept-Language: en-US,en;q=0.9\r\n");
         try req_buf.writer.writeAll("Accept-Encoding: identity\r\n");
         try req_buf.writer.writeAll("Connection: close\r\n");
-        try req_buf.writer.writeAll("\r\n");
+        if (method == .POST) {
+            const body_bytes = body orelse "";
+            try req_buf.writer.writeAll("Content-Type: application/x-www-form-urlencoded\r\n");
+            try req_buf.writer.print("Content-Length: {d}\r\n", .{body_bytes.len});
+            try req_buf.writer.writeAll("\r\n");
+            try req_buf.writer.writeAll(body_bytes);
+        } else {
+            try req_buf.writer.writeAll("\r\n");
+        }
         try writeAllTls(&tls, req_buf.written());
 
         var reader = TlsBufferedReader{ .conn = &tls };

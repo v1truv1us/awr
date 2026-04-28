@@ -11,23 +11,23 @@ const fp = @import("fingerprint.zig");
 
 // ── Frame constants (RFC 7540) ─────────────────────────────────────────────
 
-pub const FRAME_SETTINGS      : u8 = 0x4;
-pub const FRAME_WINDOW_UPDATE : u8 = 0x8;
-pub const FRAME_HEADERS       : u8 = 0x1;
+pub const FRAME_SETTINGS: u8 = 0x4;
+pub const FRAME_WINDOW_UPDATE: u8 = 0x8;
+pub const FRAME_HEADERS: u8 = 0x1;
 
-pub const FLAG_NONE     : u8 = 0x0;
-pub const FLAG_ACK      : u8 = 0x1;
+pub const FLAG_NONE: u8 = 0x0;
+pub const FLAG_ACK: u8 = 0x1;
 pub const FLAG_END_HEADERS: u8 = 0x4;
-pub const FLAG_END_STREAM : u8 = 0x1;
+pub const FLAG_END_STREAM: u8 = 0x1;
 
 // ── Frame header ───────────────────────────────────────────────────────────
 
 /// 9-byte HTTP/2 frame header (RFC 7540 §4.1).
 pub const FrameHeader = struct {
-    length: u24,     // payload length in bytes
+    length: u24, // payload length in bytes
     frame_type: u8,
     flags: u8,
-    stream_id: u31,  // top bit reserved, always 0
+    stream_id: u31, // top bit reserved, always 0
 
     /// Serialize the 9-byte header into `out[0..9]`.
     pub fn encode(self: FrameHeader, out: *[9]u8) void {
@@ -58,10 +58,10 @@ pub const Setting = struct {
 pub fn encodeSettings(settings: []const Setting, writer: anytype) !void {
     const payload_len: u24 = @intCast(settings.len * 6);
     const header = FrameHeader{
-        .length     = payload_len,
+        .length = payload_len,
         .frame_type = FRAME_SETTINGS,
-        .flags      = FLAG_NONE,
-        .stream_id  = 0,
+        .flags = FLAG_NONE,
+        .stream_id = 0,
     };
     var hdr_buf: [9]u8 = undefined;
     header.encode(&hdr_buf);
@@ -82,10 +82,10 @@ pub fn encodeSettings(settings: []const Setting, writer: anytype) !void {
 /// Chrome 132 SETTINGS: HEADER_TABLE_SIZE, MAX_CONCURRENT_STREAMS,
 /// INITIAL_WINDOW_SIZE, MAX_HEADER_LIST_SIZE (exactly 4 settings, 24 bytes payload).
 pub const chrome132_settings = [4]Setting{
-    .{ .id = 0x0001, .value = fp.h2_header_table_size },      // 65536
+    .{ .id = 0x0001, .value = fp.h2_header_table_size }, // 65536
     .{ .id = 0x0003, .value = fp.h2_max_concurrent_streams }, // 1000
-    .{ .id = 0x0004, .value = fp.h2_initial_window_size },    // 6291456
-    .{ .id = 0x0006, .value = fp.h2_max_header_list_size },   // 262144
+    .{ .id = 0x0004, .value = fp.h2_initial_window_size }, // 6291456
+    .{ .id = 0x0006, .value = fp.h2_max_header_list_size }, // 262144
 };
 
 // ── WINDOW_UPDATE frame ────────────────────────────────────────────────────
@@ -94,10 +94,10 @@ pub const chrome132_settings = [4]Setting{
 /// For connection-level: stream_id = 0, increment = 15663105.
 pub fn encodeWindowUpdate(stream_id: u31, increment: u31, writer: anytype) !void {
     const header = FrameHeader{
-        .length     = 4,
+        .length = 4,
         .frame_type = FRAME_WINDOW_UPDATE,
-        .flags      = FLAG_NONE,
-        .stream_id  = stream_id,
+        .flags = FLAG_NONE,
+        .stream_id = stream_id,
     };
     var hdr_buf: [9]u8 = undefined;
     header.encode(&hdr_buf);
@@ -120,9 +120,9 @@ pub fn encodeWindowUpdate(stream_id: u31, increment: u31, writer: anytype) !void
 pub fn hasChromeH2PseudoOrder(header_names: []const []const u8) bool {
     if (header_names.len < 4) return false;
     return std.mem.eql(u8, header_names[0], ":method") and
-           std.mem.eql(u8, header_names[1], ":authority") and
-           std.mem.eql(u8, header_names[2], ":scheme") and
-           std.mem.eql(u8, header_names[3], ":path");
+        std.mem.eql(u8, header_names[1], ":authority") and
+        std.mem.eql(u8, header_names[2], ":scheme") and
+        std.mem.eql(u8, header_names[3], ":path");
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -155,8 +155,8 @@ test "SETTINGS frame payload length is 4 * 6 = 24 bytes" {
     const written = fbs.buffered();
     // Bytes 0-2 = length (big-endian u24)
     const length: u32 = (@as(u32, written[0]) << 16) |
-                        (@as(u32, written[1]) << 8) |
-                        @as(u32, written[2]);
+        (@as(u32, written[1]) << 8) |
+        @as(u32, written[2]);
     try std.testing.expectEqual(@as(u32, 24), length);
     // Total frame = 9 header + 24 payload = 33
     try std.testing.expectEqual(@as(usize, 33), written.len);
@@ -236,8 +236,8 @@ test "WINDOW_UPDATE frame length is 4" {
     try encodeWindowUpdate(0, fp.h2_connection_window_increment, &fbs);
     const written = fbs.buffered();
     const length: u32 = (@as(u32, written[0]) << 16) |
-                        (@as(u32, written[1]) << 8) |
-                        @as(u32, written[2]);
+        (@as(u32, written[1]) << 8) |
+        @as(u32, written[2]);
     try std.testing.expectEqual(@as(u32, 4), length);
     try std.testing.expectEqual(@as(usize, 13), written.len); // 9 + 4
 }

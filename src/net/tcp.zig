@@ -19,9 +19,9 @@
 ///   draining → closed  (FIN sent)
 ///   connecting → closed  (refused / timeout)
 ///   connected → closed  (error / remote RST)
-const std   = @import("std");
+const std = @import("std");
 const posix = std.posix;
-const xev   = @import("xev");
+const xev = @import("xev");
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -61,34 +61,34 @@ const IoCtx = struct { result: anyerror!usize = 0 };
 /// The `loop` field is a per-connection event loop.  Phase 2 will replace
 /// this with a pointer to a shared runtime loop.
 pub const TcpConn = struct {
-    loop:        xev.Loop,
-    socket:      ?xev.TCP,
-    state:       TcpState,
+    loop: xev.Loop,
+    socket: ?xev.TCP,
+    state: TcpState,
     remote_addr: std.Io.net.IpAddress,
 
     /// Read / write scratch buffers (arena-allocated per connection).
-    read_buf:  []u8,
+    read_buf: []u8,
     write_buf: []u8,
     allocator: std.mem.Allocator,
 
-    const READ_BUF_SIZE  = 64 * 1024;
+    const READ_BUF_SIZE = 64 * 1024;
     const WRITE_BUF_SIZE = 64 * 1024;
     const CONNECT_TIMEOUT_NS = 1 * std.time.ns_per_s;
 
     pub fn init(allocator: std.mem.Allocator, remote_addr: std.Io.net.IpAddress) !TcpConn {
-        const read_buf  = try allocator.alloc(u8, READ_BUF_SIZE);
+        const read_buf = try allocator.alloc(u8, READ_BUF_SIZE);
         errdefer allocator.free(read_buf);
         const write_buf = try allocator.alloc(u8, WRITE_BUF_SIZE);
         errdefer allocator.free(write_buf);
         const loop = try xev.Loop.init(.{});
         return TcpConn{
-            .loop        = loop,
-            .socket      = null,
-            .state       = .idle,
+            .loop = loop,
+            .socket = null,
+            .state = .idle,
             .remote_addr = remote_addr,
-            .read_buf    = read_buf,
-            .write_buf   = write_buf,
-            .allocator   = allocator,
+            .read_buf = read_buf,
+            .write_buf = write_buf,
+            .allocator = allocator,
         };
     }
 
@@ -140,7 +140,7 @@ pub const TcpConn = struct {
         }
 
         self.socket = sock;
-        self.state  = .connected;
+        self.state = .connected;
     }
 
     /// Write `data` to the connection. Returns bytes written.
@@ -150,8 +150,7 @@ pub const TcpConn = struct {
 
         var c: xev.Completion = undefined;
         var ctx = IoCtx{};
-        self.socket.?.write(&self.loop, &c, .{ .slice = data },
-                             IoCtx, &ctx, writeCb);
+        self.socket.?.write(&self.loop, &c, .{ .slice = data }, IoCtx, &ctx, writeCb);
         self.loop.run(.until_done) catch return TcpError.WriteFailed;
         return ctx.result catch TcpError.WriteFailed;
     }
@@ -163,8 +162,7 @@ pub const TcpConn = struct {
 
         var c: xev.Completion = undefined;
         var ctx = IoCtx{};
-        self.socket.?.read(&self.loop, &c, .{ .slice = buf },
-                            IoCtx, &ctx, readCb);
+        self.socket.?.read(&self.loop, &c, .{ .slice = buf }, IoCtx, &ctx, readCb);
         self.loop.run(.until_done) catch return TcpError.ReadFailed;
         return ctx.result catch TcpError.ReadFailed;
     }
@@ -201,7 +199,9 @@ fn connectCb(
     _: xev.TCP,
     r: xev.ConnectError!void,
 ) xev.CallbackAction {
-    r catch |e| { ctx.?.err = e; };
+    r catch |e| {
+        ctx.?.err = e;
+    };
     ctx.?.done = true;
     return .disarm;
 }

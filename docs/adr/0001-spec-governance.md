@@ -64,6 +64,7 @@ At the time of acceptance:
 - Canonical umbrella spec: `spec/MVP.md`
 - Active MVP completion track: `spec/subspecs/mvp-remainder.md`
 - Active conformance authority: `spec/subspecs/wpt-conformance.md`
+- Active agent-browser scope: `spec/subspecs/agent-browser.md`
 - Deferred tracks: `spec/subspecs/mcp-stdio.md`,
   `spec/subspecs/browser-tui.md`, `spec/Fingerprint-Plan.md`
 - Non-canonical historical/background docs: `MVP_PLAN.md`, `MVP_BACKLOG.md`,
@@ -104,6 +105,27 @@ documentation governance.
 - Narrowed `fetch()` and `XMLHttpRequest` to explicit async GET-only semantics.
 - Updated README and canonical specs together so the closure claim matches the
   runtime and curated WPT corpus.
+
+### 2026-04-27 — Agent-browser scope promoted to active
+
+- Added `spec/subspecs/agent-browser.md` as a new active sub-spec governing
+  POST in `fetch` and `XMLHttpRequest`, `<form method="post">` end-to-end
+  submission through `awr browse`, and cookie jar disk persistence.
+- Widened `spec/MVP.md §5.4` from "async GET-only" to "async GET and POST"
+  with explicit body-shape constraints (string or `URLSearchParams` only).
+- Removed "non-GET request semantics" from the explicit-deferred list in
+  `spec/subspecs/mvp-remainder.md` and added a "Follow-on closed tracks"
+  section pointing at the new sub-spec.
+- Widened `spec/subspecs/wpt-conformance.md §3` target areas to include POST,
+  form submission, and cookie persistence; updated §8 mapping table with the
+  curated case files listed in `agent-browser.md §4`.
+- Reason: AWR's CLI-first browser path is in scope for use as an autonomous
+  agent's web client, and the GET-only narrowing made real-world login/auth
+  flows infeasible. The widening is gated by curated WPT cases and preserves
+  the JA4 fingerprint and HTTP/2 SETTINGS frame.
+- Documents updated: `spec/MVP.md`, `spec/subspecs/agent-browser.md` (new),
+  `spec/subspecs/mvp-remainder.md`, `spec/subspecs/wpt-conformance.md`,
+  `AGENTS.md`, `CLAUDE.md`, `README.md`, this ADR.
 
 ### Template for future amendments
 

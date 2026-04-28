@@ -18,7 +18,6 @@
 ///     descriptive error.
 ///   - console output goes to stderr by default.  Tests that need to
 ///     capture output can pass a custom ConsoleSink.
-
 const std = @import("std");
 const qjs = @import("quickjs");
 const event_loop_mod = @import("event_loop.zig");
@@ -31,10 +30,22 @@ pub const EventLoop = event_loop_mod.EventLoop;
 /// url}` on success, or an error the binding translates to a rejected
 /// Promise.
 pub const FetchHost = struct {
+    pub const Method = enum { GET, POST };
+
+    /// Request shape passed from the JS bridge to the host. `body` is null
+    /// for GET; for POST it is the URL-encoded body bytes (the polyfill
+    /// stringifies URLSearchParams). Borrowed slices — the host must copy
+    /// before async work and free its copy in the response path.
+    pub const Request = struct {
+        url: []const u8,
+        method: Method = .GET,
+        body: ?[]const u8 = null,
+    };
+
     pub const Response = struct {
         status: u16,
-        body:   []u8,
-        url:    []u8,
+        body: []u8,
+        url: []u8,
         headers_json: []u8,
         allocator: std.mem.Allocator,
 
@@ -45,11 +56,17 @@ pub const FetchHost = struct {
         }
     };
 
-    ptr:     *anyopaque,
-    fetchFn: *const fn (ptr: *anyopaque, url: []const u8) anyerror!Response,
+    ptr: *anyopaque,
+    fetchFn: *const fn (ptr: *anyopaque, req: Request) anyerror!Response,
 
+    /// Backwards-compat shortcut for callers that only need GET.
     pub fn fetch(self: FetchHost, url: []const u8) anyerror!Response {
-        return self.fetchFn(self.ptr, url);
+        return self.fetchFn(self.ptr, .{ .url = url });
+    }
+
+    /// Full fetch entry — call with a `Request` to use POST or specify a body.
+    pub fn fetchWith(self: FetchHost, req: Request) anyerror!Response {
+        return self.fetchFn(self.ptr, req);
     }
 };
 
@@ -82,9 +99,9 @@ pub const ConsoleSink = struct {
         const S = struct {
             fn w(_: *anyopaque, level: Level, msg: []const u8) void {
                 const prefix: []const u8 = switch (level) {
-                    .log  => "[JS]  ",
+                    .log => "[JS]  ",
                     .warn => "[JS warn] ",
-                    .err  => "[JS error] ",
+                    .err => "[JS error] ",
                 };
                 std.debug.print("{s}{s}\n", .{ prefix, msg });
             }
@@ -97,7 +114,7 @@ pub const ConsoleSink = struct {
 // ── Per-context host data stored as context opaque ───────────────────────
 
 const HostData = struct {
-    sink:      ConsoleSink,
+    sink: ConsoleSink,
     allocator: std.mem.Allocator,
     /// Optional extension pointer set by dom/bridge.zig.
     /// Allows the DOM bridge callbacks to reach the Document without
@@ -119,9 +136,9 @@ pub const EngineHostData = HostData;
 /// Owns a QuickJS Runtime + Context with Web APIs installed.
 /// Must outlive any JsValue references obtained from it.
 pub const JsEngine = struct {
-    rt:        *qjs.Runtime,
-    ctx:       *qjs.Context,
-    host:      *HostData,
+    rt: *qjs.Runtime,
+    ctx: *qjs.Context,
+    host: *HostData,
     allocator: std.mem.Allocator,
 
     /// Create a new JsEngine.
@@ -139,15 +156,15 @@ pub const JsEngine = struct {
         const host = allocator.create(HostData) catch return JsError.OutOfMemory;
         errdefer allocator.destroy(host);
         host.* = .{
-            .sink      = sink orelse ConsoleSink.defaultSink(),
+            .sink = sink orelse ConsoleSink.defaultSink(),
             .allocator = allocator,
         };
         ctx.setOpaque(HostData, host);
 
         var engine = JsEngine{
-            .rt        = rt,
-            .ctx       = ctx,
-            .host      = host,
+            .rt = rt,
+            .ctx = ctx,
+            .host = host,
             .allocator = allocator,
         };
         try engine.installWebApis();
@@ -236,15 +253,15 @@ pub const JsEngine = struct {
         const console = qjs.Value.initObject(ctx);
         defer console.deinit(ctx);
 
-        const logFn   = qjs.Value.initCFunction(ctx, consoleLog,   "log",   1);
-        const warnFn  = qjs.Value.initCFunction(ctx, consoleWarn,  "warn",  1);
+        const logFn = qjs.Value.initCFunction(ctx, consoleLog, "log", 1);
+        const warnFn = qjs.Value.initCFunction(ctx, consoleWarn, "warn", 1);
         const errorFn = qjs.Value.initCFunction(ctx, consoleError, "error", 1);
         defer logFn.deinit(ctx);
         defer warnFn.deinit(ctx);
         defer errorFn.deinit(ctx);
 
-        console.setPropertyStr(ctx, "log",   logFn.dup(ctx))   catch return JsError.PropertySetFailed;
-        console.setPropertyStr(ctx, "warn",  warnFn.dup(ctx))  catch return JsError.PropertySetFailed;
+        console.setPropertyStr(ctx, "log", logFn.dup(ctx)) catch return JsError.PropertySetFailed;
+        console.setPropertyStr(ctx, "warn", warnFn.dup(ctx)) catch return JsError.PropertySetFailed;
         console.setPropertyStr(ctx, "error", errorFn.dup(ctx)) catch return JsError.PropertySetFailed;
 
         try self.setGlobal("console", console.dup(ctx));
@@ -316,18 +333,18 @@ pub const JsEngine = struct {
 
     fn installTimers(self: *JsEngine) JsError!void {
         const ctx = self.ctx;
-        const setTimeoutFn    = qjs.Value.initCFunction(ctx, setTimeoutCb,    "setTimeout",    2);
-        const clearTimeoutFn  = qjs.Value.initCFunction(ctx, clearTimerCb,   "clearTimeout",  1);
-        const setIntervalFn   = qjs.Value.initCFunction(ctx, setIntervalCb,   "setInterval",   2);
-        const clearIntervalFn = qjs.Value.initCFunction(ctx, clearTimerCb,   "clearInterval", 1);
+        const setTimeoutFn = qjs.Value.initCFunction(ctx, setTimeoutCb, "setTimeout", 2);
+        const clearTimeoutFn = qjs.Value.initCFunction(ctx, clearTimerCb, "clearTimeout", 1);
+        const setIntervalFn = qjs.Value.initCFunction(ctx, setIntervalCb, "setInterval", 2);
+        const clearIntervalFn = qjs.Value.initCFunction(ctx, clearTimerCb, "clearInterval", 1);
         defer setTimeoutFn.deinit(ctx);
         defer clearTimeoutFn.deinit(ctx);
         defer setIntervalFn.deinit(ctx);
         defer clearIntervalFn.deinit(ctx);
 
-        try self.setGlobal("setTimeout",    setTimeoutFn.dup(ctx));
-        try self.setGlobal("clearTimeout",  clearTimeoutFn.dup(ctx));
-        try self.setGlobal("setInterval",   setIntervalFn.dup(ctx));
+        try self.setGlobal("setTimeout", setTimeoutFn.dup(ctx));
+        try self.setGlobal("clearTimeout", clearTimeoutFn.dup(ctx));
+        try self.setGlobal("setInterval", setIntervalFn.dup(ctx));
         try self.setGlobal("clearInterval", clearIntervalFn.dup(ctx));
     }
 
@@ -384,7 +401,8 @@ pub const JsEngine = struct {
     fn installFetch(self: *JsEngine) JsError!void {
         const ctx = self.ctx;
         // Native primitive: returns Promise<{ok, status, url, body}>.
-        const rawFn = qjs.Value.initCFunction(ctx, rawFetchCb, "__awr_rawFetch__", 1);
+        // Arity 3 — (url, method, body). The polyfill always passes all three.
+        const rawFn = qjs.Value.initCFunction(ctx, rawFetchCb, "__awr_rawFetch__", 3);
         defer rawFn.deinit(ctx);
         try self.setGlobal("__awr_rawFetch__", rawFn.dup(ctx));
 
@@ -420,10 +438,46 @@ pub const JsEngine = struct {
         defer c.freeCString(cstr);
         const url_slice = std.mem.span(cstr);
 
+        // Optional arg[1]: method ("GET" or "POST"). Default GET when absent
+        // or non-string (the polyfill always passes a string, but defend here).
+        var method: FetchHost.Method = .GET;
+        if (args.len >= 2) {
+            const method_arg: qjs.Value = @bitCast(args[1]);
+            if (method_arg.toCString(c)) |mstr| {
+                defer c.freeCString(mstr);
+                const m = std.mem.span(mstr);
+                if (std.ascii.eqlIgnoreCase(m, "POST")) {
+                    method = .POST;
+                }
+            }
+        }
+
+        // Optional arg[2]: body bytes (already URL-encoded by the polyfill
+        // when the caller passed a URLSearchParams). Borrowed for the
+        // duration of fetch_host.fetchWith — the host must copy before any
+        // async work since the QuickJS-managed buffer is freed via
+        // freeCString below.
+        var body_cstr: ?[*:0]const u8 = null;
+        var body_slice: ?[]const u8 = null;
+        if (args.len >= 3) {
+            const body_arg: qjs.Value = @bitCast(args[2]);
+            // Treat null/undefined as no body. Only string is accepted; the
+            // polyfill stringifies URLSearchParams before calling raw().
+            if (!body_arg.isNull() and !body_arg.isUndefined()) {
+                body_cstr = body_arg.toCString(c) orelse return fail(c, promise, "fetch() body must be a string");
+                body_slice = std.mem.span(body_cstr.?);
+            }
+        }
+        defer if (body_cstr) |bc| c.freeCString(bc);
+
         const host = c.getOpaque(HostData) orelse return fail(c, promise, "fetch() host not configured");
         const fetch_host = host.fetch_host orelse return fail(c, promise, "fetch() not available in this context");
 
-        var resp = fetch_host.fetch(url_slice) catch |err| {
+        var resp = fetch_host.fetchWith(.{
+            .url = url_slice,
+            .method = method,
+            .body = body_slice,
+        }) catch |err| {
             var buf: [256]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "fetch failed: {t}", .{err}) catch "fetch failed";
             return fail(c, promise, msg);
@@ -469,14 +523,31 @@ pub const JsEngine = struct {
         \\    var keys = Object.keys(init);
         \\    for (var i = 0; i < keys.length; i += 1) {
         \\      var key = keys[i];
-        \\      if (key !== 'method') {
+        \\      if (key !== 'method' && key !== 'body') {
         \\        return Promise.reject(new Error('fetch: init.' + key + ' is not currently supported'));
         \\      }
         \\    }
-        \\    if (init.method && String(init.method).toUpperCase() !== 'GET') {
-        \\      return Promise.reject(new Error('fetch: only GET is currently supported'));
+        \\    var method = init.method ? String(init.method).toUpperCase() : 'GET';
+        \\    if (method !== 'GET' && method !== 'POST') {
+        \\      return Promise.reject(new Error('fetch: only GET and POST are currently supported'));
         \\    }
-        \\    return raw(url).then(function (r) {
+        \\    var body = null;
+        \\    if (init.body != null) {
+        \\      // URLSearchParams stringifies to application/x-www-form-urlencoded
+        \\      // form. Plain strings pass through. Objects/FormData/streams are
+        \\      // not in MVP scope per spec/subspecs/agent-browser.md §3.
+        \\      if (typeof init.body === 'string') {
+        \\        body = init.body;
+        \\      } else if (typeof URLSearchParams !== 'undefined' && init.body instanceof URLSearchParams) {
+        \\        body = init.body.toString();
+        \\      } else {
+        \\        return Promise.reject(new Error('fetch: init.body must be a string or URLSearchParams'));
+        \\      }
+        \\    }
+        \\    if (method === 'GET' && body !== null) {
+        \\      return Promise.reject(new Error('fetch: GET requests cannot have a body'));
+        \\    }
+        \\    return raw(url, method, body).then(function (r) {
         \\      var body = r.body;
         \\      var headersMap = {};
         \\      try { headersMap = r.headersJson ? JSON.parse(r.headersJson) : {}; } catch (e) {}
@@ -718,7 +789,7 @@ test "JsEngine — Array.from works" {
 test "JsEngine — custom ConsoleSink captures output" {
     const Capture = struct {
         buf: [256]u8 = undefined,
-        len: usize   = 0,
+        len: usize = 0,
 
         fn write(ptr: *anyopaque, _: ConsoleSink.Level, msg: []const u8) void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -730,7 +801,7 @@ test "JsEngine — custom ConsoleSink captures output" {
 
     var cap = Capture{};
     const sink = ConsoleSink{
-        .ptr     = &cap,
+        .ptr = &cap,
         .writeFn = Capture.write,
     };
 
@@ -744,7 +815,7 @@ test "JsEngine — custom ConsoleSink captures output" {
 test "JsEngine — console.log object is serialized as JSON" {
     const Capture = struct {
         buf: [256]u8 = undefined,
-        len: usize   = 0,
+        len: usize = 0,
         fn write(ptr: *anyopaque, _: ConsoleSink.Level, msg: []const u8) void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             const n = @min(msg.len, self.buf.len);

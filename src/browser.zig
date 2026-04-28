@@ -2,6 +2,18 @@ const std = @import("std");
 const page_mod = @import("page");
 const tui = @import("tui.zig");
 
+/// Hard ceiling for the browse renderer. Defends against terminals that lie
+/// about width (some iOS SSH apps + tmux chains) or report extreme values that
+/// would produce unreadable layouts. The wrap budget never exceeds this even
+/// when the reported `cols` does.
+const MAX_RENDER_WIDTH: usize = 200;
+
+/// Idle interval between size re-queries while waiting for a keystroke. Keeps
+/// the renderer reactive to SIGWINCH-equivalent resize events that can't be
+/// observed any other way (raw mode + libxev + signal-safety constraints make
+/// a real signal handler more invasive than this poll).
+const SIZE_POLL_MS: i32 = 200;
+
 const PromptMode = enum {
     none,
     url,
@@ -22,13 +34,22 @@ const LoadedPage = struct {
     }
 };
 
+const FocusTarget = enum {
+    link,
+    field,
+};
+
 pub const BrowserSession = struct {
     allocator: std.mem.Allocator,
     page: page_mod.Page,
     current: ?LoadedPage,
     history: std.ArrayList(HistoryEntry),
     history_index: usize,
+    focus_target: FocusTarget,
     selected_link: ?usize,
+    selected_field: ?usize,
+    field_values: std.ArrayListUnmanaged(FieldValue) = .empty,
+    field_editing: bool,
     scroll_row: usize,
     search_query: ?[]u8,
     search_matches: std.ArrayList(usize),
@@ -39,6 +60,11 @@ pub const BrowserSession = struct {
     render_width: usize,
     render_height: usize,
 
+    const FieldValue = struct {
+        name: []u8,
+        value: std.ArrayList(u8),
+    };
+
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !BrowserSession {
         return .{
             .allocator = allocator,
@@ -46,7 +72,11 @@ pub const BrowserSession = struct {
             .current = null,
             .history = std.ArrayList(HistoryEntry).empty,
             .history_index = 0,
+            .focus_target = .link,
             .selected_link = null,
+            .selected_field = null,
+            .field_values = .empty,
+            .field_editing = false,
             .scroll_row = 0,
             .search_query = null,
             .search_matches = std.ArrayList(usize).empty,
@@ -67,6 +97,11 @@ pub const BrowserSession = struct {
         self.search_matches.deinit(self.allocator);
         self.prompt_buffer.deinit(self.allocator);
         if (self.status_message) |msg| self.allocator.free(msg);
+        for (self.field_values.items) |*fv| {
+            self.allocator.free(fv.name);
+            fv.value.deinit(self.allocator);
+        }
+        self.field_values.deinit(self.allocator);
         self.page.deinit();
     }
 
@@ -144,6 +179,151 @@ pub const BrowserSession = struct {
         const resolved = try self.page.resolveUrl(current_url, model.links[selected].href);
         defer self.allocator.free(resolved);
         try self.navigateTo(resolved);
+    }
+
+    pub fn selectNextField(self: *BrowserSession, backwards: bool, viewport_height: usize) void {
+        const model = self.screenModel() orelse return;
+        const editable_count = countEditableFields(model);
+        if (editable_count == 0) return;
+
+        const next_index: usize = if (self.selected_field) |selected|
+            if (backwards)
+                if (selected == 0) editable_count - 1 else selected - 1
+            else
+                (selected + 1) % editable_count
+        else if (backwards)
+            editable_count - 1
+        else
+            0;
+
+        self.selected_field = next_index;
+        self.focus_target = .field;
+        self.field_editing = true;
+        if (editableFieldAt(model, next_index)) |field| {
+            self.ensureLineVisible(field.line, viewport_height);
+        }
+    }
+
+    pub fn activeField(self: *BrowserSession) ?page_mod.ScreenField {
+        const model = self.screenModel() orelse return null;
+        const idx = self.selected_field orelse return null;
+        return editableFieldAt(model, idx);
+    }
+
+    pub fn activeFieldName(self: *BrowserSession) ?[]const u8 {
+        const field = self.activeField() orelse return null;
+        return field.name;
+    }
+
+    pub fn getFieldValue(self: *BrowserSession, field_name: []const u8) ?[]const u8 {
+        for (self.field_values.items) |fv| {
+            if (std.mem.eql(u8, fv.name, field_name)) return fv.value.items;
+        }
+        return null;
+    }
+
+    pub fn appendFieldByte(self: *BrowserSession, byte: u8) !void {
+        if (!self.field_editing) return;
+        const field = self.activeField() orelse return;
+        if (byte < 0x20 or byte == 0x7f) return;
+        const name = field.name;
+        for (self.field_values.items) |*fv| {
+            if (std.mem.eql(u8, fv.name, name)) {
+                try fv.value.append(self.allocator, byte);
+                return;
+            }
+        }
+        const name_copy = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(name_copy);
+        var val = std.ArrayList(u8).empty;
+        try val.append(self.allocator, byte);
+        try self.field_values.append(self.allocator, .{ .name = name_copy, .value = val });
+    }
+
+    pub fn deleteFieldByte(self: *BrowserSession) void {
+        if (!self.field_editing) return;
+        const field = self.activeField() orelse return;
+        for (self.field_values.items) |*fv| {
+            if (std.mem.eql(u8, fv.name, field.name)) {
+                if (fv.value.items.len > 0) _ = fv.value.pop();
+                return;
+            }
+        }
+    }
+
+    pub fn submitForm(self: *BrowserSession) !void {
+        const model = self.screenModel() orelse return;
+        const current_url = self.currentUrl() orelse return;
+
+        // Build URL-encoded payload from all non-submit fields. Hidden inputs
+        // and unedited text inputs fall back to the element's `value`
+        // attribute so CSRF tokens and pre-filled fields are sent verbatim
+        // (per spec/subspecs/agent-browser.md §2).
+        var body: std.ArrayList(u8) = .empty;
+        errdefer body.deinit(self.allocator);
+        var first = true;
+        for (model.fields) |field| {
+            if (field.is_submit) continue;
+            if (field.name.len == 0) continue;
+            const edited = self.getFieldValue(field.name);
+            const val: []const u8 = edited orelse self.page.fieldValueAttr(field) orelse "";
+            if (!first) try body.append(self.allocator, '&');
+            first = false;
+            try self.appendUrlEncoded(&body, field.name);
+            try body.append(self.allocator, '=');
+            try self.appendUrlEncoded(&body, val);
+        }
+
+        // Resolve the form's method + action. If no <form> ancestor is found
+        // (degenerate markup), fall back to the legacy GET-with-querystring
+        // behavior at the current URL.
+        const meta_opt: ?page_mod.Page.FormMeta = blk: {
+            for (model.fields) |field| {
+                if (field.is_submit) continue;
+                if (self.page.formMetaForField(field)) |m| break :blk m;
+            }
+            break :blk null;
+        };
+
+        const action_raw: []const u8 = if (meta_opt) |m| (m.action orelse current_url) else current_url;
+        const target_url = try self.page.resolveUrl(current_url, action_raw);
+        defer self.allocator.free(target_url);
+
+        const is_post = if (meta_opt) |m| (m.method == .POST) else false;
+        if (is_post) {
+            try self.loadPostUrl(target_url, body.items);
+            try self.pushHistory(self.current.?.result.url);
+            body.deinit(self.allocator);
+            return;
+        }
+
+        // GET: append payload as query string.
+        const full_url = if (body.items.len > 0)
+            try std.fmt.allocPrint(self.allocator, "{s}?{s}", .{ target_url, body.items })
+        else
+            try self.allocator.dupe(u8, target_url);
+        defer self.allocator.free(full_url);
+        body.deinit(self.allocator);
+        try self.navigateTo(full_url);
+    }
+
+    fn appendUrlEncoded(self: *BrowserSession, buf: *std.ArrayList(u8), s: []const u8) !void {
+        for (s) |c| {
+            switch (c) {
+                'A'...'Z', 'a'...'z', '0'...'9', '-', '_', '.', '~' => try buf.append(self.allocator, c),
+                ' ' => try buf.appendSlice(self.allocator, "+"),
+                else => {
+                    try buf.append(self.allocator, '%');
+                    const hex = try std.fmt.allocPrint(self.allocator, "{X:0>2}", .{c});
+                    defer self.allocator.free(hex);
+                    try buf.appendSlice(self.allocator, hex);
+                },
+            }
+        }
+    }
+
+    pub fn exitFieldEditing(self: *BrowserSession) void {
+        self.field_editing = false;
     }
 
     pub fn startPrompt(self: *BrowserSession, mode: PromptMode) !void {
@@ -245,7 +425,20 @@ pub const BrowserSession = struct {
             return buf.toOwnedSlice(allocator);
         }
 
-        if (self.selectedLink()) |link| {
+        if (self.field_editing) {
+            if (self.activeField()) |field| {
+                const val = self.getFieldValue(field.name) orelse "";
+                try buf.print(allocator, "field '{s}': {s}", .{ field.name, val });
+                try buf.append(allocator, '_');
+            } else {
+                try buf.appendSlice(allocator, "editing field");
+            }
+        } else if (self.focus_target == .field and self.selected_field != null) {
+            if (self.activeField()) |field| {
+                const val = self.getFieldValue(field.name) orelse "";
+                try buf.print(allocator, "field '{s}': {s}", .{ field.name, val });
+            }
+        } else if (self.selectedLink()) |link| {
             try buf.print(allocator, "link {d}/{d}: {s}", .{
                 link.index,
                 self.screenModel().?.links.len,
@@ -276,21 +469,46 @@ pub const BrowserSession = struct {
 
         var result = try self.page.navigate(url);
         errdefer result.deinit();
+        try self.installLoadedPage(result, previous_query);
+    }
 
-        var rendered = try self.page.renderBrowseModel(self.allocator, &result, .{
+    fn loadPostUrl(self: *BrowserSession, url: []const u8, body: []const u8) !void {
+        const previous_query = if (self.search_query) |query| try self.allocator.dupe(u8, query) else null;
+        defer if (previous_query) |query| self.allocator.free(query);
+
+        var result = try self.page.navigatePost(url, body);
+        errdefer result.deinit();
+        try self.installLoadedPage(result, previous_query);
+    }
+
+    /// Shared tail for `loadUrl` and `loadPostUrl`: render the new result,
+    /// swap it into the session, reset cursors, and refresh the status line.
+    fn installLoadedPage(self: *BrowserSession, result: page_mod.PageResult, previous_query: ?[]u8) !void {
+        var local_result = result;
+        errdefer local_result.deinit();
+
+        var rendered = try self.page.renderBrowseModel(self.allocator, &local_result, .{
             .max_width = self.render_width,
-            .ansi_colors = false,
+            .ansi_colors = true,
             .show_links = true,
             .show_images = true,
         });
         errdefer rendered.deinit();
 
         if (self.current) |*current| current.deinit();
-        self.current = .{ .result = result, .screen = rendered };
+        self.current = .{ .result = local_result, .screen = rendered };
         self.scroll_row = 0;
         self.selected_link = if (rendered.links.len > 0) 0 else null;
+        self.selected_field = null;
+        self.field_editing = false;
         try self.setSearchQuery(if (previous_query) |query| query else "");
-        try self.setStatusMessage(self.current.?.result.url);
+
+        const visible = trimmedTextLen(rendered.text);
+        if (visible < 16) {
+            try self.setStatusMessage("page rendered no terminal-friendly content (JS-driven page - try `awr <url>` for raw extraction)");
+        } else {
+            try self.setStatusMessage(self.current.?.result.url);
+        }
     }
 
     fn pushHistory(self: *BrowserSession, url: []const u8) !void {
@@ -363,7 +581,7 @@ pub const BrowserSession = struct {
 
         var rendered = try self.page.renderBrowseModel(self.allocator, &current.result, .{
             .max_width = self.render_width,
-            .ansi_colors = false,
+            .ansi_colors = true,
             .show_links = true,
             .show_images = true,
         });
@@ -392,19 +610,89 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, start_url: []const u8) !voi
     try session.setViewportSize(initial_size.cols, initial_size.rows);
     try session.navigateTo(start_url);
 
+    var prev_cols: usize = 0;
+    var prev_rows: usize = 0;
+    var needs_draw: bool = true;
     while (true) {
         const size = terminal.size();
-        try session.setViewportSize(size.cols, size.rows);
-        session.clampScroll(viewportHeight(size));
-        try draw(&terminal, io, &session);
-        const key = try terminal.readKey();
+        if (size.cols != prev_cols or size.rows != prev_rows) {
+            try session.setViewportSize(size.cols, size.rows);
+            session.clampScroll(viewportHeight(size));
+            prev_cols = size.cols;
+            prev_rows = size.rows;
+            needs_draw = true;
+        }
+        if (needs_draw) {
+            try draw(&terminal, io, &session);
+            needs_draw = false;
+        }
+        const maybe_key = try terminal.readKeyTimeout(SIZE_POLL_MS);
+        const key = maybe_key orelse continue;
+        needs_draw = true;
+        // Universal quit: Ctrl+C / Ctrl+D always exits, regardless of which
+        // mode the session is in (link nav, field editing, prompt). This is
+        // the escape hatch when other key bindings don't work as expected.
+        if (key == .interrupt) return;
         switch (session.prompt_mode) {
-            .none => switch (key) {
+            .none => if (session.field_editing) switch (key) {
+                .escape => session.exitFieldEditing(),
+                .tab => {
+                    session.exitFieldEditing();
+                    session.selectNextField(false, viewportHeight(terminal.size()));
+                },
+                .shift_tab => {
+                    session.exitFieldEditing();
+                    session.selectNextField(true, viewportHeight(terminal.size()));
+                },
+                .enter => {
+                    session.exitFieldEditing();
+                },
+                .backspace => session.deleteFieldByte(),
+                .char => |ch| try session.appendFieldByte(ch),
+                else => {},
+            } else switch (key) {
                 .arrow_down => session.scrollBy(1, viewportHeight(terminal.size())),
                 .arrow_up => session.scrollBy(-1, viewportHeight(terminal.size())),
-                .tab => session.selectNextLink(false, viewportHeight(terminal.size())),
-                .shift_tab => session.selectNextLink(true, viewportHeight(terminal.size())),
-                .enter => try session.openSelectedLink(),
+                .tab => {
+                    const model = session.screenModel();
+                    const has_fields = model != null and blk: {
+                        for (model.?.fields) |f| {
+                            if (!f.is_submit) break :blk true;
+                        }
+                        break :blk false;
+                    };
+                    if (has_fields and session.focus_target == .field) {
+                        session.selectNextField(false, viewportHeight(terminal.size()));
+                    } else {
+                        session.selectNextLink(false, viewportHeight(terminal.size()));
+                    }
+                },
+                .shift_tab => {
+                    const model = session.screenModel();
+                    const has_fields = model != null and blk: {
+                        for (model.?.fields) |f| {
+                            if (!f.is_submit) break :blk true;
+                        }
+                        break :blk false;
+                    };
+                    if (has_fields and session.focus_target == .field) {
+                        session.selectNextField(true, viewportHeight(terminal.size()));
+                    } else {
+                        session.selectNextLink(true, viewportHeight(terminal.size()));
+                    }
+                },
+                .enter => {
+                    if (session.focus_target == .field and session.selected_field != null) {
+                        const field = session.activeField();
+                        if (field != null and field.?.is_submit) {
+                            try session.submitForm();
+                        } else {
+                            try session.openSelectedLink();
+                        }
+                    } else {
+                        try session.openSelectedLink();
+                    }
+                },
                 .char => |ch| switch (ch) {
                     'j' => session.scrollBy(1, viewportHeight(terminal.size())),
                     'k' => session.scrollBy(-1, viewportHeight(terminal.size())),
@@ -414,6 +702,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, start_url: []const u8) !voi
                     'g' => try session.startPrompt(.url),
                     '/' => try session.startPrompt(.search),
                     'n' => session.advanceSearch(viewportHeight(terminal.size())),
+                    'e' => {
+                        const model2 = session.screenModel();
+                        if (model2 != null) {
+                            for (model2.?.fields) |f| {
+                                if (!f.is_submit) {
+                                    session.selectNextField(false, viewportHeight(terminal.size()));
+                                    break;
+                                }
+                            }
+                        }
+                    },
                     'q' => return,
                     else => {},
                 },
@@ -467,8 +766,25 @@ fn viewportHeight(size: tui.Size) usize {
 }
 
 fn writeClippedLine(writer: anytype, width: usize, text: []const u8) !void {
-    const clipped = if (text.len > width) text[0..width] else text;
-    try writer.writeAll(clipped);
+    var visible: usize = 0;
+    var i: usize = 0;
+    var last_safe: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '\x1b') {
+            while (i < text.len and text[i] != 'm') : (i += 1) {}
+            if (i < text.len) i += 1;
+            continue;
+        }
+        visible += 1;
+        i += 1;
+        if (visible <= width) last_safe = i;
+    }
+    if (visible <= width) {
+        try writer.writeAll(text);
+    } else {
+        try writer.writeAll(text[0..last_safe]);
+        try writer.writeAll("\x1b[0m");
+    }
 }
 
 fn containsCaseInsensitive(haystack: []const u8, needle: []const u8) bool {
@@ -483,12 +799,53 @@ fn containsCaseInsensitive(haystack: []const u8, needle: []const u8) bool {
 }
 
 fn browserRenderWidth(cols: usize) usize {
-    return @max(@as(usize, 20), if (cols > 2) cols - 2 else cols);
+    const padded = if (cols > 2) cols - 2 else cols;
+    const clamped = @min(padded, MAX_RENDER_WIDTH);
+    return @max(@as(usize, 20), clamped);
+}
+
+fn trimmedTextLen(text: []const u8) usize {
+    var count: usize = 0;
+    for (text) |ch| {
+        if (!std.ascii.isWhitespace(ch)) count += 1;
+    }
+    return count;
+}
+
+fn countEditableFields(model: *const page_mod.ScreenModel) usize {
+    var count: usize = 0;
+    for (model.fields) |field| {
+        if (!field.is_submit) count += 1;
+    }
+    return count;
+}
+
+fn editableFieldAt(model: *const page_mod.ScreenModel, idx: usize) ?page_mod.ScreenField {
+    var i: usize = 0;
+    for (model.fields) |field| {
+        if (field.is_submit) continue;
+        if (i == idx) return field;
+        i += 1;
+    }
+    return null;
 }
 
 test "containsCaseInsensitive matches ASCII substrings" {
     try std.testing.expect(containsCaseInsensitive("Hello World", "world"));
     try std.testing.expect(!containsCaseInsensitive("Hello", "planet"));
+}
+
+test "browserRenderWidth clamps to floor and ceiling" {
+    // Normal terminal: padded by 2.
+    try std.testing.expectEqual(@as(usize, 78), browserRenderWidth(80));
+    // Tiny terminal: floor at 20 cols.
+    try std.testing.expectEqual(@as(usize, 20), browserRenderWidth(10));
+    try std.testing.expectEqual(@as(usize, 20), browserRenderWidth(22));
+    // Pathological wide value (lying terminal): ceiling at MAX_RENDER_WIDTH.
+    try std.testing.expectEqual(@as(usize, MAX_RENDER_WIDTH), browserRenderWidth(500));
+    try std.testing.expectEqual(@as(usize, MAX_RENDER_WIDTH), browserRenderWidth(202));
+    // Boundary: cols-2 exactly equals MAX → unclamped.
+    try std.testing.expectEqual(@as(usize, MAX_RENDER_WIDTH), browserRenderWidth(MAX_RENDER_WIDTH + 2));
 }
 
 test "BrowserSession rerenderCurrent uses browse render seam" {

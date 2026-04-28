@@ -36,7 +36,7 @@ pub const Url = struct {
 
         const is_https = blk: {
             if (std.ascii.eqlIgnoreCase(scheme, "https")) break :blk true;
-            if (std.ascii.eqlIgnoreCase(scheme, "http"))  break :blk false;
+            if (std.ascii.eqlIgnoreCase(scheme, "http")) break :blk false;
             return ParseError.UnsupportedScheme;
         };
         const default_port: u16 = if (is_https) 443 else 80;
@@ -74,16 +74,16 @@ pub const Url = struct {
         var path = rest;
         var query: ?[]const u8 = null;
         if (std.mem.indexOfScalar(u8, rest, '?')) |q| {
-            path  = rest[0..q];
+            path = rest[0..q];
             query = rest[q + 1 ..];
         }
 
         return Url{
-            .scheme   = scheme,
-            .host     = host,
-            .port     = port,
-            .path     = path,
-            .query    = query,
+            .scheme = scheme,
+            .host = host,
+            .port = port,
+            .path = path,
+            .query = query,
             .is_https = is_https,
         };
     }

@@ -13,9 +13,9 @@
 const std = @import("std");
 
 pub const MAX_PER_ORIGIN: usize = 6;
-pub const MAX_TOTAL: usize      = 256;
-pub const IDLE_TIMEOUT_MS: i64  = 30_000;
-pub const MAX_REQUESTS: u32     = 100;
+pub const MAX_TOTAL: usize = 256;
+pub const IDLE_TIMEOUT_MS: i64 = 30_000;
+pub const MAX_REQUESTS: u32 = 100;
 
 // Zig 0.16: std.time.milliTimestamp and std.Thread.Mutex moved. The pool is
 // only touched synchronously from Client.fetch today, so use a no-op mutex
@@ -47,8 +47,8 @@ pub const PooledConn = struct {
     pub fn isHealthy(self: *const PooledConn) bool {
         const now = milliTimestamp();
         return !self.in_use and
-               (now - self.last_used_ms) < IDLE_TIMEOUT_MS and
-               self.request_count < MAX_REQUESTS;
+            (now - self.last_used_ms) < IDLE_TIMEOUT_MS and
+            self.request_count < MAX_REQUESTS;
     }
 };
 
@@ -91,8 +91,8 @@ pub const OriginPool = struct {
     pub fn addNew(self: *OriginPool, allocator: std.mem.Allocator, handle: *anyopaque) !void {
         if (self.conns.items.len >= MAX_PER_ORIGIN) return error.PoolFull;
         try self.conns.append(allocator, PooledConn{
-            .handle       = handle,
-            .in_use       = true,
+            .handle = handle,
+            .in_use = true,
             .last_used_ms = milliTimestamp(),
             .request_count = 0,
         });
@@ -136,7 +136,7 @@ pub const ConnectionPool = struct {
 
     pub fn init(allocator: std.mem.Allocator) ConnectionPool {
         return .{
-            .pools     = std.StringHashMap(OriginPool).init(allocator),
+            .pools = std.StringHashMap(OriginPool).init(allocator),
             .allocator = allocator,
         };
     }

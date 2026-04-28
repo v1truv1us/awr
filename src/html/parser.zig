@@ -16,7 +16,6 @@
 ///   - Use the public API functions (lxb_dom_node_text_content etc.) rather
 ///     than accessing Lexbor struct fields directly; Zig's @cImport marks
 ///     some nested struct fields as inaccessible.
-
 const std = @import("std");
 const c = @cImport({
     @cInclude("lexbor/html/html.h");
@@ -87,8 +86,7 @@ pub const HtmlParser = struct {
     /// Parse an HTML string. Caller must call doc.deinit() when done.
     pub fn parse(self: *HtmlParser, html: []const u8) ParseError!HtmlDocument {
         c.lxb_html_parser_clean(self.parser);
-        const doc = c.lxb_html_parse(self.parser, html.ptr, html.len)
-            orelse return ParseError.ParseFailed;
+        const doc = c.lxb_html_parse(self.parser, html.ptr, html.len) orelse return ParseError.ParseFailed;
         return HtmlDocument{ .doc = doc };
     }
 };

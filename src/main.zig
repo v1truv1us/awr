@@ -2,6 +2,7 @@ const std = @import("std");
 const build_opts = @import("build_opts");
 const page_mod = @import("page");
 const mock_mod = @import("mock.zig");
+const browser_mod = @import("browser.zig");
 
 fn writeJsonStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
     try list.append(alloc, '"');
@@ -27,6 +28,7 @@ const USAGE =
     \\AWR — Agentic Web Runtime
     \\
     \\Usage:
+    \\  awr browse <url>             Open URL in interactive terminal browser
     \\  awr <url>                    Load URL/path, print JSON {url, status, title, body_text, window_data, tools}
     \\  awr tools <url>              Load URL/path, print the JSON array of registered WebMCP tools
     \\  awr call <url> <name> <json> Load URL/path, invoke tool <name> with <json> args, print result envelope
@@ -173,6 +175,16 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
             }
         }
         try mock_mod.run(alloc, io, "127.0.0.1", port, root);
+        return;
+    }
+
+    // Subcommand: awr browse <url>
+    if (std.mem.eql(u8, args[1], "browse")) {
+        if (args.len < 3) {
+            try stdoutWrite(io, "usage: awr browse <url>\n");
+            std.process.exit(1);
+        }
+        try browser_mod.run(alloc, io, args[2]);
         return;
     }
 

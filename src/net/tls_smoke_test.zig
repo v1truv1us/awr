@@ -1,6 +1,5 @@
 /// Phase 3 Step 1 — BoringSSL linkage smoke test.
 /// Confirms vendored static libs resolve and C API is reachable. No network I/O.
-
 const std = @import("std");
 
 const tls_c = @cImport({

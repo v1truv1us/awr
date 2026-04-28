@@ -29,10 +29,9 @@
 /// `installDomBridge(engine, doc, alloc)` stores a heap-allocated
 /// BridgeCtx in engine.host.extension.  Call `removeDomBridge(engine)`
 /// to free it when the Page is destroyed.
-
-const std    = @import("std");
-const qjs    = @import("quickjs");
-const dom    = @import("node.zig");
+const std = @import("std");
+const qjs = @import("quickjs");
+const dom = @import("node.zig");
 const engine = @import("../js/engine.zig");
 const render = @import("../render.zig");
 
@@ -40,7 +39,7 @@ const render = @import("../render.zig");
 
 /// Stored as engine.host.extension; accessed by native callbacks.
 const BridgeCtx = struct {
-    doc:       *dom.Document,
+    doc: *dom.Document,
     allocator: std.mem.Allocator,
     elem_to_handle: std.AutoHashMap(*dom.Element, u32),
     handle_to_elem: std.ArrayList(*dom.Element),
@@ -78,8 +77,8 @@ pub const BridgeError = error{ AllocFailed, EvalFailed };
 /// Install the DOM bridge into `eng`, backed by `doc`.
 /// The bridge is heap-allocated and freed by `removeDomBridge`.
 pub fn installDomBridge(
-    eng:   *engine.JsEngine,
-    doc:   *dom.Document,
+    eng: *engine.JsEngine,
+    doc: *dom.Document,
     alloc: std.mem.Allocator,
 ) BridgeError!void {
     const bctx = alloc.create(BridgeCtx) catch return BridgeError.AllocFailed;
@@ -98,7 +97,7 @@ pub fn installDomBridge(
 /// Free the BridgeCtx allocated by installDomBridge.
 pub fn removeDomBridge(eng: *engine.JsEngine) void {
     const host = eng.ctx.getOpaque(engine.EngineHostData) orelse return;
-    const ext  = host.extension orelse return;
+    const ext = host.extension orelse return;
     const bctx: *BridgeCtx = @ptrCast(@alignCast(ext));
     bctx.deinit();
     bctx.allocator.destroy(bctx);
@@ -130,35 +129,35 @@ fn installNativeCallbacks(eng: *engine.JsEngine) !void {
     const ctx = eng.ctx;
 
     inline for (.{
-        .{ "querySelector",    querySelectorFn },
+        .{ "querySelector", querySelectorFn },
         .{ "querySelectorAll", querySelectorAllFn },
         .{ "querySelectorScoped", querySelectorScopedFn },
         .{ "querySelectorAllScoped", querySelectorAllScopedFn },
-        .{ "getAttribute",     getAttributeFn },
-        .{ "getTextContent",   getTextContentFn },
-        .{ "getChildren",      getChildrenFn },
-        .{ "getParent",        getParentFn },
-        .{ "getNextSibling",   getNextSiblingFn },
+        .{ "getAttribute", getAttributeFn },
+        .{ "getTextContent", getTextContentFn },
+        .{ "getChildren", getChildrenFn },
+        .{ "getParent", getParentFn },
+        .{ "getNextSibling", getNextSiblingFn },
         .{ "getPreviousSibling", getPreviousSiblingFn },
-        .{ "getInnerHTML",     getInnerHTMLFn },
-        .{ "getOuterHTML",     getOuterHTMLFn },
+        .{ "getInnerHTML", getInnerHTMLFn },
+        .{ "getOuterHTML", getOuterHTMLFn },
         .{ "getBoundingClientRect", getBoundingClientRectFn },
-        .{ "matches",         matchesFn },
-        .{ "closest",         closestFn },
-        .{ "contains",        containsFn },
-        .{ "getElementById",   getElementByIdFn },
-        .{ "getTitle",         getTitleFn },
-        .{ "setTitle",         setTitleFn },
-        .{ "getBody",          getBodyFn },
-        .{ "createElement",    createElementFn },
-        .{ "setInnerHTML",     setInnerHTMLFn },
-        .{ "cloneNode",        cloneNodeFn },
-        .{ "setAttribute",     setAttributeFn },
-        .{ "removeAttribute",  removeAttributeFn },
-        .{ "setTextContent",   setTextContentFn },
-        .{ "appendChild",      appendChildFn },
-        .{ "insertBefore",     insertBeforeFn },
-        .{ "removeChild",      removeChildFn },
+        .{ "matches", matchesFn },
+        .{ "closest", closestFn },
+        .{ "contains", containsFn },
+        .{ "getElementById", getElementByIdFn },
+        .{ "getTitle", getTitleFn },
+        .{ "setTitle", setTitleFn },
+        .{ "getBody", getBodyFn },
+        .{ "createElement", createElementFn },
+        .{ "setInnerHTML", setInnerHTMLFn },
+        .{ "cloneNode", cloneNodeFn },
+        .{ "setAttribute", setAttributeFn },
+        .{ "removeAttribute", removeAttributeFn },
+        .{ "setTextContent", setTextContentFn },
+        .{ "appendChild", appendChildFn },
+        .{ "insertBefore", insertBeforeFn },
+        .{ "removeChild", removeChildFn },
     }) |entry| {
         const fname: [:0]const u8 = "__awr_" ++ entry[0] ++ "__";
         const fn_val = qjs.Value.initCFunction(ctx, entry[1], fname, 1);
@@ -176,18 +175,18 @@ fn writeJsonStr(w: anytype, str: []const u8) !void {
     try w.writeByte('"');
     for (str) |c| {
         switch (c) {
-            '"'         => try w.writeAll("\\\""),
-            '\\'        => try w.writeAll("\\\\"),
-            '\n'        => try w.writeAll("\\n"),    // 0x0a
-            '\r'        => try w.writeAll("\\r"),    // 0x0d
-            '\t'        => try w.writeAll("\\t"),    // 0x09
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"), // 0x0a
+            '\r' => try w.writeAll("\\r"), // 0x0d
+            '\t' => try w.writeAll("\\t"), // 0x09
             // remaining control chars not already handled above
             0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => {
                 var esc: [6]u8 = undefined;
                 const s = std.fmt.bufPrint(&esc, "\\u{x:0>4}", .{c}) catch continue;
                 try w.writeAll(s);
             },
-            else        => try w.writeByte(c),
+            else => try w.writeByte(c),
         }
     }
     try w.writeByte('"');
@@ -342,7 +341,7 @@ fn serializeOuterHtml(bridge: *BridgeCtx, elem: *const dom.Element) SerializeErr
 
 fn querySelectorFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
     const bridge = getBridge(ctx) orelse return qjs.Value.null;
-    const c      = ctx orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
     if (args.len == 0) return qjs.Value.null;
 
     const sel_val: qjs.Value = @bitCast(args[0]);
@@ -358,7 +357,7 @@ fn querySelectorFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quic
 
 fn querySelectorAllFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
     const bridge = getBridge(ctx) orelse return qjs.Value.null;
-    const c      = ctx orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
     if (args.len == 0) return qjs.Value.initStringLen(c, "[]");
 
     const sel_val: qjs.Value = @bitCast(args[0]);
@@ -385,7 +384,7 @@ fn querySelectorAllFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("q
 
 fn getElementByIdFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
     const bridge = getBridge(ctx) orelse return qjs.Value.null;
-    const c      = ctx orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
     if (args.len == 0) return qjs.Value.null;
 
     const id_val: qjs.Value = @bitCast(args[0]);
@@ -588,7 +587,8 @@ fn getBoundingClientRectFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @impo
 
     const rect = model.rectForElement(elem) orelse return qjs.Value.initStringLen(c, "null");
     var buf: [256]u8 = undefined;
-    const json = std.fmt.bufPrint(&buf,
+    const json = std.fmt.bufPrint(
+        &buf,
         "{{\"top\":{d},\"left\":{d},\"bottom\":{d},\"right\":{d},\"width\":{d},\"height\":{d},\"x\":{d},\"y\":{d}}}",
         .{ rect.y, rect.x, rect.y + rect.height, rect.x + rect.width, rect.width, rect.height, rect.x, rect.y },
     ) catch return qjs.Value.initStringLen(c, "null");
@@ -644,11 +644,11 @@ fn containsFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs")
 
 fn getTitleFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
     const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(ctx orelse return qjs.Value.undefined, "");
-    const c      = ctx orelse return qjs.Value.undefined;
-    const html   = bridge.doc.htmlElement() orelse return qjs.Value.initStringLen(c, "");
-    const head   = html.firstChildByTag("head") orelse return qjs.Value.initStringLen(c, "");
-    const title  = head.firstChildByTag("title") orelse return qjs.Value.initStringLen(c, "");
-    const text   = title.textContent(bridge.allocator) catch return qjs.Value.initStringLen(c, "");
+    const c = ctx orelse return qjs.Value.undefined;
+    const html = bridge.doc.htmlElement() orelse return qjs.Value.initStringLen(c, "");
+    const head = html.firstChildByTag("head") orelse return qjs.Value.initStringLen(c, "");
+    const title = head.firstChildByTag("title") orelse return qjs.Value.initStringLen(c, "");
+    const text = title.textContent(bridge.allocator) catch return qjs.Value.initStringLen(c, "");
     defer bridge.allocator.free(text);
     return qjs.Value.initStringLen(c, text);
 }
@@ -703,8 +703,8 @@ fn setTitleFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs")
 
 fn getBodyFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
     const bridge = getBridge(ctx) orelse return qjs.Value.null;
-    const c      = ctx orelse return qjs.Value.null;
-    const body   = bridge.doc.body() orelse return qjs.Value.null;
+    const c = ctx orelse return qjs.Value.null;
+    const body = bridge.doc.body() orelse return qjs.Value.null;
     var buf: [8192]u8 = undefined;
     const json = elementToJson(bridge, body, &buf) orelse return qjs.Value.null;
     return qjs.Value.initStringLen(c, json);
@@ -952,7 +952,10 @@ fn insertBeforeFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quick
     if (parseHandleArg(c, args[2])) |rh| {
         if (getElemByHandle(bridge, rh)) |ref| {
             for (parent.children.items, 0..) |n, i| {
-                if (n == .element and n.element == ref) { idx = i; break; }
+                if (n == .element and n.element == ref) {
+                    idx = i;
+                    break;
+                }
             }
         }
     }
@@ -1152,6 +1155,25 @@ const BRIDGE_POLYFILL =
     \\    }
     \\  }
     \\
+    \\  function makeTemplateContent(owner) {
+    \\    return {
+    \\      nodeType: 11,
+    \\      nodeName: '#document-fragment',
+    \\      ownerDocument: document,
+    \\      get textContent() { return owner.textContent; },
+    \\      set textContent(v) { owner.textContent = v; },
+    \\      get children() { return owner.children; },
+    \\      get childNodes() { return owner.childNodes; },
+    \\      get firstChild() { return owner.firstChild; },
+    \\      get lastChild() { return owner.lastChild; },
+    \\      appendChild(child) { return owner.appendChild(child); },
+    \\      removeChild(child) { return owner.removeChild(child); },
+    \\      insertBefore(node, ref) { return owner.insertBefore(node, ref); },
+    \\      querySelector(sel) { return owner.querySelector(sel); },
+    \\      querySelectorAll(sel) { return owner.querySelectorAll(sel); },
+    \\    };
+    \\  }
+    \\
     \\  function makeElement(data) {
     \\    if (data === null || data === undefined) return null;
     \\    const d = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1226,6 +1248,66 @@ const BRIDGE_POLYFILL =
     \\        __awr_setAttribute__(this._h, 'class', value);
     \\        __awr_queue_mutation_record__(this, { type: 'attributes', target: this, attributeName: 'class', oldValue: oldValue });
     \\      },
+    \\      get type() {
+    \\        if (this.tagName === 'TEXTAREA') return 'textarea';
+    \\        if (this.tagName === 'BUTTON') return this._attrs.type || 'submit';
+    \\        if (this.tagName === 'SELECT') return 'select-multiple';
+    \\        if (this.tagName === 'INPUT') {
+    \\          const t = (this._attrs.type || 'text').toLowerCase();
+    \\          const valid = ['hidden','text','search','tel','url','email','password','date','time','datetime-local','number','range','color','checkbox','radio','file','submit','image','reset','button'];
+    \\          return valid.indexOf(t) >= 0 ? t : 'text';
+    \\        }
+    \\        return '';
+    \\      },
+    \\      set type(v) {
+    \\        this._attrs.type = String(v);
+    \\        __awr_setAttribute__(this._h, 'type', String(v));
+    \\      },
+    \\      get value() {
+    \\        if (this.tagName === 'TEXTAREA') {
+    \\          if (this._dirtyValue) return this._value != null ? this._value : '';
+    \\          const raw = this.textContent || '';
+    \\          return raw.replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n');
+    \\        }
+    \\        if (this.tagName === 'SELECT') return this._value || '';
+    \\        if (this.tagName === 'INPUT') {
+    \\          const t = this.type;
+    \\          if (t === 'checkbox' || t === 'radio') return this._attrs.value || 'on';
+    \\          if (t === 'file') return '';
+    \\          return this._dirtyValue ? (this._value != null ? this._value : '') : (this._attrs.value || '');
+    \\        }
+    \\        if (this.tagName === 'BUTTON') return this._attrs.value || '';
+    \\        return this._attrs.value || '';
+    \\      },
+    \\      set value(v) {
+    \\        const s = v == null ? '' : String(v);
+    \\        if (this.tagName === 'TEXTAREA' || this.tagName === 'INPUT') {
+    \\          this._dirtyValue = true;
+    \\          this._value = s;
+    \\        } else {
+    \\          this._value = s;
+    \\        }
+    \\      },
+    \\      get defaultValue() {
+    \\        if (this.tagName === 'TEXTAREA') return this.textContent || '';
+    \\        if (this.tagName === 'INPUT') return this._attrs.value || '';
+    \\        return '';
+    \\      },
+    \\      set defaultValue(v) {
+    \\        if (this.tagName === 'TEXTAREA') this.textContent = String(v);
+    \\        else this._attrs.value = String(v);
+    \\      },
+    \\      get name() { return this._attrs.name || ''; },
+    \\      get disabled() { return this._attrs.disabled != null && this._attrs.disabled !== 'false'; },
+    \\      set disabled(v) {
+    \\        if (v) this._attrs.disabled = ''; else delete this._attrs.disabled;
+    \\        __awr_setAttribute__(this._h, 'disabled', v ? '' : null);
+    \\      },
+    \\      get placeholder() { return this._attrs.placeholder || ''; },
+    \\      get required() { return this._attrs.required != null && this._attrs.required !== 'false'; },
+    \\      get readOnly() { return this._attrs.readonly != null && this._attrs.readonly !== 'false'; },
+    \\      _dirtyValue: false,
+    \\      _value: null,
     \\      get dataset() {
     \\        const owner = this;
     \\        if (!this._datasetProxy) {
@@ -1329,6 +1411,11 @@ const BRIDGE_POLYFILL =
     \\        try { return (JSON.parse(__awr_getChildren__(this._h)) || []).map(makeElement); } catch (e) { return []; }
     \\      },
     \\      get childNodes() { return this.children; },
+    \\      get content() {
+    \\        if (this.tagName !== 'TEMPLATE') return undefined;
+    \\        if (!this._content) this._content = makeTemplateContent(this);
+    \\        return this._content;
+    \\      },
     \\      get parentNode() {
     \\        if (this._parent) return this._parent;
     \\        const r = __awr_getParent__(this._h);
@@ -1385,6 +1472,7 @@ const BRIDGE_POLYFILL =
     \\    get hidden() { return false; },
     \\    get location() { return globalThis.location; },
     \\    get defaultView() { return globalThis; },
+    \\    get forms() { return document.getElementsByTagName('form'); },
     \\  };
     \\
     \\  globalThis.__awr_document_ready_state__ = globalThis.__awr_document_ready_state__ || 'loading';
@@ -1607,8 +1695,8 @@ const BRIDGE_POLYFILL =
     \\      throw new Error('XMLHttpRequest: credentialed requests are not currently supported');
     \\    }
     \\    this.__method = String(method || 'GET').toUpperCase();
-    \\    if (this.__method !== 'GET') {
-    \\      throw new Error('XMLHttpRequest: only async GET is currently supported');
+    \\    if (this.__method !== 'GET' && this.__method !== 'POST') {
+    \\      throw new Error('XMLHttpRequest: only GET and POST are currently supported');
     \\    }
     \\    this.__url = String(url || '');
     \\    this.readyState = 1;
@@ -1634,15 +1722,24 @@ const BRIDGE_POLYFILL =
     \\  globalThis.XMLHttpRequest.prototype.removeEventListener = function(type, callback, options) { __awr_remove_event_listener__(this, type, callback, options); };
     \\  globalThis.XMLHttpRequest.prototype.dispatchEvent = function(event) { return __awr_dispatch_event__(this, event); };
     \\  globalThis.XMLHttpRequest.prototype.send = function(body) {
-    \\    if (body != null) {
-    \\      throw new Error('XMLHttpRequest: request bodies are not currently supported');
+    \\    // GET requests cannot carry a body. POST accepts a string or
+    \\    // URLSearchParams body; the underlying fetch() polyfill handles
+    \\    // the encoding contract.
+    \\    if (this.__method === 'GET' && body != null) {
+    \\      throw new Error('XMLHttpRequest: GET requests cannot have a body');
+    \\    }
+    \\    const init = { method: this.__method };
+    \\    if (this.__method !== 'GET' && body != null) {
+    \\      // Strings and URLSearchParams pass through to the fetch polyfill,
+    \\      // which validates and stringifies. Other shapes throw there.
+    \\      init.body = body;
     \\    }
     \\    const self = this;
-    \\    fetch(this.__url)
+    \\    fetch(this.__url, init)
     \\      .then(function(response) {
-        \\        self.status = response.status;
-        \\        self.responseURL = response.url || self.__url;
-        \\        self.__responseHeadersMap = response.__headersMap || {};
+    \\        self.status = response.status;
+    \\        self.responseURL = response.url || self.__url;
+    \\        self.__responseHeadersMap = response.__headersMap || {};
     \\        return response.text();
     \\      })
     \\      .then(function(text) {
@@ -1754,8 +1851,7 @@ const BRIDGE_POLYFILL =
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 test "installDomBridge — basic smoke test" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><head><title>AWR Test</title></head><body><h1 id=\"title\">Hello</h1></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><head><title>AWR Test</title></head><body><h1 id=\"title\">Hello</h1></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -1770,8 +1866,7 @@ test "installDomBridge — basic smoke test" {
 }
 
 test "bridge — document.querySelector returns element" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><p id=\"intro\">Hello AWR</p></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><p id=\"intro\">Hello AWR</p></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -1784,8 +1879,7 @@ test "bridge — document.querySelector returns element" {
 }
 
 test "bridge — document.querySelector returns null for missing selector" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><p>text</p></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><p>text</p></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -1798,8 +1892,7 @@ test "bridge — document.querySelector returns null for missing selector" {
 }
 
 test "bridge — element.getAttribute works" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><a href=\"/page\">link</a></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><a href=\"/page\">link</a></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -1812,8 +1905,7 @@ test "bridge — element.getAttribute works" {
 }
 
 test "bridge — document.getElementById finds element" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><div id=\"main\">content</div></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><div id=\"main\">content</div></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -1826,8 +1918,7 @@ test "bridge — document.getElementById finds element" {
 }
 
 test "bridge — document.getElementById returns null for missing" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><div id=\"other\">content</div></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><div id=\"other\">content</div></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -1840,8 +1931,7 @@ test "bridge — document.getElementById returns null for missing" {
 }
 
 test "bridge — document.title returns page title" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><head><title>My Page</title></head><body></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><head><title>My Page</title></head><body></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -1854,8 +1944,7 @@ test "bridge — document.title returns page title" {
 }
 
 test "bridge — document.body is not null" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><p>text</p></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><p>text</p></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -1868,8 +1957,7 @@ test "bridge — document.body is not null" {
 }
 
 test "bridge — element.textContent contains text" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><p>hello world</p></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><p>hello world</p></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -1882,8 +1970,7 @@ test "bridge — element.textContent contains text" {
 }
 
 test "bridge — element.addEventListener does not throw" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><button id=\"btn\">click</button></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><button id=\"btn\">click</button></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -1898,8 +1985,7 @@ test "bridge — element.addEventListener does not throw" {
 }
 
 test "bridge — element.setAttribute mutates JS-side attr" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><div id=\"box\">text</div></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><div id=\"box\">text</div></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -1916,8 +2002,7 @@ test "bridge — element.setAttribute mutates JS-side attr" {
 }
 
 test "bridge — document.querySelectorAll returns array" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><p>a</p><p>b</p><p>c</p></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><p>a</p><p>b</p><p>c</p></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -2013,8 +2098,7 @@ test "bridge — DOM mutations reflect into Zig querySelector" {
 }
 
 test "bridge — element.querySelector scopes to descendants" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><section id=\"first\"><p class=\"item\">one</p></section><section id=\"scope\"><p class=\"item\">two</p><div><p class=\"item\">three</p></div></section></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><section id=\"first\"><p class=\"item\">one</p></section><section id=\"scope\"><p class=\"item\">two</p><div><p class=\"item\">three</p></div></section></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -2029,8 +2113,7 @@ test "bridge — element.querySelector scopes to descendants" {
 }
 
 test "bridge — element.querySelectorAll scopes to descendants" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><section id=\"first\"><p class=\"item\">one</p></section><section id=\"scope\"><p class=\"item\">two</p><div><p class=\"item\">three</p></div></section></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><section id=\"first\"><p class=\"item\">one</p></section><section id=\"scope\"><p class=\"item\">two</p><div><p class=\"item\">three</p></div></section></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
@@ -2045,8 +2128,7 @@ test "bridge — element.querySelectorAll scopes to descendants" {
 }
 
 test "bridge — element.matches and closest use Zig selector engine" {
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><body><section class=\"shell\"><div><p id=\"leaf\" class=\"copy\">hello</p></div></section></body></html>");
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><section class=\"shell\"><div><p id=\"leaf\" class=\"copy\">hello</p></div></section></body></html>");
     defer doc.deinit();
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);

@@ -31,6 +31,7 @@ correctness is the primary MVP authority.
 | `spec/MVP.md` | Top-level canonical umbrella spec and change-control point |
 | `spec/subspecs/mvp-remainder.md` | Active MVP completion track and execution order |
 | `spec/subspecs/wpt-conformance.md` | Canonical WPT/Test262 runner, corpus, and merge-gate spec |
+| `spec/subspecs/agent-browser.md` | Active agent-browser scope: POST in fetch+XHR, form `method=post`, cookie persistence |
 | `docs/adr/0001-spec-governance.md` | Historical record for spec/documentation governance decisions |
 
 ### Deferred, documented, not active now
@@ -96,7 +97,10 @@ The closed MVP surface is:
 3. authoritative DOM, event, storage, and geometry behavior for the curated
    conformance target;
 4. explicitly narrowed network/runtime request semantics:
-   `fetch()` and `XMLHttpRequest` are async GET-only on the shipped MVP path;
+   `fetch()` and `XMLHttpRequest` are async-only and accept the GET and POST
+   methods. POST bodies are strings or `URLSearchParams` instances stringified
+   to `application/x-www-form-urlencoded`. All other methods, init keys, and
+   body shapes still throw. See `spec/subspecs/agent-browser.md`;
 5. explicitly narrowed browser-history semantics:
    `history` is limited to same-origin `pushState` / `replaceState` plus
    `length` and `state`;
@@ -133,6 +137,11 @@ queue:
 - browser/TUI product-track expansion → `spec/subspecs/browser-tui.md`
 - later fingerprinting / owned browser identity work →
   `spec/Fingerprint-Plan.md`
+
+The agent-browser scope (POST in `fetch` and XHR, `<form method=post>` end-to-
+end through `awr browse`, cookie jar disk persistence) is governed by
+`spec/subspecs/agent-browser.md` and is **active**, not deferred. It widens
+§5.4 in a documented and WPT-gated way.
 
 Do not treat deferred tracks as blockers for the active MVP closure work unless
 this spec is amended.

@@ -19,9 +19,11 @@ const dom = @import("dom/node.zig"); // parseDocument handles HTML+DOM internall
 const bridge = @import("dom/bridge.zig");
 const render = @import("render.zig");
 const url_mod = @import("net/url.zig");
+const cookie_path = @import("util/cookie_path.zig");
 
 pub const ScreenModel = render.ScreenModel;
 pub const ScreenLink = render.ScreenLink;
+pub const ScreenField = render.ScreenField;
 
 // ── PageResult ────────────────────────────────────────────────────────────
 
@@ -111,6 +113,9 @@ pub const Page = struct {
     current_doc: ?dom.Document = null,
     viewport_width: usize = 80,
     viewport_height: usize = 24,
+    /// Owned cookie-jar path for persistence (or null when not configured).
+    /// The Client borrows this slice for its lifetime; Page frees it.
+    cookie_jar_path: ?[]u8 = null,
 
     /// Initialise a new Page with default client options.
     /// `io` is threaded through to the HTTP client for all network fetches
@@ -123,17 +128,30 @@ pub const Page = struct {
         errdefer el.deinit();
 
         const base_url = try allocator.dupe(u8, "");
+        errdefer allocator.free(base_url);
+
+        // Resolve persistent cookie jar path (opt-in via env vars per
+        // spec/subspecs/agent-browser.md §2). Errors are non-fatal; a missing
+        // path or HOME just disables persistence.
+        const jar_path = cookie_path.resolveCookieJarPath(allocator, io) catch |err| blk: {
+            std.log.warn("cookie jar path resolution failed: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        errdefer if (jar_path) |p| allocator.free(p);
 
         var page = Page{
             .allocator = allocator,
             .io = io,
             .client = client.Client.init(allocator, io, .{
                 .use_chrome_headers = false, // plain headers → uncompressed body
+                .persist_cookies = jar_path != null,
+                .cookie_jar_path = jar_path,
             }),
             .js = js_engine,
             .event_loop = el,
             .base_url = base_url,
             .current_doc = null,
+            .cookie_jar_path = jar_path,
         };
         page.attachHosts();
         return page;
@@ -149,6 +167,7 @@ pub const Page = struct {
         self.js.deinit();
         self.client.deinit();
         self.allocator.free(self.base_url);
+        if (self.cookie_jar_path) |p| self.allocator.free(p);
     }
 
     /// Wire the Page's event loop and fetch adapter into the JsEngine so
@@ -165,17 +184,34 @@ pub const Page = struct {
     /// FetchHost adapter: runs the caller's URL through either the HTTP
     /// client (`http(s)://`) or the filesystem (`file://`), resolving
     /// relative URLs against the page's base URL.
-    fn fetchAdapter(ptr: *anyopaque, url: []const u8) anyerror!engine.FetchHost.Response {
+    fn fetchAdapter(ptr: *anyopaque, req: engine.FetchHost.Request) anyerror!engine.FetchHost.Response {
         const self: *Page = @ptrCast(@alignCast(ptr));
         const gpa = self.allocator;
 
-        const resolved = try resolveUrl(gpa, self.base_url, url);
+        const resolved = try resolveUrlAlloc(gpa, self.base_url, req.url);
         errdefer gpa.free(resolved);
 
         if (std.mem.startsWith(u8, resolved, "http://") or
             std.mem.startsWith(u8, resolved, "https://"))
         {
-            var resp = try self.client.fetch(resolved);
+            // Copy the body before calling fetch — the JS bridge frees the
+            // QuickJS-owned cstring as soon as fetchAdapter returns; the body
+            // slice in `req` becomes invalid the moment the underlying fetch
+            // hits any await/yield. Client.fetchRequest copies as needed for
+            // its own retry/redirect dance, but we copy here to keep
+            // ownership rules simple.
+            const owned_body: ?[]const u8 = if (req.body) |b| try gpa.dupe(u8, b) else null;
+            defer if (owned_body) |b| gpa.free(b);
+
+            const method: client.Method = switch (req.method) {
+                .GET => .GET,
+                .POST => .POST,
+            };
+            var resp = try self.client.fetchRequest(.{
+                .url = resolved,
+                .method = method,
+                .body = owned_body,
+            });
             defer resp.deinit();
             const body = try gpa.dupe(u8, resp.body);
             const response_url = try gpa.dupe(u8, resp.url);
@@ -190,6 +226,9 @@ pub const Page = struct {
             };
         }
         if (std.mem.startsWith(u8, resolved, "file://")) {
+            // file:// is GET-only; POST against a local file is meaningless.
+            // Let `errdefer` free `resolved` on the rejection path.
+            if (req.method != .GET) return error.UnsupportedScheme;
             const path = resolved[7..];
             const body = try std.Io.Dir.cwd().readFileAlloc(
                 self.io,
@@ -197,6 +236,8 @@ pub const Page = struct {
                 gpa,
                 .limited(16 * 1024 * 1024),
             );
+            // Ownership of `resolved` transfers into the response — the
+            // errdefer above will not run on success, so this is leak-free.
             return .{
                 .status = 200,
                 .body = body,
@@ -205,7 +246,7 @@ pub const Page = struct {
                 .allocator = gpa,
             };
         }
-        gpa.free(resolved);
+        // Unsupported scheme — let `errdefer` free `resolved` on the way out.
         return error.UnsupportedScheme;
     }
 
@@ -249,6 +290,60 @@ pub const Page = struct {
         var resp = try self.client.fetch(url);
         defer resp.deinit();
         return self.processHtml(resp.url, resp.status, resp.body);
+    }
+
+    /// POST `body` to `url` with `Content-Type: application/x-www-form-urlencoded`,
+    /// then run the response through the same parse/render pipeline as
+    /// `navigate`. Caller must call result.deinit().
+    /// See `spec/subspecs/agent-browser.md §2`.
+    pub fn navigatePost(self: *Page, url: []const u8, body: []const u8) !PageResult {
+        var resp = try self.client.fetchRequest(.{
+            .url = url,
+            .method = .POST,
+            .body = body,
+        });
+        defer resp.deinit();
+        return self.processHtml(resp.url, resp.status, resp.body);
+    }
+
+    /// Form metadata captured by walking the DOM ancestry of an input field.
+    /// `action` is borrowed from the DOM and lives only as long as the page's
+    /// current document; copy if you need a longer lifetime.
+    pub const FormMeta = struct {
+        method: enum { GET, POST },
+        action: ?[]const u8,
+    };
+
+    /// Walk parents of the given field's element to find the nearest `<form>`
+    /// ancestor and read its `method` + `action` attributes. Returns null if
+    /// the page has no current document or the field is not inside a form.
+    pub fn formMetaForField(self: *Page, field: ScreenField) ?FormMeta {
+        if (self.current_doc == null) return null;
+        const elem: *const dom.Element = @ptrFromInt(field.element_ptr);
+        var cur: ?*const dom.Element = elem.parent;
+        while (cur) |e| : (cur = e.parent) {
+            if (std.ascii.eqlIgnoreCase(e.tag, "form")) {
+                const method_raw = e.getAttribute("method") orelse "GET";
+                const method_trimmed = std.mem.trim(u8, method_raw, " \t\r\n");
+                const method: @TypeOf(@as(FormMeta, undefined).method) =
+                    if (std.ascii.eqlIgnoreCase(method_trimmed, "POST")) .POST else .GET;
+                return FormMeta{
+                    .method = method,
+                    .action = e.getAttribute("action"),
+                };
+            }
+        }
+        return null;
+    }
+
+    /// Read the `value` attribute of an input element directly from the DOM.
+    /// Used as a fallback for hidden fields and pre-populated text inputs the
+    /// user did not edit (CSRF tokens depend on this round-trip).
+    /// Returned slice is borrowed from the DOM.
+    pub fn fieldValueAttr(self: *Page, field: ScreenField) ?[]const u8 {
+        if (self.current_doc == null) return null;
+        const elem: *const dom.Element = @ptrFromInt(field.element_ptr);
+        return elem.getAttribute("value");
     }
 
     /// Process an already-fetched HTML string without making a network
@@ -585,6 +680,10 @@ pub const Page = struct {
         return render.renderBrowseModel(allocator, doc_ref, opts);
     }
 
+    pub fn resolveUrl(self: *Page, base: []const u8, ref: []const u8) ![]u8 {
+        return resolveUrlAlloc(self.allocator, base, ref);
+    }
+
     // ── Script execution ─────────────────────────────────────────────────
 
     /// Walk the DOM subtree depth-first and execute each `<script>` in
@@ -633,7 +732,7 @@ pub const Page = struct {
         const trimmed_src = std.mem.trim(u8, raw_src, " \t\r\n");
         if (trimmed_src.len == 0) return;
 
-        const resolved = resolveUrl(self.allocator, page_url, trimmed_src) catch |err| {
+        const resolved = resolveUrlAlloc(self.allocator, page_url, trimmed_src) catch |err| {
             logExternalScriptError("awr: external script resolve failed ({s}): {t}\n", .{ trimmed_src, err });
             return;
         };
@@ -705,7 +804,7 @@ pub const Page = struct {
 ///     the directory of the base URL's path, with `.`/`..` normalised.
 ///
 /// Fragments and query strings on `base` are stripped before resolution.
-fn resolveUrl(
+fn resolveUrlAlloc(
     alloc: std.mem.Allocator,
     base: []const u8,
     ref: []const u8,
@@ -888,6 +987,24 @@ test "Page.processHtml — document.title accessible inside script" {
     try std.testing.expect(ok);
 }
 
+test "Page.processHtml — template.content is visible to scripts" {
+    var page = try Page.init(std.testing.allocator, std.testing.io);
+    defer page.deinit();
+    var result = try page.processHtml(
+        "http://example.com/",
+        200,
+        "<html><body>" ++
+            "<template id=\"tmpl\"><section class=\"item\">Template text</section></template>" ++
+            "<script>var tmpl = document.getElementById('tmpl');" ++
+            "window.__awr_template_text__ = tmpl.content.firstChild.textContent;</script>" ++
+            "</body></html>",
+    );
+    defer result.deinit();
+
+    const ok = try page.js.evalBool("window.__awr_template_text__ === 'Template text'");
+    try std.testing.expect(ok);
+}
+
 test "Page.processHtml — empty body gives empty body_text" {
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
@@ -936,37 +1053,37 @@ test "Page.processHtml — external script (src=) via file:// loads and executes
 // ── URL resolution tests ──────────────────────────────────────────────────
 
 test "resolveUrl — absolute http ref wins" {
-    const out = try resolveUrl(std.testing.allocator, "http://a.com/page", "https://b.com/x.js");
+    const out = try resolveUrlAlloc(std.testing.allocator, "http://a.com/page", "https://b.com/x.js");
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("https://b.com/x.js", out);
 }
 
 test "resolveUrl — protocol-relative" {
-    const out = try resolveUrl(std.testing.allocator, "https://a.com/page", "//cdn.example/x.js");
+    const out = try resolveUrlAlloc(std.testing.allocator, "https://a.com/page", "//cdn.example/x.js");
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("https://cdn.example/x.js", out);
 }
 
 test "resolveUrl — absolute path" {
-    const out = try resolveUrl(std.testing.allocator, "http://a.com/dir/page", "/x.js");
+    const out = try resolveUrlAlloc(std.testing.allocator, "http://a.com/dir/page", "/x.js");
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("http://a.com/x.js", out);
 }
 
 test "resolveUrl — relative path strips ./ and joins to base dir" {
-    const out = try resolveUrl(std.testing.allocator, "http://a.com/dir/page.html", "./x.js");
+    const out = try resolveUrlAlloc(std.testing.allocator, "http://a.com/dir/page.html", "./x.js");
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("http://a.com/dir/x.js", out);
 }
 
 test "resolveUrl — relative path with .." {
-    const out = try resolveUrl(std.testing.allocator, "http://a.com/dir/sub/page.html", "../x.js");
+    const out = try resolveUrlAlloc(std.testing.allocator, "http://a.com/dir/sub/page.html", "../x.js");
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("http://a.com/dir/x.js", out);
 }
 
 test "resolveUrl — relative against file:// base" {
-    const out = try resolveUrl(std.testing.allocator, "file://experiments/page.html", "./tools.js");
+    const out = try resolveUrlAlloc(std.testing.allocator, "file://experiments/page.html", "./tools.js");
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("file://experiments/tools.js", out);
 }
