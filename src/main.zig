@@ -29,6 +29,7 @@ const USAGE =
     \\
     \\Usage:
     \\  awr browse <url>             Open URL in interactive terminal browser
+    \\  awr render <url> [--width N] Load URL, print the rendered terminal text non-interactively
     \\  awr <url>                    Load URL/path, print JSON {url, status, title, body_text, window_data, tools}
     \\  awr tools <url>              Load URL/path, print the JSON array of registered WebMCP tools
     \\  awr call <url> <name> <json> Load URL/path, invoke tool <name> with <json> args, print result envelope
@@ -185,6 +186,49 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
             std.process.exit(1);
         }
         try browser_mod.run(alloc, io, args[2]);
+        return;
+    }
+
+    // Subcommand: awr render <url>
+    // Non-interactive sibling of `awr browse`. Loads the URL, runs it
+    // through the same renderBrowseModel pipeline the TUI uses, and prints
+    // the plain rendered text + link footnotes to stdout. Useful for
+    // agents, scripts, smoke tests, and CI verification of the render
+    // pipeline without needing a real TTY.
+    if (std.mem.eql(u8, args[1], "render")) {
+        if (args.len < 3) {
+            try stdoutWrite(io, "usage: awr render <url> [--width N]\n");
+            std.process.exit(1);
+        }
+        var width: usize = 78;
+        var i: usize = 3;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--width") and i + 1 < args.len) {
+                width = std.fmt.parseInt(usize, args[i + 1], 10) catch {
+                    std.process.fatal("render: --width expects an integer, got '{s}'", .{args[i + 1]});
+                };
+                i += 1;
+            } else {
+                std.process.fatal("render: unknown arg '{s}'", .{args[i]});
+            }
+        }
+        var p = try page_mod.Page.init(alloc, io);
+        defer p.deinit();
+        var result = loadPage(&p, alloc, io, args[2]) catch |err| {
+            fatalLoadError("loading", args[2], err);
+        };
+        defer result.deinit();
+        var screen = try p.renderBrowseModel(alloc, &result, .{
+            .max_width = width,
+            .ansi_colors = false,
+            .show_links = true,
+            .show_images = true,
+        });
+        defer screen.deinit();
+        try stdoutWrite(io, screen.text);
+        if (screen.text.len == 0 or screen.text[screen.text.len - 1] != '\n') {
+            try stdoutWrite(io, "\n");
+        }
         return;
     }
 
