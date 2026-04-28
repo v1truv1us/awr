@@ -78,9 +78,29 @@ pub fn isBoilerplateRegion(elem: *const dom.Element) bool {
 }
 
 pub fn shouldSkipForBrowse(elem: *const dom.Element) bool {
-    if (isBoilerplateRegion(elem)) {
-        const metrics = analyzeElement(elem);
-        return metrics.linkDensity() >= 0.55 or metrics.text_bytes < 120;
+    if (!isBoilerplateRegion(elem)) return false;
+    const metrics = analyzeElement(elem);
+
+    // Semantic <main> escape hatch: inside <main>, trust the author and only
+    // prune on EXPLICIT signals — boilerplate-named tags (nav/footer) or an
+    // explicit boilerplate class/id hit on this element ("related",
+    // "newsletter", "sidebar", etc.). Drop the density-only and tiny-text
+    // heuristics for descendants of <main>: app-shell SSR (Next.js,
+    // SvelteKit) emits card grids with high per-card link density that
+    // look like nav noise to those signals but are the actual page content.
+    // See `.opencode/plans/1777121633483-neon-meadow.md` for the original
+    // investigation.
+    if (hasAncestorTag(elem, "main")) {
+        return isBoilerplateTag(elem.tag) or hasBoilerplateToken(elem);
+    }
+
+    return metrics.linkDensity() >= 0.55 or metrics.text_bytes < 120;
+}
+
+fn hasAncestorTag(elem: *const dom.Element, tag: []const u8) bool {
+    var cur = elem.parent;
+    while (cur) |p| : (cur = p.parent) {
+        if (eql(p.tag, tag)) return true;
     }
     return false;
 }
@@ -342,6 +362,46 @@ test "chooseContentRoot falls back to highest scoring container" {
 
     const root = chooseContentRoot(&doc) orelse return error.SkipZigTest;
     try std.testing.expectEqualStrings("story", root.getAttribute("id").?);
+}
+
+test "shouldSkipForBrowse — link-dense card inside <main> is preserved" {
+    // App-shell regression case (per .opencode/plans/1777121633483-neon-meadow.md):
+    // pages like NVIDIA's models grid emit SSR cards with many links each,
+    // pushing per-card link density above 0.55. Without the <main> escape
+    // hatch in shouldSkipForBrowse, those cards get pruned and the page
+    // renders blank in the TUI even though the DOM contains real content.
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body><main><section class="cards">
+        \\  <article><a href="/m/1">Model 1</a><a href="/m/1/details">Details</a></article>
+        \\  <article><a href="/m/2">Model 2</a><a href="/m/2/details">Details</a></article>
+        \\</section></main></body></html>
+    );
+    defer doc.deinit();
+
+    const cards = doc.querySelector("section") orelse return error.SkipZigTest;
+    // Without the <main> escape hatch, this card grid hits the
+    // `linkDensity() >= 0.55` branch in shouldSkipForBrowse and gets pruned.
+    try std.testing.expect(!shouldSkipForBrowse(cards));
+
+    const article = doc.querySelector("article") orelse return error.SkipZigTest;
+    try std.testing.expect(!shouldSkipForBrowse(article));
+}
+
+test "shouldSkipForBrowse — link-dense aside outside <main> still pruned" {
+    // Negative regression: the escape hatch must be limited to <main>
+    // descendants. A link-dense <aside> at the body level is still
+    // boilerplate and should be pruned, otherwise we'd start rendering
+    // sidebars on content-focused pages.
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body>
+        \\  <main><p>The real article content sits here with enough words to qualify.</p></main>
+        \\  <aside class="related"><a href="/a">A</a><a href="/b">B</a><a href="/c">C</a><a href="/d">D</a></aside>
+        \\</body></html>
+    );
+    defer doc.deinit();
+
+    const aside = doc.querySelector("aside") orelse return error.SkipZigTest;
+    try std.testing.expect(shouldSkipForBrowse(aside));
 }
 
 test "chooseContentRoot prefers inner link-list cell for HN-like tables" {
