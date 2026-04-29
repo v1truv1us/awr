@@ -4,15 +4,17 @@
 > `spec/MVP.md` is the canonical umbrella spec. This file is the
 > authority for two coordinated tracks:
 >
-> - **Track A — Image rendering** *(deferred-within-active)*: terminal
->   graphics protocols (Kitty, iTerm2, Sixel) and text/braille fallback
->   for `<img>`, `<picture>`, `srcset`, and CSS `background-image`. Code
->   has not landed; this track activates once Track B is established.
-> - **Track B — Real-page render-quality corpus** *(in progress)*: a
->   fixture corpus of real production HTML plus a snapshot-based test
->   harness that proves `renderBrowseModel` output stays useful as the
->   renderer evolves. Harness skeleton landed alongside this promotion;
->   fixture corpus expansion is the active work.
+> - **Track A — Image rendering** *(deferred-within-active, not started)*:
+>   terminal graphics protocols (Kitty, iTerm2, Sixel) and text/braille
+>   fallback for `<img>`, `<picture>`, `srcset`, and CSS
+>   `background-image`. Code has not landed; this track activates next.
+> - **Track B — Real-page render-quality corpus** *(complete pending
+>   Track A's gate 3)*: a fixture corpus of real production HTML plus
+>   a snapshot-based test harness that proves `renderBrowseModel`
+>   output stays useful as the renderer evolves. As of 2026-04-29, the
+>   corpus has 12 fixtures across 11 distinct render categories
+>   (§4.1); only the search-results category remains deferred (DDG
+>   blocks curl). All Track-B-specific §6 closure gates are green.
 >
 > The tracks share closure gates because the corpus fixtures are also the
 > integration tests that prove image rendering works on real pages. They
