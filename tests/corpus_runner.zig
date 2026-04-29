@@ -41,12 +41,60 @@ const Fixture = struct {
 
 const fixtures = [_]Fixture{
     .{
+        // Category 1 — static baseline.
         .name = "example_com",
         .url = "https://example.com/",
         .html = @embedFile("corpus/fixtures/example_com.html"),
         .expected = @embedFile("corpus/fixtures/example_com.expected.txt"),
         .min_text_bytes = 50,
         .must_contain = &.{ "Example Domain", "Learn more" },
+        .must_not_contain = &.{ "[object Object]", "\x1b[" },
+    },
+    .{
+        // Category 8 — discussion / threading. HN is also a tables-as-layout
+        // stress case (covered by render-side unit tests, but the real
+        // page is denser and noisier).
+        .name = "hacker_news",
+        .url = "https://news.ycombinator.com/",
+        .html = @embedFile("corpus/fixtures/hacker_news.html"),
+        .expected = @embedFile("corpus/fixtures/hacker_news.expected.txt"),
+        .min_text_bytes = 1000,
+        .must_contain = &.{ "Hacker News", "points by" },
+        .must_not_contain = &.{ "[object Object]", "\x1b[" },
+    },
+    // Category 2 — long-form article / semantic HTML5 (Wikipedia featured)
+    // is intentionally NOT registered yet. A 580 KB capture of the Octopus
+    // article rendered only ~984 bytes (the taxonomy infobox table) instead
+    // of the article body. The corpus surfaced a real render-quality gap
+    // in either chooseContentRoot (likely picking the infobox table early)
+    // or shouldSkipForBrowse pruning the article container. Tracked as the
+    // next natural follow-up after this commit; once fixed, recapture and
+    // register here with min_text_bytes around 10000+ and a must_contain
+    // set that includes article-body strings ("cephalopod", "tentacles",
+    // distribution-section keywords).
+    .{
+        // Category 10 — form-heavy page. httpbin's form fixture is the
+        // canonical multi-input <form method="post"> that round-trips
+        // through the agent-browser pipeline.
+        .name = "httpbin_form",
+        .url = "https://httpbin.org/forms/post",
+        .html = @embedFile("corpus/fixtures/httpbin_form.html"),
+        .expected = @embedFile("corpus/fixtures/httpbin_form.expected.txt"),
+        .min_text_bytes = 100,
+        .must_contain = &.{ "Customer name", "Telephone" },
+        .must_not_contain = &.{ "[object Object]", "\x1b[" },
+    },
+    .{
+        // Category 6 — app shell with SSR card grid. The renderer must
+        // surface NVIDIA's model-card content via the <main> escape
+        // hatch in shouldSkipForBrowse (commit adad620). Without that
+        // fix this fixture renders as a blank shell.
+        .name = "nvidia_models",
+        .url = "https://build.nvidia.com/models?filters=nimType%3Anim_type_preview&label=coding",
+        .html = @embedFile("corpus/fixtures/nvidia_models.html"),
+        .expected = @embedFile("corpus/fixtures/nvidia_models.expected.txt"),
+        .min_text_bytes = 800,
+        .must_contain = &.{ "NVIDIA", "Models" },
         .must_not_contain = &.{ "[object Object]", "\x1b[" },
     },
 };

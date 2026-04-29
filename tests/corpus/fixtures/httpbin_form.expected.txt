@@ -1,0 +1,16 @@
+Customer name:[____________________]
+Telephone:[____________________]
+E-mail address:[____________________]
+Pizza Size[ ]Small
+[ ]Medium
+[ ]Large
+Pizza Toppings[ ]Bacon
+[ ]Extra Cheese
+[ ]Onion
+[ ]Mushroom
+Preferred delivery time:[____________________]
+Delivery instructions:+--------------------+
+|                    |
+|                    |
++--------------------+
+[Submit order]

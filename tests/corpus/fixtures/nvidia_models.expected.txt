@@ -1,0 +1,45 @@
+
+
+
+[][NVIDIA][2][Navigation omitted]
+
+[____________________]⌘KCtrl+K[][][?][Login]Models
+======
+
+Deploy and scale models on your GPU infrastructure of choice with NVIDIA NIM
+inference microservices
+
+[Navigation omitted]
+
+[Sidebar omitted]
+
+
+[Filters (2)]8 models[____________________][]Sort By[dateCreated:DESC ▼][Most Recent]Z.ai[3]Free
+Endpointglm-4.7
+
+
+GLM-4.7 is a multilingual agentic coding partner with stronger reasoning, tool
+use, and UI skills.Tool Calling[4][+3]4.57M1w[Header omitted]
+
+MiniMax M2.7 is a 230B-parameter text-to-text AI model excelling in coding,
+reasoning, and office tasks.coding[5][+2]4.15M2w[Header omitted]
+
+200B open-source reasoning engine with sparse MoE powering frontier agentic
+AI.Agentic[6][+2]9.07M2mo[Header omitted]
+
+State-of-the-art open code model with deep reasoning, 256k context, and
+unmatched efficiency.coding[7][+3]2.81M4mo[Header omitted]
+
+Follow-on version of Kimi-K2-Instruct with longer context window and enhanced
+reasoning capabilities.long-context[8][+3]9.75M7mo[Header omitted]
+
+Excels in agentic coding and browser use and supports 256K context, delivering
+top results.agentic coding[9][+3]3.27M7mo[Header omitted]
+
+State-of-the-art open mixture-of-experts model with strong reasoning, coding,
+and agentic capabilitiescoding[10][+3]15.32M9mo[Header omitted]
+
+High performance reasoning model optimized for efficiency and edge deploymentcoding[11][+3]1.19M9moItems
+per page[24][][][11][][][1___________________]of 1 pages
+[Footer omitted]
+
