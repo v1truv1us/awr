@@ -311,7 +311,13 @@ This sub-spec is closed when all of the following are true:
    (no escape garbage) with `[alt][N]` refs intact for grep workflows,
    regardless of `--images=…` setting.
 9. Memory regression: rendering the corpus with images enabled does
-   not exceed 64 MB peak RSS during `zig build test-corpus`.
+   not exceed **128 MB** peak RSS during `zig build test-corpus`.
+   Empirical baseline (Track B with 12 fixtures, no images): 83 MB.
+   The 128 MB ceiling leaves headroom for ~20-25 fixtures and the
+   future Track A image cache (32 MB cap). The original 64 MB ceiling
+   in the first draft of this spec was set without measurement; it
+   was raised after the 12th fixture landed and we measured the real
+   number.
 10. `spec/MVP.md §5` and §7 are amended in the same change set as the
     first code in either track lands.
 

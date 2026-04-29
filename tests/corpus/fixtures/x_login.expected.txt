@@ -1,0 +1,3 @@
+Something went wrong, but don’t fret — let’s give it another shot.
+[Try again][⚠️]Some privacy related extensions may cause issues on x.com.
+Please disable them and try again.

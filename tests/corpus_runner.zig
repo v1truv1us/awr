@@ -174,6 +174,54 @@ const fixtures = [_]Fixture{
             "This is a comment",
         },
     },
+    .{
+        // Category 3 — news investigation / long-read. ProPublica's IRS
+        // Files investigation. Long-form journalism with bylines,
+        // pull-quotes, image captions, sidebar callouts, and a long
+        // article body. Exercises the renderer's handling of
+        // magazine-style nested <section> structures.
+        .name = "propublica_irs",
+        .url = "https://www.propublica.org/article/the-secret-irs-files-trove-of-never-before-seen-records-reveal-how-the-wealthiest-avoid-income-tax",
+        .html = @embedFile("corpus/fixtures/propublica_irs.html"),
+        .expected = @embedFile("corpus/fixtures/propublica_irs.expected.txt"),
+        .min_text_bytes = 10_000,
+        .must_contain = &.{ "ProPublica", "IRS" },
+        .must_not_contain = &.{ "[object Object]", "\x1b[" },
+    },
+    .{
+        // Category 7 — heavy SPA with mostly-empty SSR. x.com (Twitter)
+        // login page. The page emits no <main>, no <article>, no
+        // semantic structure — all content is JS-rendered post-load,
+        // and AWR's QuickJS engine cannot drive that. This fixture's
+        // job is to assert the renderer DOES NOT CRASH on such pages
+        // and produces grep-friendly text output (escape-free) even
+        // when there's almost nothing to render. Realistic for any
+        // pure-SPA login or app entrypoint.
+        .name = "x_login",
+        .url = "https://x.com/login",
+        .html = @embedFile("corpus/fixtures/x_login.html"),
+        .expected = @embedFile("corpus/fixtures/x_login.expected.txt"),
+        .min_text_bytes = 0, // SPA shell — no SSR content guaranteed
+        .must_contain = &.{},
+        .must_not_contain = &.{ "[object Object]", "\x1b[" },
+    },
+    .{
+        // Category 12 — international RTL. Arabic Wikipedia article on
+        // أخطبوطيات (Octopodiformes). Same chooseContentRoot path as
+        // English/Chinese Wikipedia. Renderer outputs LTR-formatted
+        // text — RTL display is the terminal's responsibility, not
+        // the renderer's. Assertion: doesn't crash, preserves Arabic
+        // bytes verbatim (no mojibake), produces meaningful text
+        // length.
+        .name = "wiki_ar_octopus",
+        .url = "https://ar.wikipedia.org/wiki/%D8%A3%D8%AE%D8%B7%D8%A8%D9%88%D8%B7",
+        .html = @embedFile("corpus/fixtures/wiki_ar_octopus.html"),
+        .expected = @embedFile("corpus/fixtures/wiki_ar_octopus.expected.txt"),
+        .min_text_bytes = 5000,
+        // "ويكيبيديا" = "Wikipedia" in Arabic — bytes survive the pipeline.
+        .must_contain = &.{"ويكيبيديا"},
+        .must_not_contain = &.{ "[object Object]", "\x1b[" },
+    },
 };
 
 fn renderFixture(allocator: std.mem.Allocator, fixture: Fixture) ![]u8 {
