@@ -75,6 +75,14 @@ pub fn build(b: *std.Build) void {
     const test_wpt_step = b.step("test-wpt", "Run curated WPT browser-runtime tests");
     const test_test262_step = b.step("test-test262", "Run curated Test262 JS runtime tests");
     const test_corpus_step = b.step("test-corpus", "Run real-page render-quality corpus harness");
+    const test_image_step = b.step("test-image", "Run image decoder + protocol + cache tests");
+
+    // ── stb_image vendored paths ──────────────────────────────────────────
+    // Header-only library at third_party/stb/stb_image.h with a single C
+    // translation unit at third_party/stb/stb_image_impl.c that pulls the
+    // implementation. Mirrors the BoringSSL shim discipline.
+    const stb_include = b.path("third_party/stb");
+    const stb_csrc = b.path("third_party/stb/stb_image_impl.c");
 
     // ── Net layer modules (pure-Zig, no C deps) ───────────────────────────
     const pure_net_modules = [_]struct { name: []const u8, src: []const u8 }{
@@ -445,6 +453,33 @@ pub fn build(b: *std.Build) void {
         const run_corpus = b.addRunArtifact(corpus_test);
         test_corpus_step.dependOn(&run_corpus.step);
         test_step.dependOn(&run_corpus.step);
+    }
+
+    // ── Image decoder module (depends on stb_image) ──────────────────────
+    // Per spec/subspecs/rendering.md §3.3. The src/image/ tree is
+    // text-only at the model layer (decode → encode happens in
+    // src/browser.zig:draw); this test target verifies the decoder +
+    // cache + protocol detection in isolation.
+    {
+        const image_decode_mod = b.createModule(.{
+            .root_source_file = b.path("src/image/decode.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        image_decode_mod.addCSourceFile(.{
+            .file = stb_csrc,
+            .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Wno-unused-but-set-variable" },
+        });
+        image_decode_mod.addIncludePath(stb_include);
+
+        const image_decode_test = b.addTest(.{
+            .name = "image_decode",
+            .root_module = image_decode_mod,
+        });
+        const run_image_decode = b.addRunArtifact(image_decode_test);
+        test_image_step.dependOn(&run_image_decode.step);
+        test_step.dependOn(&run_image_decode.step);
     }
 
     // ── Curated Test262 runner ────────────────────────────────────────────
