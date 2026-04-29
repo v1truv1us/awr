@@ -137,6 +137,8 @@ queue:
 
 - native MCP stdio server work → `spec/subspecs/mcp-stdio.md`
 - browser/TUI product-track expansion → `spec/subspecs/browser-tui.md`
+- terminal image rendering and real-page render-quality corpus →
+  `spec/subspecs/rendering.md`
 - later fingerprinting / owned browser identity work →
   `spec/Fingerprint-Plan.md`
 

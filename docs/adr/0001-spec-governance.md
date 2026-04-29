@@ -165,6 +165,32 @@ documentation governance.
 - Documents updated: `spec/MVP.md`, `spec/subspecs/wpt-conformance.md`,
   this ADR.
 
+### 2026-04-28 — Rendering sub-spec added (deferred track)
+
+- Added `spec/subspecs/rendering.md` as a new DEFERRED sub-spec covering
+  two coordinated tracks: (A) terminal image rendering via Kitty / iTerm /
+  Sixel / braille-fallback protocols for `<img>`, `<picture>`, `srcset`,
+  and CSS `background-image`; and (B) a real-page render-quality corpus
+  with snapshot-based fixtures plus per-fixture soft assertions, intended
+  to catch render regressions that the synthetic WPT corpus cannot
+  surface (long-URL line-wrap, CJK width math, malformed-HTML robustness,
+  app-shell heuristics behavior).
+- Updated `spec/MVP.md §7` deferred-tracks list to point at the new
+  sub-spec.
+- Reason: after agent-browser closure (`0a0e1b5`) and the neon-meadow
+  heuristics fix (`adad620`), the next high-leverage gap is render
+  quality on real production HTML and visual `<img>` support. The 65
+  curated WPT cases prove API correctness; they don't prove the
+  renderer's output looks right on a real Wikipedia article. The two
+  tracks share closure gates (the corpus is the integration test for
+  image rendering), so they live in one sub-spec rather than two
+  cross-referencing each other.
+- Track ordering is encoded in §7 of the new sub-spec: corpus harness
+  skeleton lands first (text-only baseline), images land second with
+  co-landed fixture-update PRs.
+- Documents updated: `spec/MVP.md`, `spec/subspecs/rendering.md` (new),
+  this ADR.
+
 ### Template for future amendments
 
 - Date:
