@@ -32,29 +32,53 @@ pub fn chooseContentRoot(doc: *const dom.Document) ?*const dom.Element {
 
     if (findFirstByTag(body, "main")) |elem| {
         if (hasMeaningfulContent(elem)) {
-            if (bestLinkListContainer(elem)) |inner| return inner;
+            if (preferLinkListInsideContainer(elem)) |inner| return inner;
             return elem;
         }
     }
     if (findFirstByTag(body, "article")) |elem| {
         if (hasMeaningfulContent(elem)) {
-            if (bestLinkListContainer(elem)) |inner| return inner;
+            if (preferLinkListInsideContainer(elem)) |inner| return inner;
             return elem;
         }
     }
     if (findFirstByRole(body, "main")) |elem| {
         if (hasMeaningfulContent(elem)) {
-            if (bestLinkListContainer(elem)) |inner| return inner;
+            if (preferLinkListInsideContainer(elem)) |inner| return inner;
             return elem;
         }
     }
-    if (bestLinkListContainer(body)) |elem| return elem;
+    if (preferLinkListInsideContainer(body)) |elem| return elem;
 
     const best = bestScoringContainer(body);
     if (best.elem) |elem| {
         if (best.score >= 6.0) return elem;
     }
     return body;
+}
+
+/// Wraps `bestLinkListContainer` with a "the inner candidate must dominate
+/// the outer's text content" guard. Without this, real pages that put a
+/// link-dense table (Wikipedia infobox/cladogram, navbox, sidebar) inside
+/// `<main>` get their entire article body discarded because the
+/// link-list scorer ranks the small fragment higher than the full body.
+///
+/// The HN-style case still works: HN's body IS the story-list table, so
+/// the inner candidate's text genuinely dominates body's. The guard
+/// rejects the override only when the inner is a fragment.
+fn preferLinkListInsideContainer(outer: *const dom.Element) ?*const dom.Element {
+    const inner = bestLinkListContainer(outer) orelse return null;
+    const inner_metrics = analyzeElement(inner);
+    const outer_metrics = analyzeElement(outer);
+    if (outer_metrics.text_bytes == 0) return inner;
+    const share = @as(f64, @floatFromInt(inner_metrics.text_bytes)) /
+        @as(f64, @floatFromInt(outer_metrics.text_bytes));
+    // 0.6 chosen empirically: HN's story-list cell is ~95% of body text;
+    // Wikipedia's largest cladogram tbody is ~3% of <main> text. Anything
+    // in between is rare enough that rejecting the override is safer than
+    // accepting it. Tune if a real page demonstrates otherwise.
+    if (share < 0.6) return null;
+    return inner;
 }
 
 pub fn analyzeElement(elem: *const dom.Element) Metrics {
@@ -402,6 +426,65 @@ test "shouldSkipForBrowse — link-dense aside outside <main> still pruned" {
 
     const aside = doc.querySelector("aside") orelse return error.SkipZigTest;
     try std.testing.expect(shouldSkipForBrowse(aside));
+}
+
+test "chooseContentRoot keeps <main> when a clade table is a fragment of it" {
+    // Wikipedia regression case (per the corpus harness's wikipedia_octopus
+    // signal). Real Wikipedia featured articles emit a long article body
+    // PLUS a "clade" taxonomy table with many <tr> rows that mix link text
+    // with non-link labels (so linkDensity stays in scoreLinkListContainer's
+    // valid (0.35, 0.98) range). Without an outer-domination guard,
+    // bestLinkListContainer scored the clade table high enough to override
+    // <main> as the chosen root, dropping the article body from the render.
+    // Fix: only return the link-list override when the inner candidate's
+    // text dominates the outer's (i.e. the page IS a link list, not just
+    // contains one).
+    // The clade rows below are deliberately tuned to match real Wikipedia's
+    // metrics: each row is a short label plus a long anchor, pushing
+    // linkDensity into scoreLinkListContainer's valid (0.35, 0.98) range
+    // so the candidate scores high. Without the dominance guard, this
+    // test fails — the regression is real, not synthetic-only.
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body><main>
+        \\  <article>
+        \\    <h1>Octopus</h1>
+        \\    <p>The octopus is a soft-bodied, eight-limbed mollusc of the order Octopoda. Around 300 species are recognised, grouped within the class Cephalopoda with squids, cuttlefish, and nautiloids.</p>
+        \\    <p>Like other cephalopods, an octopus is bilaterally symmetric with two eyes and a beaked mouth at the centre point of the eight limbs. The soft body can rapidly alter its shape, enabling octopuses to squeeze through small gaps.</p>
+        \\    <p>They trail their eight appendages behind them as they swim. The siphon is used both for respiration and for locomotion, by expelling a jet of water. Octopuses have a complex nervous system and excellent sight, and are among the most intelligent and behaviourally diverse of all invertebrates.</p>
+        \\    <p>Octopuses inhabit various regions of the ocean, including coral reefs, pelagic waters, and the seabed; some live in the intertidal zone, and others at abyssal depths. Most species grow quickly, mature early, and are short-lived.</p>
+        \\    <p>The earliest known octopus is Pohlsepia, which lived approximately 296 million years ago and is preserved as an impression in shale.</p>
+        \\  </article>
+        \\  <table class="clade">
+        \\    <tbody>
+        \\      <tr><td>k:</td><td><a href="/c1">Cephalopoda subclass Coleoidea</a></td></tr>
+        \\      <tr><td>p:</td><td><a href="/c2">Decapodiformes superorder Sepia</a></td></tr>
+        \\      <tr><td>c:</td><td><a href="/c3">Octopodiformes superorder Vampyroteuthis</a></td></tr>
+        \\      <tr><td>o:</td><td><a href="/c4">Octopoda Cirrina suborder deepsea</a></td></tr>
+        \\      <tr><td>o:</td><td><a href="/c5">Octopoda Incirrina suborder shallow</a></td></tr>
+        \\      <tr><td>f:</td><td><a href="/c6">Cirroteuthidae Stauroteuthidae family</a></td></tr>
+        \\      <tr><td>f:</td><td><a href="/c7">Octopodidae Bathypolypodidae family</a></td></tr>
+        \\      <tr><td>f:</td><td><a href="/c8">Enteroctopodidae Megaleledonidae family</a></td></tr>
+        \\      <tr><td>f:</td><td><a href="/c9">Bolitaenidae Amphitretidae Vitreledonellidae</a></td></tr>
+        \\      <tr><td>f:</td><td><a href="/c10">Tremoctopodidae Alloposidae Argonautidae</a></td></tr>
+        \\      <tr><td>f:</td><td><a href="/c11">Ocythoidae Octopodoidea Eledonidae family</a></td></tr>
+        \\      <tr><td>f:</td><td><a href="/c12">Opisthoteuthidae Cirroctopodidae family</a></td></tr>
+        \\    </tbody>
+        \\  </table>
+        \\</main></body></html>
+    );
+    defer doc.deinit();
+
+    const root = chooseContentRoot(&doc) orelse return error.SkipZigTest;
+    // The root must NOT be the clade table or any of its descendants.
+    try std.testing.expect(!std.ascii.eqlIgnoreCase(root.tag, "tbody"));
+    try std.testing.expect(!std.ascii.eqlIgnoreCase(root.tag, "tr"));
+    try std.testing.expect(!std.ascii.eqlIgnoreCase(root.tag, "td"));
+    try std.testing.expect(!std.ascii.eqlIgnoreCase(root.tag, "table"));
+    // Affirmative: the root must contain the article body's text.
+    const text = try root.textContent(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "soft-bodied") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Pohlsepia") != null);
 }
 
 test "chooseContentRoot prefers inner link-list cell for HN-like tables" {

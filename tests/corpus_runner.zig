@@ -62,16 +62,23 @@ const fixtures = [_]Fixture{
         .must_contain = &.{ "Hacker News", "points by" },
         .must_not_contain = &.{ "[object Object]", "\x1b[" },
     },
-    // Category 2 — long-form article / semantic HTML5 (Wikipedia featured)
-    // is intentionally NOT registered yet. A 580 KB capture of the Octopus
-    // article rendered only ~984 bytes (the taxonomy infobox table) instead
-    // of the article body. The corpus surfaced a real render-quality gap
-    // in either chooseContentRoot (likely picking the infobox table early)
-    // or shouldSkipForBrowse pruning the article container. Tracked as the
-    // next natural follow-up after this commit; once fixed, recapture and
-    // register here with min_text_bytes around 10000+ and a must_contain
-    // set that includes article-body strings ("cephalopod", "tentacles",
-    // distribution-section keywords).
+    .{
+        // Category 2 — long-form article / semantic HTML5. This fixture
+        // proved the dominance-guard fix in browse_heuristics.zig: before
+        // the fix, the cladogram <tbody> overrode <main> as the chosen
+        // root and the article rendered at 984 bytes (taxonomy only).
+        // After the fix, the full article body comes through (~100 KB
+        // of rendered text). Inline citations resolve as [N] footnote
+        // refs. The min_text_bytes floor is a regression guard against
+        // any future change that drops back to fragment-only renders.
+        .name = "wikipedia_octopus",
+        .url = "https://en.wikipedia.org/wiki/Octopus",
+        .html = @embedFile("corpus/fixtures/wikipedia_octopus.html"),
+        .expected = @embedFile("corpus/fixtures/wikipedia_octopus.expected.txt"),
+        .min_text_bytes = 50_000,
+        .must_contain = &.{ "Octopus", "cephalopod", "Pathogens", "Evolution" },
+        .must_not_contain = &.{ "[object Object]", "\x1b[" },
+    },
     .{
         // Category 10 — form-heavy page. httpbin's form fixture is the
         // canonical multi-input <form method="post"> that round-trips
