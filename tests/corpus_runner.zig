@@ -104,6 +104,76 @@ const fixtures = [_]Fixture{
         .must_contain = &.{ "NVIDIA", "Models" },
         .must_not_contain = &.{ "[object Object]", "\x1b[" },
     },
+    .{
+        // Category 4 — documentation site. MDN's <select> page exercises
+        // <main>, deeply nested headings, code blocks (<code>/<pre>),
+        // definition lists (<dl>/<dt>/<dd>), and a sidebar <aside> that
+        // should collapse via shouldCollapseForBrowse.
+        .name = "mdn_select",
+        .url = "https://developer.mozilla.org/en-US/docs/Web/HTML/Element/select",
+        .html = @embedFile("corpus/fixtures/mdn_select.html"),
+        .expected = @embedFile("corpus/fixtures/mdn_select.expected.txt"),
+        .min_text_bytes = 5000,
+        // Pick assertion strings short enough to survive 78-col word-wrap;
+        // "menu of options" wrapped to "menu of\noptions" and missed.
+        .must_contain = &.{ "select", "Try it", "Permitted ARIA" },
+        .must_not_contain = &.{ "[object Object]", "\x1b[" },
+    },
+    .{
+        // Category 5 — code-host SSR + CSR. GitHub repo pages are heavy
+        // SPAs that nonetheless emit substantial server-rendered HTML
+        // (file tree placeholder, README, sidebar with stats). This
+        // fixture proves we extract README content rather than choking
+        // on the SPA chrome. Captured 2026-04-29 when ziglang/zig had
+        // its "Moved to Codeberg" notice; that's the actual page state
+        // we're snapshotting.
+        .name = "github_zig",
+        .url = "https://github.com/ziglang/zig",
+        .html = @embedFile("corpus/fixtures/github_zig.html"),
+        .expected = @embedFile("corpus/fixtures/github_zig.expected.txt"),
+        .min_text_bytes = 1000,
+        .must_contain = &.{ "ziglang", "zig" },
+        .must_not_contain = &.{ "[object Object]", "\x1b[" },
+    },
+    .{
+        // Category 11 — international CJK. Chinese Wikipedia article
+        // 八腕目 ("Octopoda"). Exercises UTF-8 multi-byte handling,
+        // CJK display-width math (each Han character occupies 2 cells),
+        // and the same chooseContentRoot path as English Wikipedia
+        // (proves the dominance guard isn't English-specific).
+        .name = "wiki_zh_octopus",
+        .url = "https://zh.wikipedia.org/wiki/%E7%AB%A0%E9%B1%BC",
+        .html = @embedFile("corpus/fixtures/wiki_zh_octopus.html"),
+        .expected = @embedFile("corpus/fixtures/wiki_zh_octopus.expected.txt"),
+        .min_text_bytes = 5000,
+        // Avoid asserting on specific Han chars — they appear via UTF-8
+        // bytes in the snapshot; the must_contain matches against the
+        // raw byte sequence which is fine. "维基百科" = "Wikipedia".
+        .must_contain = &.{"维基百科"},
+        .must_not_contain = &.{ "[object Object]", "\x1b[" },
+    },
+    .{
+        // Category 13 — malformed / edge custom fixture. Stresses the
+        // parser with: unclosed elements, duplicate <title>, deeply
+        // nested divs, mixed casing, missing </body>/</html>, anchors
+        // with no/empty/javascript: hrefs, custom elements, and
+        // <script>/<style> content that must NOT appear in rendered
+        // output. Soft assertions guard against regressions where
+        // any of these crash or leak script source into the body.
+        .name = "malformed_edge",
+        .url = "http://example.com/malformed",
+        .html = @embedFile("corpus/fixtures/malformed_edge.html"),
+        .expected = @embedFile("corpus/fixtures/malformed_edge.expected.txt"),
+        .min_text_bytes = 200,
+        .must_contain = &.{ "Edge cases", "Cell A", "Eleven divs deep" },
+        .must_not_contain = &.{
+            "[object Object]",
+            "\x1b[",
+            "console.log",
+            "color: red",
+            "This is a comment",
+        },
+    },
 };
 
 fn renderFixture(allocator: std.mem.Allocator, fixture: Fixture) ![]u8 {

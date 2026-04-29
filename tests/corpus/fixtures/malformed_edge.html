@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html><head>
+<title>First Title</title>
+<title>Duplicate Title — should not crash</title>
+<meta charset="utf-8">
+</head><body>
+<main>
+<h1>Edge cases for the parser and renderer</h1>
+
+<section>
+<h2>Unclosed elements</h2>
+<p>This paragraph has no closing tag and is followed by another block.
+<p>Second paragraph also missing its close. Renderer must still split these.
+
+<div>Stray text here without parents
+</section>
+
+<section>
+<h2>Nested without close</h2>
+<ul>
+<li>One
+<li>Two
+<li>Three (note: <em>emphasis without close
+<li>Four (after the bad em)
+</ul>
+</section>
+
+<section>
+<h2>Deeply nested divs</h2>
+<div><div><div><div><div><div><div><div><div><div>
+<p>Eleven divs deep — must not crash or stack-overflow.</p>
+</div></div></div></div></div></div></div></div></div></div>
+</section>
+
+<section>
+<h2>Mixed casing and weird whitespace</h2>
+<P>Paragraph with UPPERCASE tag.</P>
+<DiV    Class = "noisy"   data-x =   bare-value  >Tag with weird attribute spacing.</DiV>
+<p>     Lots&nbsp;&nbsp;&nbsp;of&nbsp;non-breaking&nbsp;spaces     and trailing.    </p>
+</section>
+
+<section>
+<h2>Tables without tbody</h2>
+<table>
+<tr><td>Cell A</td><td>Cell B</td></tr>
+<tr><td>Cell C</td><td>Cell D</td></tr>
+</table>
+</section>
+
+<section>
+<h2>Anchor edge cases</h2>
+<p><a>Anchor with no href</a> + <a href="">Empty href</a> + <a href="#frag">Fragment-only</a> +
+<a href="javascript:alert(1)">Javascript URL — must be quarantined or rendered as text</a>.</p>
+</section>
+
+<section>
+<h2>Unknown elements</h2>
+<custom-thing>Custom element content</custom-thing>
+<x-icon role="img" aria-label="Star icon">[icon]</x-icon>
+<unknownTag attr="x">Should treat as inline-ish.</unknownTag>
+</section>
+
+<section>
+<h2>Comments and CDATA</h2>
+<p>Before comment.<!-- This is a comment that should not appear --> After comment.</p>
+<script>console.log("script content should not render as text");</script>
+<style>.foo { color: red; }</style>
+<p>After script and style.</p>
+</section>
+
+</main>
+<!-- intentionally missing </body> and </html> -->

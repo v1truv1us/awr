@@ -1,0 +1,109 @@
+ziglang[1]/zig[2]Public  •                              Uh oh!
+
+
+                             There was an error while loading.Please reload
+                             this page.
+
+
+
+  •       Notifications[3]You must be signed in to change notification
+      settings
+  •       Fork3.1k[4]
+  •       Star42.9k[5]
+
+[Navigation omitted]
+
+[6][ master]Branches[7]Tags[8][9][10][Go to file][Code][]Open more actions
+menuFolders and files
+-----------------
+
+ Name               Name             Last commit   Last commit date 
+                                     message                        
+ Latest commit                                                     
+ History36,058                                                      
+ Commits 36,058                                                     
+ Commits                                                            
+ .forgejo           .forgejo                                      
+ ci                 ci                                            
+ cmake              cmake                                         
+ doc                doc                                           
+ lib                lib                                           
+ src                src                                           
+ stage1             stage1                                        
+ test               test                                          
+ tools              tools                                         
+ .gitattributes     .gitattributes                                
+ .gitignore         .gitignore                                    
+ .mailmap           .mailmap                                      
+ CMakeLists.txt     CMakeLists.txt                                
+ LICENSE            LICENSE                                       
+ README.md          README.md                                     
+ bootstrap.c        bootstrap.c                                   
+ build.zig          build.zig                                     
+ build.zig.zon      build.zig.zon                                 
+ View all files                                                     
+Repository files navigation
+---------------------------
+
+[Navigation omitted]
+
+
+Moved to Codeberg[49]
+This repository is not mirrored.
+
+About
+-----
+
+Moved to Codeberg
+ziglang.org/news/migrating-from-github-to-codeberg/[50]Topics
+
+language[51]compiler[52]zig[53]Resources
+
+Readme[54]License
+
+MIT license[55]Uh oh!
+
+
+There was an error while loading.Please reload this page.
+
+Activity[56]Custom properties[57]Stars
+
+42.9kstars[58]Watchers
+
+384watching[59]Forks
+
+3.1kforks[60]Report repository[61]Sponsor this project
+--------------------
+
+Uh oh!
+
+
+There was an error while loading.Please reload this page.
+
+  •       https://ziglang.org/zsf[62]
+Uh oh!
+
+
+There was an error while loading.Please reload this page.
+
+Contributors
+------------
+
+  • 
+  • 
+  • 
+Uh oh!
+
+
+There was an error while loading.Please reload this page.
+
+Languages
+---------
+
+  •       Zig98.4%[63]
+  •       C1.1%[64]
+  •       C++0.2%[65]
+  •       Python0.1%[66]
+  •       CMake0.1%[67]
+  •       JavaScript0.1%[68]
+
