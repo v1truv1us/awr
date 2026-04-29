@@ -191,6 +191,39 @@ documentation governance.
 - Documents updated: `spec/MVP.md`, `spec/subspecs/rendering.md` (new),
   this ADR.
 
+### 2026-04-28 — Rendering sub-spec promoted to ACTIVE; corpus harness landed
+
+- Promoted `spec/subspecs/rendering.md` from DEFERRED to ACTIVE in the
+  same change set as the first track-B code (real-page render-quality
+  corpus harness skeleton + first fixture). Per the change-control
+  discipline used for the agent-browser sub-spec promotion, the spec's
+  ACTIVE claim now matches landed code.
+- Landed harness skeleton: `tests/corpus_runner.zig` + `tests/corpus/`
+  directory + `tests/corpus/README.md` + `scripts/update-corpus.sh` +
+  `build.zig` `test-corpus` step. Uses the same module-graph shape as
+  the curated WPT runner. Snapshot-based with per-fixture soft
+  assertions (`min_text_bytes`, `must_contain`, `must_not_contain`).
+  Bootstrap workflow: empty `.expected.txt` triggers one-time auto-seed
+  from live render output; non-empty expected enforces strict diff.
+  CI mode (`AWR_CORPUS_STRICT=1`) disables auto-seed.
+- Seeded the first fixture: `tests/corpus/fixtures/example_com.html`
+  (528 bytes, captured via `curl -sL https://example.com/`). Renders to
+  147 bytes of text in the harness; `must_contain` set is `["Example
+  Domain", "Learn more"]`.
+- Updated `spec/MVP.md §7` to reflect the new active sub-spec, mirroring
+  the agent-browser pattern: rendering is "active, not deferred"; Track
+  A image rendering remains deferred-within-active until Track B's
+  harness is established.
+- Reason: the synthetic WPT corpus already proves API correctness
+  (65 cases). What it does not prove — and what the neon-meadow
+  blank-screen regression history demonstrates — is render-quality on
+  real production HTML. The corpus harness closes that gap. Promoting
+  the spec when the first harness commit lands keeps doc/code in sync.
+- Documents updated: `spec/MVP.md`, `spec/subspecs/rendering.md`, this
+  ADR, plus new harness sources (`tests/corpus_runner.zig`,
+  `tests/corpus/README.md`, `scripts/update-corpus.sh`, `build.zig`
+  test target wiring).
+
 ### Template for future amendments
 
 - Date:

@@ -137,15 +137,19 @@ queue:
 
 - native MCP stdio server work → `spec/subspecs/mcp-stdio.md`
 - browser/TUI product-track expansion → `spec/subspecs/browser-tui.md`
-- terminal image rendering and real-page render-quality corpus →
-  `spec/subspecs/rendering.md`
 - later fingerprinting / owned browser identity work →
   `spec/Fingerprint-Plan.md`
 
 The agent-browser scope (POST in `fetch` and XHR, `<form method=post>` end-to-
 end through `awr browse`, cookie jar disk persistence) is governed by
-`spec/subspecs/agent-browser.md` and is **active**, not deferred. It widens
-§5.4 in a documented and WPT-gated way.
+`spec/subspecs/agent-browser.md` and is **closed** (per ADR
+2026-04-28 entry).
+
+The rendering scope (real-page render-quality corpus + terminal image
+rendering) is governed by `spec/subspecs/rendering.md` and is
+**active**, not deferred. Track B (corpus harness) is in progress;
+Track A (image rendering) activates when Track B is established. The
+corpus harness is exercised via `zig build test-corpus`.
 
 Do not treat deferred tracks as blockers for the active MVP closure work unless
 this spec is amended.

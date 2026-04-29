@@ -74,6 +74,7 @@ pub fn build(b: *std.Build) void {
     const test_e2e_step = b.step("test-e2e", "Run end-to-end integration tests (requires network)");
     const test_wpt_step = b.step("test-wpt", "Run curated WPT browser-runtime tests");
     const test_test262_step = b.step("test-test262", "Run curated Test262 JS runtime tests");
+    const test_corpus_step = b.step("test-corpus", "Run real-page render-quality corpus harness");
 
     // ── Net layer modules (pure-Zig, no C deps) ───────────────────────────
     const pure_net_modules = [_]struct { name: []const u8, src: []const u8 }{
@@ -399,6 +400,51 @@ pub fn build(b: *std.Build) void {
         const run_wpt = b.addRunArtifact(wpt_test);
         test_wpt_step.dependOn(&run_wpt.step);
         test_step.dependOn(&run_wpt.step);
+    }
+
+    // ── Real-page render-quality corpus runner ────────────────────────────
+    // Per spec/subspecs/rendering.md Track B. Same module-graph shape as
+    // the WPT runner above (needs Page → DOM → JS → render); the only
+    // difference is which `tests/*.zig` is the test root.
+    {
+        const corpus_mod = b.createModule(.{
+            .root_source_file = b.path("tests/corpus_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = supports_boringssl,
+        });
+        corpus_mod.addImport("xev", xev_mod);
+        corpus_mod.addImport("quickjs", qjs_mod);
+        corpus_mod.linkLibrary(qjs_dep.artifact("quickjs-ng"));
+        corpus_mod.addIncludePath(lexbor_include);
+        corpus_mod.addLibraryPath(lexbor_lib);
+        corpus_mod.linkSystemLibrary("lexbor", .{});
+
+        const page_import = b.createModule(.{
+            .root_source_file = b.path("src/page.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = supports_boringssl,
+        });
+        page_import.addImport("xev", xev_mod);
+        page_import.addImport("quickjs", qjs_mod);
+        page_import.linkLibrary(qjs_dep.artifact("quickjs-ng"));
+        page_import.addIncludePath(lexbor_include);
+        page_import.addLibraryPath(lexbor_lib);
+        page_import.linkSystemLibrary("lexbor", .{});
+        if (supports_boringssl) addBoringSslSupport(b, page_import, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
+        corpus_mod.addImport("page", page_import);
+
+        const corpus_test = b.addTest(.{
+            .name = "corpus",
+            .root_module = corpus_mod,
+            .use_llvm = true,
+        });
+        const run_corpus = b.addRunArtifact(corpus_test);
+        test_corpus_step.dependOn(&run_corpus.step);
+        test_step.dependOn(&run_corpus.step);
     }
 
     // ── Curated Test262 runner ────────────────────────────────────────────
