@@ -609,6 +609,24 @@ pub fn build(b: *std.Build) void {
         const run_image_kitty = b.addRunArtifact(image_kitty_test);
         test_image_step.dependOn(&run_image_kitty.step);
         test_step.dependOn(&run_image_kitty.step);
+
+        // src/image/iterm.zig — iTerm2 OSC-1337 encoder. Operates on
+        // raw file bytes (passes them through to the terminal) so it
+        // doesn't need stb_image / decode.zig — pure-Zig module.
+        const image_iterm_mod = b.createModule(.{
+            .root_source_file = b.path("src/image/iterm.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+
+        const image_iterm_test = b.addTest(.{
+            .name = "image_iterm",
+            .root_module = image_iterm_mod,
+        });
+        const run_image_iterm = b.addRunArtifact(image_iterm_test);
+        test_image_step.dependOn(&run_image_iterm.step);
+        test_step.dependOn(&run_image_iterm.step);
     }
 
     // ── Curated Test262 runner ────────────────────────────────────────────
