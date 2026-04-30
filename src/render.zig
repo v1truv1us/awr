@@ -29,20 +29,46 @@ pub const RenderProfile = enum {
     browse,
 };
 
+/// Pre-computed image bytes lookup. Built before rendering by walking
+/// the DOM, fetching every `<img src>`, decoding via stb_image, and
+/// encoding to the resolved protocol's byte format (Kitty APC, iTerm
+/// OSC-1337, Sixel, or UTF-8 braille glyphs). The renderer queries this
+/// at `<img>` emit-time; if `getFn` returns non-null, those bytes go to
+/// the output verbatim and the alt-text/footnote fallback is skipped.
+///
+/// Decoupled from `image_protocol` because the renderer doesn't care
+/// *which* protocol — only whether bytes are available. Keeps render.zig
+/// free of stb_image / encoder dependencies; the protocol-specific
+/// machinery lives in `src/image/{kitty,iterm,sixel,braille}.zig` and is
+/// wired from main.zig / browser.zig.
+pub const ImageLookup = struct {
+    ctx: *const anyopaque,
+    getFn: *const fn (ctx: *const anyopaque, url: []const u8) ?[]const u8,
+
+    pub fn get(self: ImageLookup, url: []const u8) ?[]const u8 {
+        return self.getFn(self.ctx, url);
+    }
+};
+
 pub const RenderOptions = struct {
     max_width: usize = 80,
     ansi_colors: bool = true,
     show_links: bool = true,
     show_images: bool = true,
     profile: RenderProfile = .default,
-    /// Resolved terminal-image protocol. Default `.none` means the model
-    /// layer emits the alt-text fallback only (current behavior). Higher
-    /// values are reserved for sub-step 4f, where `src/browser.zig:draw`
-    /// will read this field at draw time and emit the corresponding
-    /// protocol bytes (Kitty / iTerm / Sixel / braille). The model layer
-    /// itself (`renderBrowseModel`) stays text-only regardless of this
-    /// field — keeps `test-corpus` snapshots deterministic.
+    /// Resolved terminal-image protocol. Default `.none` means no
+    /// inline image emit; the renderer falls through to the text alt-ref
+    /// path. The actual encoded bytes (the *what to emit*) come from
+    /// `image_lookup`; this field carries the *what protocol* metadata
+    /// for downstream use (telemetry, error messages, etc.).
     image_protocol: image_protocol.Protocol = .none,
+    /// Pre-computed image-bytes lookup. When non-null and `<img src>`
+    /// resolves to bytes, those bytes are emitted inline (raw — no
+    /// column tracking, no escape mangling) and the alt-text fallback
+    /// is skipped. When null, every `<img>` renders as `[alt][N]` —
+    /// preserves `test-corpus` determinism since corpus tests never
+    /// build a lookup.
+    image_lookup: ?ImageLookup = null,
 };
 
 pub const ScreenField = struct {
@@ -849,6 +875,26 @@ fn renderHr(state: *RenderState, w: anytype) anyerror!void {
 
 fn renderImage(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
     if (!state.opts.show_images) return;
+
+    // Inline-image fast path: if a lookup is configured and the URL
+    // resolves to encoded bytes, emit them raw and skip the alt-ref.
+    // The bytes contain protocol-specific control sequences (APC, OSC,
+    // DCS) that must NOT pass through `state.writeAll`'s column-
+    // tracking byte-by-byte path — that would mis-account columns.
+    // Use `w.writeAll` directly and reset structural state to
+    // line-start afterwards so the next sibling lays out cleanly.
+    if (state.opts.image_lookup) |lookup| {
+        const src = elem.getAttribute("src") orelse "";
+        if (src.len > 0) {
+            if (lookup.get(src)) |bytes| {
+                try state.ensureNewline(w);
+                try w.writeAll(bytes);
+                try state.newline(w);
+                return;
+            }
+        }
+    }
+
     const alt = elem.getAttribute("alt") orelse "image";
     try state.writeAll(w, "[");
     try state.writeAll(w, alt);
@@ -1741,6 +1787,80 @@ test "render — image alt text and link reference" {
     const out = fbs.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "[A photo]") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "/photo.jpg") != null);
+}
+
+const TestImageLookup = struct {
+    /// Single-entry mock lookup: matches one URL → returns one byte slice.
+    /// Lifetime of the returned bytes is the lifetime of this struct.
+    url: []const u8,
+    bytes: []const u8,
+
+    fn get(ctx: *const anyopaque, url: []const u8) ?[]const u8 {
+        const self: *const TestImageLookup = @ptrCast(@alignCast(ctx));
+        if (std.mem.eql(u8, url, self.url)) return self.bytes;
+        return null;
+    }
+
+    fn lookup(self: *const TestImageLookup) ImageLookup {
+        return .{ .ctx = self, .getFn = get };
+    }
+};
+
+test "render — image_lookup hit emits raw bytes and skips alt-ref" {
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><img alt=\"A photo\" src=\"/photo.jpg\"></body></html>");
+    defer doc.deinit();
+
+    // Sentinel byte sequence — easier to assert on than real Kitty APC.
+    const sentinel = "<<IMAGE-BYTES-HERE>>";
+    const tl = TestImageLookup{ .url = "/photo.jpg", .bytes = sentinel };
+
+    var buf: [1024]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&buf);
+    try render(std.testing.allocator, &fbs, &doc, .{
+        .ansi_colors = false,
+        .show_images = true,
+        .image_protocol = .kitty,
+        .image_lookup = tl.lookup(),
+    });
+    const out = fbs.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, sentinel) != null);
+    // Alt-ref must NOT appear when the lookup hit.
+    try std.testing.expect(std.mem.indexOf(u8, out, "[A photo]") == null);
+}
+
+test "render — image_lookup miss falls back to alt-ref" {
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><img alt=\"A photo\" src=\"/photo.jpg\"></body></html>");
+    defer doc.deinit();
+
+    const tl = TestImageLookup{ .url = "/different.jpg", .bytes = "unused" };
+
+    var buf: [1024]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&buf);
+    try render(std.testing.allocator, &fbs, &doc, .{
+        .ansi_colors = false,
+        .show_images = true,
+        .image_protocol = .kitty,
+        .image_lookup = tl.lookup(),
+    });
+    const out = fbs.buffered();
+    // Lookup miss → alt-ref text path engages, identical to no-lookup.
+    try std.testing.expect(std.mem.indexOf(u8, out, "[A photo]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "unused") == null);
+}
+
+test "render — no image_lookup keeps current alt-ref behavior verbatim" {
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><img alt=\"A photo\" src=\"/photo.jpg\"></body></html>");
+    defer doc.deinit();
+    var buf: [1024]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&buf);
+    try render(std.testing.allocator, &fbs, &doc, .{
+        .ansi_colors = false,
+        .show_images = true,
+        .image_protocol = .none,
+        // image_lookup explicitly omitted (null default).
+    });
+    const out = fbs.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "[A photo]") != null);
 }
 
 test "render — word wrapping at max_width" {
