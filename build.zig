@@ -310,8 +310,8 @@ pub fn build(b: *std.Build) void {
         // exe_mod or exe_page_mod with the C source. The pipeline
         // depends on the page module (for ImageLookup type + Page type)
         // and on image_protocol (for the Protocol enum). Encoders
-        // (kitty/iterm/braille) come in via relative imports inside
-        // the pipeline source.
+        // (kitty/iterm/braille/sixel) come in via relative imports
+        // inside the pipeline source.
         const exe_image_pipeline_mod = b.createModule(.{
             .root_source_file = b.path("src/image/pipeline.zig"),
             .target = target,
@@ -325,6 +325,19 @@ pub fn build(b: *std.Build) void {
         exe_image_pipeline_mod.addIncludePath(stb_include);
         exe_image_pipeline_mod.addImport("page", exe_page_mod);
         exe_image_pipeline_mod.addImport("image_protocol", exe_image_protocol_mod);
+
+        // Test target for the pipeline's pure helpers (estimateCellDims,
+        // pickFromSrcset, evalMedia, evalFeature). The Pipeline.build
+        // path itself isn't unit-tested — it requires a live Page +
+        // network and is exercised end-to-end via `awr render` smoke.
+        const image_pipeline_test = b.addTest(.{
+            .name = "image_pipeline",
+            .root_module = exe_image_pipeline_mod,
+            .use_llvm = true, // page module pulls in QuickJS-NG transitively
+        });
+        const run_image_pipeline = b.addRunArtifact(image_pipeline_test);
+        test_image_step.dependOn(&run_image_pipeline.step);
+        test_step.dependOn(&run_image_pipeline.step);
 
         const exe_mod = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),

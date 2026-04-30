@@ -121,16 +121,20 @@ pub fn build(
     const imgs = try doc.querySelectorAll("img", allocator);
     defer allocator.free(imgs);
 
+    // Viewport pixels for the `<picture>` / srcset picker. Per §5
+    // fallback estimate: cell_pixel_width × cells.
+    const viewport_w_px: u32 = opts.cell_pixel_width * opts.max_width_cells;
+
     var fetched: u32 = 0;
     for (imgs) |img_elem| {
-        const src = img_elem.getAttribute("src") orelse continue;
-        if (src.len == 0) continue;
+        const picked = pickSrc(allocator, img_elem, viewport_w_px) orelse continue;
+        if (picked.len == 0) continue;
         if (fetched >= opts.max_images) {
             pl.overflow_skipped += 1;
             continue;
         }
         // Resolve relative URLs against the page URL.
-        const abs_url = page.resolveUrl(page_url, src) catch {
+        const abs_url = page.resolveUrl(page_url, picked) catch {
             pl.failed += 1;
             continue;
         };
@@ -252,6 +256,139 @@ fn encodeBraille(allocator: std.mem.Allocator, img: *const decode.Image, cols: u
     return out;
 }
 
+// ── `<picture>` / srcset picker ───────────────────────────────────────
+//
+// Per `spec/subspecs/rendering.md §3.1`. Pre-fetch URL selection:
+//
+//   1. If `img.parent` is `<picture>`, scan the picture's `<source>`
+//      children. For each, evaluate the `media` query against the
+//      viewport-px estimate. The first matching `<source>` contributes
+//      its `srcset` (or `src`) to the picker.
+//
+//   2. If `<img>` has its own `srcset`, parse `Nw` candidates and pick
+//      the smallest width ≥ viewport. Fall back to the largest if
+//      none qualify (matches Chrome's behavior on too-small viewports).
+//
+//   3. Otherwise the `src` attribute.
+//
+// Media features other than `min-width` and `max-width` evaluate to
+// false, per the spec. `screen` and `all` keywords are accepted at the
+// top level; `print` rejects.
+
+fn pickSrc(allocator: std.mem.Allocator, img: *page_mod.Element, viewport_w_px: u32) ?[]const u8 {
+    if (img.parent) |parent| {
+        if (std.ascii.eqlIgnoreCase(parent.tag, "picture")) {
+            if (pickFromPicture(allocator, parent, viewport_w_px)) |url| return url;
+        }
+    }
+    if (img.getAttribute("srcset")) |sset| {
+        if (pickFromSrcset(sset, viewport_w_px)) |url| return url;
+    }
+    return img.getAttribute("src");
+}
+
+fn pickFromPicture(
+    allocator: std.mem.Allocator,
+    picture: *const page_mod.Element,
+    viewport_w_px: u32,
+) ?[]const u8 {
+    const sources = picture.querySelectorAll("source", allocator) catch return null;
+    defer allocator.free(sources);
+    for (sources) |s| {
+        const media = s.getAttribute("media") orelse "";
+        if (!evalMedia(media, viewport_w_px)) continue;
+        if (s.getAttribute("srcset")) |sset| {
+            if (pickFromSrcset(sset, viewport_w_px)) |url| return url;
+        }
+        if (s.getAttribute("src")) |src| return src;
+    }
+    return null;
+}
+
+fn pickFromSrcset(sset: []const u8, viewport_w_px: u32) ?[]const u8 {
+    var best: ?[]const u8 = null;
+    var best_w: u32 = 0;
+    var fallback: ?[]const u8 = null;
+    var fallback_w: u32 = 0;
+
+    var iter = std.mem.splitScalar(u8, sset, ',');
+    while (iter.next()) |entry| {
+        const trimmed = std.mem.trim(u8, entry, " \t\n\r");
+        if (trimmed.len == 0) continue;
+        const space = std.mem.indexOfAny(u8, trimmed, " \t") orelse continue;
+        const url = trimmed[0..space];
+        const desc = std.mem.trim(u8, trimmed[space..], " \t");
+        if (desc.len < 2) continue;
+        if (desc[desc.len - 1] != 'w') continue; // ignore Nx (DPR) descriptors
+        const w_str = std.mem.trim(u8, desc[0 .. desc.len - 1], " \t");
+        const w = std.fmt.parseInt(u32, w_str, 10) catch continue;
+
+        if (w > fallback_w) {
+            fallback_w = w;
+            fallback = url;
+        }
+        if (w >= viewport_w_px) {
+            if (best == null or w < best_w) {
+                best_w = w;
+                best = url;
+            }
+        }
+    }
+    return best orelse fallback;
+}
+
+fn evalMedia(query: []const u8, viewport_w_px: u32) bool {
+    const trimmed = std.mem.trim(u8, query, " \t");
+    if (trimmed.len == 0) return true;
+    if (std.ascii.eqlIgnoreCase(trimmed, "all")) return true;
+    if (std.ascii.eqlIgnoreCase(trimmed, "screen")) return true;
+    if (std.ascii.eqlIgnoreCase(trimmed, "print")) return false;
+
+    var rest: []const u8 = trimmed;
+    var loop_guard: u32 = 0;
+    while (rest.len > 0) : (loop_guard += 1) {
+        if (loop_guard > 16) return false; // pathological-input guard
+        rest = std.mem.trim(u8, rest, " \t");
+        if (rest.len == 0) break;
+
+        // Strip leading "screen" or "screen and ".
+        if (std.ascii.startsWithIgnoreCase(rest, "screen")) {
+            rest = std.mem.trim(u8, rest[6..], " \t");
+            continue;
+        }
+        if (std.ascii.startsWithIgnoreCase(rest, "and")) {
+            rest = std.mem.trim(u8, rest[3..], " \t");
+            continue;
+        }
+        if (rest[0] == '(') {
+            const close = std.mem.indexOfScalar(u8, rest, ')') orelse return false;
+            const inner = rest[1..close];
+            if (!evalFeature(inner, viewport_w_px)) return false;
+            rest = rest[close + 1 ..];
+            continue;
+        }
+        // Unrecognized token — per §3.1, only min/max-width supported.
+        return false;
+    }
+    return true;
+}
+
+fn evalFeature(feature: []const u8, viewport_w_px: u32) bool {
+    const colon = std.mem.indexOfScalar(u8, feature, ':') orelse return false;
+    const name = std.mem.trim(u8, feature[0..colon], " \t");
+    const value = std.mem.trim(u8, feature[colon + 1 ..], " \t");
+
+    var num_str = value;
+    if (std.ascii.endsWithIgnoreCase(num_str, "px")) {
+        num_str = std.mem.trim(u8, num_str[0 .. num_str.len - 2], " \t");
+    }
+    const n = std.fmt.parseInt(u32, num_str, 10) catch return false;
+
+    if (std.ascii.eqlIgnoreCase(name, "min-width")) return viewport_w_px >= n;
+    if (std.ascii.eqlIgnoreCase(name, "max-width")) return viewport_w_px <= n;
+    return false;
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -281,4 +418,74 @@ test "estimateCellDims: medium image uses natural dimensions" {
     // 280/7 = 40 (fits in 80); 280/14 = 20.
     try testing.expectEqual(@as(u32, 40), dims.cols);
     try testing.expectEqual(@as(u32, 20), dims.rows);
+}
+
+test "pickFromSrcset: smallest width >= viewport" {
+    const sset = "small.jpg 200w, mid.jpg 400w, big.jpg 800w";
+    try testing.expectEqualStrings("mid.jpg", pickFromSrcset(sset, 350).?);
+    try testing.expectEqualStrings("mid.jpg", pickFromSrcset(sset, 400).?);
+    try testing.expectEqualStrings("big.jpg", pickFromSrcset(sset, 600).?);
+    try testing.expectEqualStrings("small.jpg", pickFromSrcset(sset, 100).?);
+}
+
+test "pickFromSrcset: largest as fallback when none qualify" {
+    const sset = "small.jpg 200w, mid.jpg 400w";
+    try testing.expectEqualStrings("mid.jpg", pickFromSrcset(sset, 9999).?);
+}
+
+test "pickFromSrcset: ignores Nx (DPR) descriptors" {
+    const sset = "high.jpg 2x, normal.jpg 1x";
+    try testing.expect(pickFromSrcset(sset, 100) == null);
+}
+
+test "pickFromSrcset: empty input → null" {
+    try testing.expect(pickFromSrcset("", 100) == null);
+    try testing.expect(pickFromSrcset(" ,, ", 100) == null);
+}
+
+test "pickFromSrcset: tolerates extra whitespace" {
+    const sset = "  url-a.jpg   400w ,  url-b.jpg   800w  ";
+    try testing.expectEqualStrings("url-a.jpg", pickFromSrcset(sset, 300).?);
+    try testing.expectEqualStrings("url-b.jpg", pickFromSrcset(sset, 500).?);
+}
+
+test "evalMedia: empty / all / screen → true" {
+    try testing.expect(evalMedia("", 100));
+    try testing.expect(evalMedia("all", 100));
+    try testing.expect(evalMedia("screen", 100));
+    try testing.expect(evalMedia("  all  ", 100));
+}
+
+test "evalMedia: print → false" {
+    try testing.expect(!evalMedia("print", 100));
+}
+
+test "evalMedia: min-width matches when viewport >= value" {
+    try testing.expect(evalMedia("(min-width: 768px)", 800));
+    try testing.expect(evalMedia("(min-width: 768px)", 768));
+    try testing.expect(!evalMedia("(min-width: 768px)", 700));
+}
+
+test "evalMedia: max-width matches when viewport <= value" {
+    try testing.expect(evalMedia("(max-width: 1024px)", 800));
+    try testing.expect(evalMedia("(max-width: 1024px)", 1024));
+    try testing.expect(!evalMedia("(max-width: 1024px)", 1200));
+}
+
+test "evalMedia: min and max chained with 'and'" {
+    try testing.expect(evalMedia("(min-width: 600px) and (max-width: 1024px)", 800));
+    try testing.expect(!evalMedia("(min-width: 600px) and (max-width: 1024px)", 500));
+    try testing.expect(!evalMedia("(min-width: 600px) and (max-width: 1024px)", 1200));
+}
+
+test "evalMedia: 'screen and (min-width: ...)' is honored" {
+    try testing.expect(evalMedia("screen and (min-width: 600px)", 800));
+    try testing.expect(!evalMedia("screen and (min-width: 600px)", 400));
+}
+
+test "evalMedia: unsupported features evaluate to false" {
+    // Per §3.1: features other than min-width / max-width → false.
+    try testing.expect(!evalMedia("(orientation: portrait)", 800));
+    try testing.expect(!evalMedia("(prefers-color-scheme: dark)", 800));
+    try testing.expect(!evalMedia("(hover: hover)", 800));
 }

@@ -26,6 +26,7 @@ pub const ScreenLink = render.ScreenLink;
 pub const ScreenField = render.ScreenField;
 pub const ImageLookup = render.ImageLookup;
 pub const RenderOptions = render.RenderOptions;
+pub const Element = dom.Element;
 
 // ── PageResult ────────────────────────────────────────────────────────────
 
