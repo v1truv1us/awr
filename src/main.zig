@@ -254,12 +254,11 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         // Build the image pipeline only when a real protocol resolved.
         // `.none` (non-TTY override or `--images=none`) skips pipeline
         // construction so we never spend time fetching images we won't
-        // emit. `.sixel` is the same — the encoder lands in Step 7 and
-        // until then we cleanly fall back to the alt-ref text path.
+        // emit.
         var pipeline_storage: ?image_pipeline.Pipeline = null;
         defer if (pipeline_storage) |*pl| pl.deinit();
         var image_lookup_opt: ?page_mod.ImageLookup = null;
-        if (resolved_protocol != .none and resolved_protocol != .sixel) {
+        if (resolved_protocol != .none) {
             if (image_pipeline.build(alloc, &p, args[2], resolved_protocol, .{
                 .max_width_cells = @intCast(width),
             })) |pl| {

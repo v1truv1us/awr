@@ -650,6 +650,29 @@ pub fn build(b: *std.Build) void {
         const run_image_iterm = b.addRunArtifact(image_iterm_test);
         test_image_step.dependOn(&run_image_iterm.step);
         test_step.dependOn(&run_image_iterm.step);
+
+        // src/image/sixel.zig — DCS Sixel encoder with median-cut
+        // palette quantization. Same shape as image_kitty_mod
+        // (decode-importing → stb_image transitively).
+        const image_sixel_mod = b.createModule(.{
+            .root_source_file = b.path("src/image/sixel.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        image_sixel_mod.addCSourceFile(.{
+            .file = stb_csrc,
+            .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Wno-unused-but-set-variable" },
+        });
+        image_sixel_mod.addIncludePath(stb_include);
+
+        const image_sixel_test = b.addTest(.{
+            .name = "image_sixel",
+            .root_module = image_sixel_mod,
+        });
+        const run_image_sixel = b.addRunArtifact(image_sixel_test);
+        test_image_step.dependOn(&run_image_sixel.step);
+        test_step.dependOn(&run_image_sixel.step);
     }
 
     // ── Curated Test262 runner ────────────────────────────────────────────

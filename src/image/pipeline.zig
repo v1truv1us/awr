@@ -29,6 +29,7 @@ const protocol = @import("image_protocol");
 const kitty = @import("kitty.zig");
 const iterm = @import("iterm.zig");
 const braille = @import("braille.zig");
+const sixel = @import("sixel.zig");
 
 pub const PipelineOptions = struct {
     /// Hard cap on images fetched per page. §3.1.
@@ -45,7 +46,7 @@ pub const PipelineOptions = struct {
 };
 
 pub const PipelineError = error{
-    UnsupportedProtocol, // sixel before Step 7 / future protocols
+    UnsupportedProtocol, // reserved for future protocols (none today)
     OutOfMemory,
 };
 
@@ -105,7 +106,6 @@ pub fn build(
             .bytes_by_url = std.StringHashMap([]u8).init(allocator),
         };
     }
-    if (proto == .sixel) return PipelineError.UnsupportedProtocol;
 
     const doc = page.current_doc orelse return .{
         .allocator = allocator,
@@ -178,7 +178,7 @@ fn encodeOne(
         .kitty => try kitty.encode(allocator, &img, .{ .cols = dims.cols, .rows = dims.rows }),
         .iterm => try iterm.encode(allocator, resp.body, .{ .cols = dims.cols, .rows = dims.rows }),
         .braille => try encodeBraille(allocator, &img, dims.cols, dims.rows),
-        .sixel => return PipelineError.UnsupportedProtocol,
+        .sixel => try sixel.encode(allocator, &img, .{}),
         .none => unreachable,
     };
     errdefer allocator.free(encoded);
