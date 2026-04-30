@@ -480,6 +480,29 @@ pub fn build(b: *std.Build) void {
         const run_image_decode = b.addRunArtifact(image_decode_test);
         test_image_step.dependOn(&run_image_decode.step);
         test_step.dependOn(&run_image_decode.step);
+
+        // src/image/cache.zig — pure-Zig LRU; depends on decode.zig for the
+        // Image type. Same C-source compile because cache imports decode
+        // which @cImports stb_image.h.
+        const image_cache_mod = b.createModule(.{
+            .root_source_file = b.path("src/image/cache.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        image_cache_mod.addCSourceFile(.{
+            .file = stb_csrc,
+            .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Wno-unused-but-set-variable" },
+        });
+        image_cache_mod.addIncludePath(stb_include);
+
+        const image_cache_test = b.addTest(.{
+            .name = "image_cache",
+            .root_module = image_cache_mod,
+        });
+        const run_image_cache = b.addRunArtifact(image_cache_test);
+        test_image_step.dependOn(&run_image_cache.step);
+        test_step.dependOn(&run_image_cache.step);
     }
 
     // ── Curated Test262 runner ────────────────────────────────────────────
