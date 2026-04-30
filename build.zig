@@ -563,6 +563,30 @@ pub fn build(b: *std.Build) void {
         const run_image_protocol = b.addRunArtifact(image_protocol_test);
         test_image_step.dependOn(&run_image_protocol.step);
         test_step.dependOn(&run_image_protocol.step);
+
+        // src/image/braille.zig — pure-Zig 2×4 braille downsampler.
+        // Imports decode.zig for the Image type, so it transitively
+        // pulls in stb_image — same C-source compile pattern as
+        // image_cache_mod.
+        const image_braille_mod = b.createModule(.{
+            .root_source_file = b.path("src/image/braille.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        image_braille_mod.addCSourceFile(.{
+            .file = stb_csrc,
+            .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Wno-unused-but-set-variable" },
+        });
+        image_braille_mod.addIncludePath(stb_include);
+
+        const image_braille_test = b.addTest(.{
+            .name = "image_braille",
+            .root_module = image_braille_mod,
+        });
+        const run_image_braille = b.addRunArtifact(image_braille_test);
+        test_image_step.dependOn(&run_image_braille.step);
+        test_step.dependOn(&run_image_braille.step);
     }
 
     // ── Curated Test262 runner ────────────────────────────────────────────
