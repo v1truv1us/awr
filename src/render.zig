@@ -20,6 +20,7 @@
 const std = @import("std");
 const dom = @import("dom/node.zig");
 const browse_heuristics = @import("browse_heuristics.zig");
+const image_protocol = @import("image_protocol");
 
 // ── Public types ──────────────────────────────────────────────────────────
 
@@ -34,6 +35,14 @@ pub const RenderOptions = struct {
     show_links: bool = true,
     show_images: bool = true,
     profile: RenderProfile = .default,
+    /// Resolved terminal-image protocol. Default `.none` means the model
+    /// layer emits the alt-text fallback only (current behavior). Higher
+    /// values are reserved for sub-step 4f, where `src/browser.zig:draw`
+    /// will read this field at draw time and emit the corresponding
+    /// protocol bytes (Kitty / iTerm / Sixel / braille). The model layer
+    /// itself (`renderBrowseModel`) stays text-only regardless of this
+    /// field — keeps `test-corpus` snapshots deterministic.
+    image_protocol: image_protocol.Protocol = .none,
 };
 
 pub const ScreenField = struct {

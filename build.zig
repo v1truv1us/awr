@@ -233,6 +233,16 @@ pub fn build(b: *std.Build) void {
         page_mod.linkSystemLibrary("lexbor", .{});
         if (supports_boringssl) addBoringSslSupport(b, page_mod, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
 
+        // render.zig (transitively imported via page) needs the
+        // image_protocol module by name for its RenderOptions field.
+        const page_image_protocol_mod = b.createModule(.{
+            .root_source_file = b.path("src/image/protocol.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        page_mod.addImport("image_protocol", page_image_protocol_mod);
+
         const page_test = b.addTest(.{
             .name = "page",
             .root_module = page_mod,
@@ -281,6 +291,19 @@ pub fn build(b: *std.Build) void {
         exe_page_mod.linkSystemLibrary("lexbor", .{});
         if (supports_boringssl) addBoringSslSupport(b, exe_page_mod, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
 
+        // Shared image-protocol module: both main.zig (root) and
+        // render.zig (transitively under page) need it. Without a
+        // single named module both imports would each try to claim
+        // src/image/protocol.zig and Zig errors with "file exists in
+        // two modules."  This is the same pattern as `page` itself.
+        const exe_image_protocol_mod = b.createModule(.{
+            .root_source_file = b.path("src/image/protocol.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        exe_page_mod.addImport("image_protocol", exe_image_protocol_mod);
+
         const exe_mod = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -289,6 +312,7 @@ pub fn build(b: *std.Build) void {
         });
         exe_mod.addImport("page", exe_page_mod);
         exe_mod.addImport("build_opts", opts_mod);
+        exe_mod.addImport("image_protocol", exe_image_protocol_mod);
 
         const exe = b.addExecutable(.{
             .name = "awr",
@@ -398,6 +422,14 @@ pub fn build(b: *std.Build) void {
         page_import.addLibraryPath(lexbor_lib);
         page_import.linkSystemLibrary("lexbor", .{});
         if (supports_boringssl) addBoringSslSupport(b, page_import, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
+        // render.zig (transitively under page) needs image_protocol.
+        const wpt_image_protocol_mod = b.createModule(.{
+            .root_source_file = b.path("src/image/protocol.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        page_import.addImport("image_protocol", wpt_image_protocol_mod);
         wpt_mod.addImport("page", page_import);
 
         const wpt_test = b.addTest(.{
@@ -443,6 +475,14 @@ pub fn build(b: *std.Build) void {
         page_import.addLibraryPath(lexbor_lib);
         page_import.linkSystemLibrary("lexbor", .{});
         if (supports_boringssl) addBoringSslSupport(b, page_import, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
+        // render.zig (transitively under page) needs image_protocol.
+        const corpus_image_protocol_mod = b.createModule(.{
+            .root_source_file = b.path("src/image/protocol.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        page_import.addImport("image_protocol", corpus_image_protocol_mod);
         corpus_mod.addImport("page", page_import);
 
         const corpus_test = b.addTest(.{
@@ -503,6 +543,26 @@ pub fn build(b: *std.Build) void {
         const run_image_cache = b.addRunArtifact(image_cache_test);
         test_image_step.dependOn(&run_image_cache.step);
         test_step.dependOn(&run_image_cache.step);
+
+        // src/image/protocol.zig — pure-Zig capability detection +
+        // dispatch policy. Needs libc only for termios/isatty/getenv in
+        // the runtime helpers (`probeSixel`, `realEnvSnapshot`,
+        // `stdoutIsTty`); the pure `resolve` and `da1HasSixel` paths
+        // tested here have no I/O.
+        const image_protocol_mod = b.createModule(.{
+            .root_source_file = b.path("src/image/protocol.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+
+        const image_protocol_test = b.addTest(.{
+            .name = "image_protocol",
+            .root_module = image_protocol_mod,
+        });
+        const run_image_protocol = b.addRunArtifact(image_protocol_test);
+        test_image_step.dependOn(&run_image_protocol.step);
+        test_step.dependOn(&run_image_protocol.step);
     }
 
     // ── Curated Test262 runner ────────────────────────────────────────────

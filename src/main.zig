@@ -3,6 +3,7 @@ const build_opts = @import("build_opts");
 const page_mod = @import("page");
 const mock_mod = @import("mock.zig");
 const browser_mod = @import("browser.zig");
+const image_protocol = @import("image_protocol");
 
 fn writeJsonStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
     try list.append(alloc, '"');
@@ -29,7 +30,9 @@ const USAGE =
     \\
     \\Usage:
     \\  awr browse <url>             Open URL in interactive terminal browser
-    \\  awr render <url> [--width N] Load URL, print the rendered terminal text non-interactively
+    \\  awr render <url> [--width N] [--images=MODE]
+    \\                               Load URL, print the rendered terminal text non-interactively
+    \\                               --images=auto|kitty|iterm|sixel|braille|none (default: auto)
     \\  awr <url>                    Load URL/path, print JSON {url, status, title, body_text, window_data, tools}
     \\  awr tools <url>              Load URL/path, print the JSON array of registered WebMCP tools
     \\  awr call <url> <name> <json> Load URL/path, invoke tool <name> with <json> args, print result envelope
@@ -197,10 +200,15 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     // pipeline without needing a real TTY.
     if (std.mem.eql(u8, args[1], "render")) {
         if (args.len < 3) {
-            try stdoutWrite(io, "usage: awr render <url> [--width N]\n");
+            try stdoutWrite(io, "usage: awr render <url> [--width N] [--images=MODE]\n");
             std.process.exit(1);
         }
         var width: usize = 78;
+        // The Mode is parsed from CLI here; the runtime Protocol resolution
+        // (env + isatty + Sixel probe) is performed in the rendering path
+        // (sub-step 4f) where it is consumed. Validating the flag eagerly
+        // gives users an immediate error on typos.
+        var image_mode: image_protocol.Mode = .auto;
         var i: usize = 3;
         while (i < args.len) : (i += 1) {
             if (std.mem.eql(u8, args[i], "--width") and i + 1 < args.len) {
@@ -208,10 +216,33 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
                     std.process.fatal("render: --width expects an integer, got '{s}'", .{args[i + 1]});
                 };
                 i += 1;
+            } else if (std.mem.startsWith(u8, args[i], "--images=")) {
+                const value = args[i]["--images=".len..];
+                image_mode = image_protocol.parseMode(value) orelse {
+                    std.process.fatal("render: --images expects auto|kitty|iterm|sixel|braille|none, got '{s}'", .{value});
+                };
+            } else if (std.mem.eql(u8, args[i], "--images") and i + 1 < args.len) {
+                image_mode = image_protocol.parseMode(args[i + 1]) orelse {
+                    std.process.fatal("render: --images expects auto|kitty|iterm|sixel|braille|none, got '{s}'", .{args[i + 1]});
+                };
+                i += 1;
             } else {
                 std.process.fatal("render: unknown arg '{s}'", .{args[i]});
             }
         }
+        // Resolve the requested mode against the runtime environment.
+        // Non-TTY stdout forces `.none` (gate 8 — `awr render | tee` must
+        // stay escape-free regardless of `--images=…`). The Sixel CSI probe
+        // is wired only when the user requested `auto`; explicit modes skip
+        // the 50 ms latency. The resolved Protocol flows through
+        // RenderOptions; sub-step 4f teaches `browser.zig:draw` to act on
+        // it. Today the model layer is still text-only.
+        const resolved_protocol = image_protocol.resolve(.{
+            .mode = image_mode,
+            .stdout_is_tty = image_protocol.stdoutIsTty(),
+            .env = image_protocol.realEnvSnapshot(),
+            .probe_sixel = if (image_mode == .auto) &image_protocol.probeSixel else null,
+        });
         var p = try page_mod.Page.init(alloc, io);
         defer p.deinit();
         var result = loadPage(&p, alloc, io, args[2]) catch |err| {
@@ -223,6 +254,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
             .ansi_colors = false,
             .show_links = true,
             .show_images = true,
+            .image_protocol = resolved_protocol,
         });
         defer screen.deinit();
         try stdoutWrite(io, screen.text);
