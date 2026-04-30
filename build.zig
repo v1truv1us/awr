@@ -587,6 +587,28 @@ pub fn build(b: *std.Build) void {
         const run_image_braille = b.addRunArtifact(image_braille_test);
         test_image_step.dependOn(&run_image_braille.step);
         test_step.dependOn(&run_image_braille.step);
+
+        // src/image/kitty.zig — Kitty graphics encoder. Same shape as
+        // braille_mod (decode-importing → stb_image transitively).
+        const image_kitty_mod = b.createModule(.{
+            .root_source_file = b.path("src/image/kitty.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        image_kitty_mod.addCSourceFile(.{
+            .file = stb_csrc,
+            .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Wno-unused-but-set-variable" },
+        });
+        image_kitty_mod.addIncludePath(stb_include);
+
+        const image_kitty_test = b.addTest(.{
+            .name = "image_kitty",
+            .root_module = image_kitty_mod,
+        });
+        const run_image_kitty = b.addRunArtifact(image_kitty_test);
+        test_image_step.dependOn(&run_image_kitty.step);
+        test_step.dependOn(&run_image_kitty.step);
     }
 
     // ── Curated Test262 runner ────────────────────────────────────────────
