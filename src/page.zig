@@ -24,6 +24,8 @@ const cookie_path = @import("util/cookie_path.zig");
 pub const ScreenModel = render.ScreenModel;
 pub const ScreenLink = render.ScreenLink;
 pub const ScreenField = render.ScreenField;
+pub const ImageLookup = render.ImageLookup;
+pub const RenderOptions = render.RenderOptions;
 
 // ── PageResult ────────────────────────────────────────────────────────────
 

@@ -4,6 +4,7 @@ const page_mod = @import("page");
 const mock_mod = @import("mock.zig");
 const browser_mod = @import("browser.zig");
 const image_protocol = @import("image_protocol");
+const image_pipeline = @import("image_pipeline");
 
 fn writeJsonStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
     try list.append(alloc, '"');
@@ -249,12 +250,35 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
             fatalLoadError("loading", args[2], err);
         };
         defer result.deinit();
+
+        // Build the image pipeline only when a real protocol resolved.
+        // `.none` (non-TTY override or `--images=none`) skips pipeline
+        // construction so we never spend time fetching images we won't
+        // emit. `.sixel` is the same — the encoder lands in Step 7 and
+        // until then we cleanly fall back to the alt-ref text path.
+        var pipeline_storage: ?image_pipeline.Pipeline = null;
+        defer if (pipeline_storage) |*pl| pl.deinit();
+        var image_lookup_opt: ?page_mod.ImageLookup = null;
+        if (resolved_protocol != .none and resolved_protocol != .sixel) {
+            if (image_pipeline.build(alloc, &p, args[2], resolved_protocol, .{
+                .max_width_cells = @intCast(width),
+            })) |pl| {
+                pipeline_storage = pl;
+                image_lookup_opt = pipeline_storage.?.lookup();
+            } else |_| {
+                // Pipeline construction failed; render falls back to
+                // text alt-refs. No fatal — image rendering is best-
+                // effort, the page text is the primary deliverable.
+            }
+        }
+
         var screen = try p.renderBrowseModel(alloc, &result, .{
             .max_width = width,
             .ansi_colors = false,
             .show_links = true,
             .show_images = true,
             .image_protocol = resolved_protocol,
+            .image_lookup = image_lookup_opt,
         });
         defer screen.deinit();
         try stdoutWrite(io, screen.text);

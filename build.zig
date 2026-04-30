@@ -304,6 +304,28 @@ pub fn build(b: *std.Build) void {
         });
         exe_page_mod.addImport("image_protocol", exe_image_protocol_mod);
 
+        // Image pipeline — orchestrates fetch + decode + encode for
+        // every <img> on a page. Lives in its own named module so it
+        // can pull in stb_image once (via decode.zig) without polluting
+        // exe_mod or exe_page_mod with the C source. The pipeline
+        // depends on the page module (for ImageLookup type + Page type)
+        // and on image_protocol (for the Protocol enum). Encoders
+        // (kitty/iterm/braille) come in via relative imports inside
+        // the pipeline source.
+        const exe_image_pipeline_mod = b.createModule(.{
+            .root_source_file = b.path("src/image/pipeline.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        exe_image_pipeline_mod.addCSourceFile(.{
+            .file = stb_csrc,
+            .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Wno-unused-but-set-variable" },
+        });
+        exe_image_pipeline_mod.addIncludePath(stb_include);
+        exe_image_pipeline_mod.addImport("page", exe_page_mod);
+        exe_image_pipeline_mod.addImport("image_protocol", exe_image_protocol_mod);
+
         const exe_mod = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -313,6 +335,7 @@ pub fn build(b: *std.Build) void {
         exe_mod.addImport("page", exe_page_mod);
         exe_mod.addImport("build_opts", opts_mod);
         exe_mod.addImport("image_protocol", exe_image_protocol_mod);
+        exe_mod.addImport("image_pipeline", exe_image_pipeline_mod);
 
         const exe = b.addExecutable(.{
             .name = "awr",
