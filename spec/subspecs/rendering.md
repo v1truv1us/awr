@@ -1,24 +1,30 @@
-# Rendering — active sub-spec
+# Rendering — closed sub-spec
 
-> **Status:** ACTIVE
-> `spec/MVP.md` is the canonical umbrella spec. This file is the
-> authority for two coordinated tracks:
+> **Status:** CLOSED (2026-04-30, ADR 0001 amendment)
+> `spec/MVP.md` is the canonical umbrella spec. This file documented
+> two coordinated tracks; both are now closed:
 >
-> - **Track A — Image rendering** *(deferred-within-active, not started)*:
->   terminal graphics protocols (Kitty, iTerm2, Sixel) and text/braille
->   fallback for `<img>`, `<picture>`, `srcset`, and CSS
->   `background-image`. Code has not landed; this track activates next.
-> - **Track B — Real-page render-quality corpus** *(complete pending
->   Track A's gate 3)*: a fixture corpus of real production HTML plus
->   a snapshot-based test harness that proves `renderBrowseModel`
->   output stays useful as the renderer evolves. As of 2026-04-29, the
->   corpus has 12 fixtures across 11 distinct render categories
->   (§4.1); only the search-results category remains deferred (DDG
->   blocks curl). All Track-B-specific §6 closure gates are green.
+> - **Track A — Image rendering** *(closed)*: four real terminal-
+>   graphics encoders — Kitty (`\x1b_G…`), iTerm2 OSC-1337, Sixel
+>   with median-cut palette quantization, and a 2×4 Unicode-braille
+>   fallback — plus a `<picture>` / `srcset` picker with min/max-width
+>   media queries and CSS `background-image: url(...)` resolve on
+>   content-bearing landmarks (`<header>`, `<section>`, `<figure>`).
+>   End-to-end through `awr render --images=…` with capability
+>   detection, non-TTY safety override, per-image safety caps (4 MiB
+>   encoded / 16 MP decoded), and a 32-images-per-page fetch budget.
+>   113 unit tests across 8 modules in `zig build test-image`.
+> - **Track B — Real-page render-quality corpus** *(closed)*:
+>   12 fixtures across 11 distinct render categories prove
+>   `renderBrowseModel` output stays useful as the renderer evolves.
+>   The model layer stays text-only; image protocol bytes emit only
+>   when `image_lookup` is wired (in `awr render` at runtime), so
+>   corpus snapshots remain deterministic regardless of the encoder
+>   work.
 >
-> The tracks share closure gates because the corpus fixtures are also the
-> integration tests that prove image rendering works on real pages. They
-> ship together, in the order documented in §7.
+> All §6 closure gates green. The §7 landing order (Steps 4a–4g, 5–10)
+> was followed in commits between `a651bc7` and `78547d8`. The
+> companion ADR-0001 entry dated 2026-04-30 records the closure.
 
 ---
 

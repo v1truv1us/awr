@@ -224,6 +224,52 @@ documentation governance.
   `tests/corpus/README.md`, `scripts/update-corpus.sh`, `build.zig`
   test target wiring).
 
+### 2026-04-30 — Closed `spec/subspecs/rendering.md` (Track A image rendering)
+
+- Date: 2026-04-30
+- Change: Marked the rendering sub-spec **closed** in `spec/MVP.md §7`
+  and added image rendering as item 7 in §5's Closed MVP surface list.
+  Track A (terminal image rendering) is now part of the shipped MVP
+  surface; Track B (real-page render-quality corpus) was already
+  complete pending Track A's gate-3.
+- Track A landed across eleven sub-step commits (4a–4g, plus Steps 5–10):
+  - `a651bc7` 4a/4b — vendor stb_image + decoder wrapper with safety caps
+  - `049e7c7` 4c — byte-bounded LRU cache for decoded images
+  - `5a97f10` 4d — protocol detection + `--images=…` flag
+  - `9da7be8` 4e — braille fallback downsampler (2×4 Unicode glyphs)
+  - `dfb5f1c` 4f — `RenderOptions.image_lookup` raw-byte emit path
+  - `e49c8a3` Step 5 — Kitty graphics encoder (RGBA APC, `q=2` silent)
+  - `b54a6b1` Step 6 — iTerm2 OSC-1337 inline encoder (file-bytes pass-through)
+  - `82f0d6e` Step 5+ — `awr render` pipeline orchestrator
+  - `7f28934` Step 7 — Sixel encoder + median-cut palette quantization
+  - `fff304d` Step 9 — `<picture>` / `srcset` picker with min/max-width
+    media queries
+  - `78547d8` Step 10 — CSS `background-image: url(...)` resolve + emit
+    on content-bearing landmarks (`<header>`, `<section>`, `<figure>`)
+- Closure gates per `spec/subspecs/rendering.md §6` — all green:
+  1. `zig build test` — green (773/804; 31 net-skipped)
+  2. `zig build test-wpt` — green; curated count unchanged
+  3. `zig build test-image` — 113/113 across 8 modules
+  4. `zig build test-corpus` — 12 fixtures unchanged (model layer text-only)
+  5. `zig build test-tls` — JA4 fingerprint unchanged
+  6. `zig build test-h2` — HTTP/2 SETTINGS unchanged
+  7. `grep -rn "TODO|stub|unimplemented" src/image/` empty
+  8. `awr render --images=auto|kitty|sixel | tee` is escape-free
+     (non-TTY override forces `.none` regardless of mode)
+  9. Peak RSS during `test-corpus` < 128 MiB
+  10. `spec/MVP.md §5,§7` and this ADR amended in the same change set
+      as the closing commit.
+- Reason: the rendering sub-spec was the last ACTIVE sub-spec on the
+  MVP closure path. With four real protocol encoders, an end-to-end
+  pipeline that respects JA4 fingerprint discipline (uses the same
+  `Client.fetchRequest` as page navigation), and a non-TTY safety
+  override that protects gate 8, AWR's CLI-first browser runtime now
+  renders real images on real pages without abandoning its core
+  fingerprint guarantee. Closing the sub-spec on the same commit as
+  the spec amendment keeps doc/code in sync.
+- Documents updated: `spec/MVP.md` (§5 added item 7; §7 reclassified
+  rendering as closed), this ADR.
+
 ### Template for future amendments
 
 - Date:

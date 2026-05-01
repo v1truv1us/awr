@@ -107,7 +107,16 @@ The closed MVP surface is:
    `history` is limited to same-origin `pushState` / `replaceState` plus
    `length` and `state`;
 6. viewport observers (`IntersectionObserver`, `ResizeObserver`) are not part of
-   the shipped MVP surface until real render-backed semantics exist.
+   the shipped MVP surface until real render-backed semantics exist;
+7. terminal image rendering for `<img>`, `<picture>` / `srcset`, and CSS
+   `background-image` on `<header>` / `<section>` / `<figure>`. Protocols:
+   Kitty graphics, iTerm2 inline (OSC 1337), Sixel with median-cut palette
+   quantization, and a 2×4 Unicode-braille fallback. `--images=…` flag with
+   `auto` detection (Kitty / iTerm env signals + Sixel CSI probe) and a hard
+   non-TTY override that forces `.none` so `awr render | tee` stays escape-
+   free. Per-image safety caps (4 MiB encoded / 16 MP decoded) and a
+   per-page fetch budget (32 images, surplus → text alt-refs). See
+   `spec/subspecs/rendering.md`.
 
 The closure record and remaining follow-on work live in
 `spec/subspecs/mvp-remainder.md`.
@@ -147,9 +156,13 @@ end through `awr browse`, cookie jar disk persistence) is governed by
 
 The rendering scope (real-page render-quality corpus + terminal image
 rendering) is governed by `spec/subspecs/rendering.md` and is
-**active**, not deferred. Track B (corpus harness) is in progress;
-Track A (image rendering) activates when Track B is established. The
-corpus harness is exercised via `zig build test-corpus`.
+**closed** (per ADR 2026-04-30 entry). Track B (corpus harness, 12
+fixtures across 11 categories) and Track A (image rendering: Kitty /
+iTerm / Sixel / braille encoders, `<picture>` / `srcset` picker, CSS
+`background-image` resolve, end-to-end pipeline through `awr render`)
+are both green against `spec/subspecs/rendering.md §6`. The corpus
+harness is exercised via `zig build test-corpus`; the encoder + picker
+test surface via `zig build test-image` (113 tests across 8 modules).
 
 Do not treat deferred tracks as blockers for the active MVP closure work unless
 this spec is amended.
