@@ -627,6 +627,19 @@ fn renderElement(state: *RenderState, w: anytype, elem: *const dom.Element) anye
     try state.beginElementBox(elem);
     defer state.endElementBox();
 
+    // Step 10: CSS background-image emit. For content-bearing landmarks
+    // (`<header>`, `<section>`, `<figure>`) with inline `style="...
+    // background-image: url(...)..."`, surface the bg image as an
+    // image-bearing row before the element's children render. The
+    // pipeline pre-fetches these URLs into the same lookup as `<img>`
+    // sources; this hook just queries it. Per
+    // `spec/subspecs/rendering.md §3.1`.
+    if (state.opts.image_lookup) |lookup| {
+        if (eql(tag, "header") or eql(tag, "section") or eql(tag, "figure")) {
+            tryEmitBackgroundImage(state, w, elem, lookup) catch {};
+        }
+    }
+
     // ── Heading ──────────────────────────────────────────────────────
     if (headingLevel(tag)) |level| {
         try renderHeading(state, w, elem, level);
@@ -871,6 +884,70 @@ fn renderHr(state: *RenderState, w: anytype) anyerror!void {
         try w.writeByte('-');
     }
     try state.newline(w);
+}
+
+/// Step 10: surface a `<header>` / `<section>` / `<figure>` element's
+/// CSS `background-image: url(...)` (or `background:` shorthand) as
+/// an inline image — same protocol bytes as a regular `<img>`. Only
+/// fires when the pipeline pre-fetched matching bytes (i.e., the URL
+/// passed `extractBackgroundUrl` and the fetch + encode succeeded).
+///
+/// The URL extractor MUST match `pipeline.extractBackgroundUrl`'s
+/// output for the same `style` value — they're the two halves of the
+/// pipeline → renderer key contract. Any divergence becomes a silent
+/// "fetched image but never emitted" loss.
+fn tryEmitBackgroundImage(state: *RenderState, w: anytype, elem: *const dom.Element, lookup: ImageLookup) !void {
+    const style = elem.getAttribute("style") orelse return;
+    const url = extractBgUrlFromStyle(style) orelse return;
+    if (lookup.get(url)) |bytes| {
+        try state.ensureNewline(w);
+        try w.writeAll(bytes);
+        try state.newline(w);
+    }
+}
+
+/// Extract the URL from a CSS `background` / `background-image`
+/// declaration. Mirrors `pipeline.extractBackgroundUrl` exactly —
+/// see the pipeline source for design notes. Duplicated here because
+/// the page module (where this lives) and the image_pipeline module
+/// can't share private helpers without expanding the named-module
+/// surface.
+fn extractBgUrlFromStyle(style: []const u8) ?[]const u8 {
+    var idx: usize = 0;
+    while (idx < style.len) {
+        const bg = indexOfICaseFromStart(style, idx, "background") orelse return null;
+        var probe = bg + "background".len;
+        if (probe + 6 <= style.len and std.ascii.eqlIgnoreCase(style[probe .. probe + 6], "-image")) {
+            probe += 6;
+        }
+        while (probe < style.len and (style[probe] == ' ' or style[probe] == '\t')) : (probe += 1) {}
+        if (probe >= style.len or style[probe] != ':') {
+            idx = bg + 1;
+            continue;
+        }
+        probe += 1;
+        const end = std.mem.indexOfScalarPos(u8, style, probe, ';') orelse style.len;
+        const value = style[probe..end];
+        if (indexOfICaseFromStart(value, 0, "gradient") != null) return null;
+        if (indexOfICaseFromStart(value, 0, "image-set") != null) return null;
+        const url_kw = indexOfICaseFromStart(value, 0, "url(") orelse return null;
+        const url_start = url_kw + 4;
+        const url_close = std.mem.indexOfScalarPos(u8, value, url_start, ')') orelse return null;
+        const inner = std.mem.trim(u8, value[url_start..url_close], " \t\"'");
+        if (inner.len == 0) return null;
+        return inner;
+    }
+    return null;
+}
+
+fn indexOfICaseFromStart(haystack: []const u8, start: usize, needle: []const u8) ?usize {
+    if (needle.len == 0 or start >= haystack.len) return null;
+    if (haystack.len < needle.len) return null;
+    var i = start;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return i;
+    }
+    return null;
 }
 
 fn renderImage(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
@@ -1861,6 +1938,61 @@ test "render — no image_lookup keeps current alt-ref behavior verbatim" {
     });
     const out = fbs.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "[A photo]") != null);
+}
+
+test "render — <section style=background-image> emits bg bytes when lookup hits" {
+    var doc = try dom.parseDocument(
+        std.testing.allocator,
+        "<html><body><section style=\"background-image: url('hero.jpg')\"><p>Hello</p></section></body></html>",
+    );
+    defer doc.deinit();
+
+    const sentinel = "<<HERO-BG-BYTES>>";
+    const tl = TestImageLookup{ .url = "hero.jpg", .bytes = sentinel };
+
+    var buf: [1024]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&buf);
+    try render(std.testing.allocator, &fbs, &doc, .{
+        .ansi_colors = false,
+        .show_images = true,
+        .image_protocol = .kitty,
+        .image_lookup = tl.lookup(),
+    });
+    const out = fbs.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, sentinel) != null);
+    // Section's text content still renders normally after the bg emit.
+    try std.testing.expect(std.mem.indexOf(u8, out, "Hello") != null);
+}
+
+test "render — bg-image rejects gradients (no emit)" {
+    var doc = try dom.parseDocument(
+        std.testing.allocator,
+        "<html><body><header style=\"background: linear-gradient(red, blue)\"><p>Banner</p></header></body></html>",
+    );
+    defer doc.deinit();
+
+    const tl = TestImageLookup{ .url = "anything", .bytes = "<<SHOULD-NOT-APPEAR>>" };
+    var buf: [1024]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&buf);
+    try render(std.testing.allocator, &fbs, &doc, .{
+        .ansi_colors = false,
+        .show_images = true,
+        .image_protocol = .kitty,
+        .image_lookup = tl.lookup(),
+    });
+    const out = fbs.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "<<SHOULD-NOT-APPEAR>>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Banner") != null);
+}
+
+test "extractBgUrlFromStyle: matches pipeline extractor output" {
+    // Pipeline-side and renderer-side extractors must agree byte-for-
+    // byte on the URL string they pull out of a given style value.
+    // Spot-check a handful of common shapes.
+    try std.testing.expectEqualStrings("hero.jpg", extractBgUrlFromStyle("background-image: url('hero.jpg')").?);
+    try std.testing.expectEqualStrings("/cdn/x.png", extractBgUrlFromStyle("background: url(/cdn/x.png) center").?);
+    try std.testing.expect(extractBgUrlFromStyle("background: linear-gradient(red, blue)") == null);
+    try std.testing.expect(extractBgUrlFromStyle("background-color: red") == null);
 }
 
 test "render — word wrapping at max_width" {

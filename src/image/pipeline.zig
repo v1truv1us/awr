@@ -133,18 +133,56 @@ pub fn build(
             pl.overflow_skipped += 1;
             continue;
         }
-        // Resolve relative URLs against the page URL.
+        // The renderer's `renderImage` looks up bytes by the raw `src`
+        // attribute. The pipeline may have *fetched* a higher-res
+        // candidate from `<picture>` / `srcset` — those bytes still get
+        // stored under the `src` value so the lookup hits. If the
+        // image has no `src` (rare; some pages use `srcset` exclusively
+        // on browsers that support it), fall back to the picked key —
+        // renderImage's null-`src` path won't query, so this entry is
+        // unreachable from rendering but the fetch warmth doesn't hurt.
+        const lookup_key = img_elem.getAttribute("src") orelse picked;
+        if (lookup_key.len == 0) continue;
+
+        // Resolve relative URLs against the page URL for the *fetch*.
         const abs_url = page.resolveUrl(page_url, picked) catch {
             pl.failed += 1;
             continue;
         };
         defer allocator.free(abs_url);
 
-        // Skip URLs we've already encoded (avoids fetching the same
-        // hero image twice on pages that use it in multiple <img>).
-        if (pl.bytes_by_url.contains(abs_url)) continue;
+        if (pl.bytes_by_url.contains(lookup_key)) continue;
 
-        encodeOne(allocator, page, abs_url, proto, opts, &pl) catch {
+        encodeOne(allocator, page, abs_url, lookup_key, proto, opts, &pl) catch {
+            pl.failed += 1;
+            continue;
+        };
+        fetched += 1;
+    }
+
+    // Step 10: CSS background-image resolve. Walk content-bearing
+    // landmarks (`<header>`, `<section>`, `<figure>`) for inline
+    // `style="background-image: url(...)"` (or shorthand `background:`).
+    // Skipped + collapsed regions never get to render time so we don't
+    // need to filter here — fetching them is harmless if they end up
+    // not displayed. Same lookup as `<img>`: keyed by raw URL string.
+    const bg_landmarks = try doc.querySelectorAll("header, section, figure", allocator);
+    defer allocator.free(bg_landmarks);
+    for (bg_landmarks) |lm| {
+        const style = lm.getAttribute("style") orelse continue;
+        const bg_url = extractBackgroundUrl(style) orelse continue;
+        if (fetched >= opts.max_images) {
+            pl.overflow_skipped += 1;
+            continue;
+        }
+        const abs_url = page.resolveUrl(page_url, bg_url) catch {
+            pl.failed += 1;
+            continue;
+        };
+        defer allocator.free(abs_url);
+        if (pl.bytes_by_url.contains(bg_url)) continue;
+
+        encodeOne(allocator, page, abs_url, bg_url, proto, opts, &pl) catch {
             pl.failed += 1;
             continue;
         };
@@ -154,10 +192,75 @@ pub fn build(
     return pl;
 }
 
+/// Extract the URL from a CSS `background-image` (or `background`
+/// shorthand) declaration in an inline `style="..."` attribute.
+///
+/// Returns the URL string borrowed from `style` (caller must dupe if
+/// it wants ownership). Returns null on:
+///
+///   • No `background` / `background-image` property in `style`.
+///   • Property value contains a `gradient(`, `image-set(`, or other
+///     non-url image function (out of §3.1 scope).
+///   • No `url(...)` token in the property value.
+///
+/// Tolerates single-quoted, double-quoted, and unquoted URL values;
+/// leading/trailing whitespace inside `url(...)` is stripped.
+pub fn extractBackgroundUrl(style: []const u8) ?[]const u8 {
+    var idx: usize = 0;
+    while (idx < style.len) {
+        const bg = indexOfICase(style, idx, "background") orelse return null;
+        var probe = bg + "background".len;
+        // Either "-image" or directly ":" should follow.
+        if (probe + 6 <= style.len and std.ascii.eqlIgnoreCase(style[probe .. probe + 6], "-image")) {
+            probe += 6;
+        }
+        probe = skipAsciiWs(style, probe);
+        if (probe >= style.len or style[probe] != ':') {
+            // Not a background property — could be `background-color`,
+            // `background-position`, etc. Advance and try again.
+            idx = bg + 1;
+            continue;
+        }
+        probe += 1;
+        // Property value runs until `;` or end-of-string.
+        const end = std.mem.indexOfScalarPos(u8, style, probe, ';') orelse style.len;
+        const value = style[probe..end];
+
+        // Reject non-url image functions.
+        if (indexOfICase(value, 0, "gradient") != null) return null;
+        if (indexOfICase(value, 0, "image-set") != null) return null;
+
+        const url_kw = indexOfICase(value, 0, "url(") orelse return null;
+        const url_start = url_kw + 4;
+        const url_close = std.mem.indexOfScalarPos(u8, value, url_start, ')') orelse return null;
+        const inner = std.mem.trim(u8, value[url_start..url_close], " \t\"'");
+        if (inner.len == 0) return null;
+        return inner;
+    }
+    return null;
+}
+
+fn indexOfICase(haystack: []const u8, start: usize, needle: []const u8) ?usize {
+    if (needle.len == 0 or start >= haystack.len) return null;
+    if (haystack.len < needle.len) return null;
+    var i = start;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return i;
+    }
+    return null;
+}
+
+fn skipAsciiWs(s: []const u8, start: usize) usize {
+    var i = start;
+    while (i < s.len and (s[i] == ' ' or s[i] == '\t')) : (i += 1) {}
+    return i;
+}
+
 fn encodeOne(
     allocator: std.mem.Allocator,
     page: *page_mod.Page,
     abs_url: []const u8,
+    raw_key: []const u8,
     proto: protocol.Protocol,
     opts: PipelineOptions,
     pl: *Pipeline,
@@ -187,7 +290,7 @@ fn encodeOne(
     };
     errdefer allocator.free(encoded);
 
-    const url_owned = try allocator.dupe(u8, abs_url);
+    const url_owned = try allocator.dupe(u8, raw_key);
     errdefer allocator.free(url_owned);
 
     try pl.bytes_by_url.put(url_owned, encoded);
@@ -488,4 +591,56 @@ test "evalMedia: unsupported features evaluate to false" {
     try testing.expect(!evalMedia("(orientation: portrait)", 800));
     try testing.expect(!evalMedia("(prefers-color-scheme: dark)", 800));
     try testing.expect(!evalMedia("(hover: hover)", 800));
+}
+
+test "extractBackgroundUrl: background-image with double-quoted url" {
+    const url = extractBackgroundUrl("background-image: url(\"hero.jpg\")").?;
+    try testing.expectEqualStrings("hero.jpg", url);
+}
+
+test "extractBackgroundUrl: background-image with single-quoted url" {
+    const url = extractBackgroundUrl("background-image: url('photo.png');").?;
+    try testing.expectEqualStrings("photo.png", url);
+}
+
+test "extractBackgroundUrl: background-image with unquoted url" {
+    const url = extractBackgroundUrl("background-image: url(/static/hero.jpg)").?;
+    try testing.expectEqualStrings("/static/hero.jpg", url);
+}
+
+test "extractBackgroundUrl: background shorthand with extras" {
+    const url = extractBackgroundUrl("background: url('bg.png') no-repeat center center").?;
+    try testing.expectEqualStrings("bg.png", url);
+}
+
+test "extractBackgroundUrl: case-insensitive property name" {
+    const url = extractBackgroundUrl("BACKGROUND-IMAGE: URL('foo.jpg')").?;
+    try testing.expectEqualStrings("foo.jpg", url);
+}
+
+test "extractBackgroundUrl: rejects gradients" {
+    try testing.expect(extractBackgroundUrl("background: linear-gradient(red, blue)") == null);
+    try testing.expect(extractBackgroundUrl("background-image: radial-gradient(circle, red, blue)") == null);
+    try testing.expect(extractBackgroundUrl("background: linear-gradient(red, blue), url(fallback.jpg)") == null);
+}
+
+test "extractBackgroundUrl: rejects image-set" {
+    try testing.expect(extractBackgroundUrl("background-image: image-set(url('1x.jpg') 1x, url('2x.jpg') 2x)") == null);
+}
+
+test "extractBackgroundUrl: empty / no background → null" {
+    try testing.expect(extractBackgroundUrl("") == null);
+    try testing.expect(extractBackgroundUrl("color: red; padding: 1em") == null);
+    try testing.expect(extractBackgroundUrl("background-color: blue") == null);
+    try testing.expect(extractBackgroundUrl("background-position: center") == null);
+}
+
+test "extractBackgroundUrl: property after another declaration" {
+    const url = extractBackgroundUrl("color: red; background-image: url('after.png');").?;
+    try testing.expectEqualStrings("after.png", url);
+}
+
+test "extractBackgroundUrl: empty url() returns null" {
+    try testing.expect(extractBackgroundUrl("background: url()") == null);
+    try testing.expect(extractBackgroundUrl("background: url('')") == null);
 }
