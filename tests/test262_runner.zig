@@ -303,6 +303,79 @@ const curated_cases = [_]Case{
         .probe = "String(globalThis.__test_result__)",
         .expected = "6",
     },
+    .{
+        .name = "promise.allSettled resolves with status entries",
+        .source =
+            \\globalThis.__test_result__ = 'pending';
+            \\Promise.allSettled([Promise.resolve(1), Promise.reject('e'), Promise.resolve(3)]).then(results => {
+            \\  globalThis.__test_result__ = results.map(r => r.status + ':' + (r.value ?? r.reason)).join(',');
+            \\});
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "fulfilled:1,rejected:e,fulfilled:3",
+        .drain_microtasks = true,
+    },
+    .{
+        .name = "promise.race resolves with the first settled value",
+        .source =
+            \\globalThis.__test_result__ = 'pending';
+            \\Promise.race([Promise.resolve(7), Promise.resolve(8)]).then(v => {
+            \\  globalThis.__test_result__ = String(v);
+            \\});
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "7",
+        .drain_microtasks = true,
+    },
+    .{
+        .name = "queueMicrotask runs after current task and before timers",
+        .source =
+            \\const order = [];
+            \\queueMicrotask(() => { order.push('mt'); globalThis.__test_result__ = order.join(','); });
+            \\order.push('sync');
+            \\globalThis.__test_result__ = order.join(',');
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "sync,mt",
+        .drain_microtasks = true,
+    },
+    .{
+        .name = "Array.from converts iterables and applies the map fn",
+        .source =
+            \\const set = new Set([1, 2, 3]);
+            \\globalThis.__test_result__ = Array.from(set, x => x * 2).join(',');
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "2,4,6",
+    },
+    .{
+        .name = "Array.of and Array.prototype.flatMap",
+        .source =
+            \\const a = Array.of(1, 2, 3);
+            \\globalThis.__test_result__ = a.flatMap(x => [x, x * 10]).join(',');
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "1,10,2,20,3,30",
+    },
+    .{
+        .name = "String.prototype.replaceAll",
+        .source =
+            \\globalThis.__test_result__ = 'a-b-c-d'.replaceAll('-', '/');
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "a/b/c/d",
+    },
+    .{
+        .name = "structuredClone deep-copies plain objects",
+        .source =
+            \\const original = { a: 1, nested: { b: [2, 3] } };
+            \\const copy = structuredClone(original);
+            \\copy.nested.b.push(4);
+            \\globalThis.__test_result__ = original.nested.b.length + ':' + copy.nested.b.length;
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "2:3",
+    },
 };
 
 fn runCase(allocator: std.mem.Allocator, case: Case) !void {

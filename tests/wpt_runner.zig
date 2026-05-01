@@ -416,6 +416,106 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/form_method_post.js"),
         .url = "http://127.0.0.1:18488/forms",
     },
+    .{
+        .filename = "element_dataset.js",
+        .html = "<html><body><div id=\"node\" data-kind=\"primary\" data-user-id=\"u-42\"></div></body></html>",
+        .script = @embedFile("wpt/element_dataset.js"),
+    },
+    .{
+        .filename = "document_documentElement.js",
+        .html = "<html><body><p>body</p></body></html>",
+        .script = @embedFile("wpt/document_documentElement.js"),
+    },
+    .{
+        .filename = "document_visibility.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/document_visibility.js"),
+    },
+    .{
+        .filename = "element_appendChild_dynamic.js",
+        .html = "<html><body><div id=\"host\"></div><div id=\"host2\"></div></body></html>",
+        .script = @embedFile("wpt/element_appendChild_dynamic.js"),
+    },
+    .{
+        .filename = "element_removeChild.js",
+        .html = "<html><body><div id=\"host\"><p id=\"a\">a</p><p id=\"b\">b</p></div></body></html>",
+        .script = @embedFile("wpt/element_removeChild.js"),
+    },
+    .{
+        .filename = "element_insertBefore.js",
+        .html = "<html><body><div id=\"host\"><p id=\"first\">1</p><p id=\"second\">2</p></div></body></html>",
+        .script = @embedFile("wpt/element_insertBefore.js"),
+    },
+    .{
+        .filename = "url_search_params_basics.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/url_search_params_basics.js"),
+    },
+    .{
+        .filename = "navigator_basics.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/navigator_basics.js"),
+    },
+    .{
+        .filename = "window_basics.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/window_basics.js"),
+    },
+    .{
+        .filename = "element_setAttribute_basic.js",
+        .html = "<html><body><div id=\"node\"></div></body></html>",
+        .script = @embedFile("wpt/element_setAttribute_basic.js"),
+    },
+    .{
+        .filename = "event_properties.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/event_properties.js"),
+    },
+    .{
+        .filename = "event_target_currentTarget.js",
+        .html = "<html><body><div id=\"node\"></div><div id=\"parent\"><span id=\"child\"></span></div></body></html>",
+        .script = @embedFile("wpt/event_target_currentTarget.js"),
+    },
+    .{
+        .filename = "event_dispatchEvent_returns.js",
+        .html = "<html><body><div id=\"node\"></div></body></html>",
+        .script = @embedFile("wpt/event_dispatchEvent_returns.js"),
+    },
+    .{
+        .filename = "event_constructors_alias.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/event_constructors_alias.js"),
+    },
+    .{
+        .filename = "element_click_listener.js",
+        .html = "<html><body><button id=\"btn\">go</button></body></html>",
+        .script = @embedFile("wpt/element_click_listener.js"),
+    },
+    .{
+        .filename = "history_state_length.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/history_state_length.js"),
+    },
+    .{
+        .filename = "element_wrapper_identity.js",
+        .html = "<html><body><div id=\"node\"></div><div id=\"host\"><span id=\"child\">x</span></div></body></html>",
+        .script = @embedFile("wpt/element_wrapper_identity.js"),
+    },
+    .{
+        .filename = "element_matches_attribute_selectors.js",
+        .html = "<html><body><div id=\"node\" data-kind=\"primary\"></div></body></html>",
+        .script = @embedFile("wpt/element_matches_attribute_selectors.js"),
+    },
+    .{
+        .filename = "element_querySelectorAll_array.js",
+        .html = "<html><body><p id=\"a\" class=\"match\">a</p><p id=\"b\">b</p><p id=\"c\" class=\"match\">c</p></body></html>",
+        .script = @embedFile("wpt/element_querySelectorAll_array.js"),
+    },
+    .{
+        .filename = "element_contains_relations.js",
+        .html = "<html><body><div id=\"root\"><div id=\"leaf\"></div></div><div id=\"sibling\"></div></body></html>",
+        .script = @embedFile("wpt/element_contains_relations.js"),
+    },
 };
 
 fn buildCaseHtml(allocator: std.mem.Allocator, case: WptCase) ![]u8 {

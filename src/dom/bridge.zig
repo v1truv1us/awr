@@ -1174,10 +1174,15 @@ const BRIDGE_POLYFILL =
     \\    };
     \\  }
     \\
+    \\  if (!globalThis.__awr_element_cache__) globalThis.__awr_element_cache__ = new Map();
     \\  function makeElement(data) {
     \\    if (data === null || data === undefined) return null;
     \\    const d = typeof data === 'string' ? JSON.parse(data) : data;
     \\    if (!d) return null;
+    \\    const handle = d._h || 0;
+    \\    if (handle && globalThis.__awr_element_cache__.has(handle)) {
+    \\      return globalThis.__awr_element_cache__.get(handle);
+    \\    }
     \\    const attrs = {};
     \\    for (const a of (d.attrs || [])) attrs[a.name] = a.value;
     \\    const el = {
@@ -1444,6 +1449,7 @@ const BRIDGE_POLYFILL =
     \\        return r ? makeElement(r) : null;
     \\      },
     \\    };
+    \\    if (handle) globalThis.__awr_element_cache__.set(handle, el);
     \\    return el;
     \\  }
     \\
