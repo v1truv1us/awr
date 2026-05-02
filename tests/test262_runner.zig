@@ -376,6 +376,83 @@ const curated_cases = [_]Case{
         .probe = "String(globalThis.__test_result__)",
         .expected = "2:3",
     },
+    .{
+        .name = "JSON.stringify normalizes NaN and Infinity to null",
+        .source =
+            \\globalThis.__test_result__ = JSON.stringify({a: NaN, b: Infinity, c: -Infinity, d: 1});
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "{\"a\":null,\"b\":null,\"c\":null,\"d\":1}",
+    },
+    .{
+        .name = "JSON.stringify replacer function filters keys",
+        .source =
+            \\const replacer = (key, value) => key === 'secret' ? undefined : value;
+            \\globalThis.__test_result__ = JSON.stringify({ name: 'awr', secret: 'hidden', n: 42 }, replacer);
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "{\"name\":\"awr\",\"n\":42}",
+    },
+    .{
+        .name = "JSON.stringify with indent emits pretty-printed output",
+        .source =
+            \\globalThis.__test_result__ = JSON.stringify({a:1, b:[2]}, null, 2);
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "{\n  \"a\": 1,\n  \"b\": [\n    2\n  ]\n}",
+    },
+    .{
+        .name = "Map iteration preserves insertion order",
+        .source =
+            \\const m = new Map([['a',1],['b',2],['c',3]]);
+            \\const out = [];
+            \\for (const [k,v] of m) out.push(k+':'+v);
+            \\globalThis.__test_result__ = out.join(',');
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "a:1,b:2,c:3",
+    },
+    .{
+        .name = "Array.from collects values from a generator",
+        .source =
+            \\function* gen() { yield 'x'; yield 'y'; yield 'z'; }
+            \\globalThis.__test_result__ = Array.from(gen()).join(',');
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "x,y,z",
+    },
+    .{
+        .name = "spread expands a Set into an array",
+        .source =
+            \\globalThis.__test_result__ = [...new Set([3,1,4,1,5,9,2,6,5,3,5])].sort((a,b)=>a-b).join(',');
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "1,2,3,4,5,6,9",
+    },
+    .{
+        .name = "String.prototype.at supports negative indexing",
+        .source =
+            \\globalThis.__test_result__ = 'hello'.at(-1) + 'world'.at(0) + 'awr'.at(-2);
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "oww",
+    },
+    .{
+        .name = "Number.isInteger and Number.isFinite predicates",
+        .source =
+            \\globalThis.__test_result__ = [Number.isInteger(1), Number.isInteger(1.5), Number.isFinite(Infinity), Number.isFinite(0)].join(',');
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "true,false,false,true",
+    },
+    .{
+        .name = "Math.hypot for 3-4-5 right triangle",
+        .source =
+            \\globalThis.__test_result__ = Math.hypot(3, 4);
+        ,
+        .probe = "String(globalThis.__test_result__)",
+        .expected = "5",
+    },
 };
 
 fn runCase(allocator: std.mem.Allocator, case: Case) !void {

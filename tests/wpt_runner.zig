@@ -516,6 +516,41 @@ const curated_cases = [_]WptCase{
         .html = "<html><body><div id=\"root\"><div id=\"leaf\"></div></div><div id=\"sibling\"></div></body></html>",
         .script = @embedFile("wpt/element_contains_relations.js"),
     },
+    .{
+        .filename = "selector_combinators.js",
+        .html = "<html><body><div id=\"root\"><p id=\"a\" data-x=\"1\">A</p><p id=\"b\" data-x=\"2\">B</p><p id=\"c\" data-x=\"3\">C</p></div></body></html>",
+        .script = @embedFile("wpt/selector_combinators.js"),
+    },
+    .{
+        .filename = "element_textContent_setter.js",
+        .html = "<html><body><div id=\"host\"><span>old</span><em>more</em></div></body></html>",
+        .script = @embedFile("wpt/element_textContent_setter.js"),
+    },
+    .{
+        .filename = "element_createElement_chain.js",
+        .html = "<html><body><div id=\"host\"></div><div id=\"host2\"></div></body></html>",
+        .script = @embedFile("wpt/element_createElement_chain.js"),
+    },
+    .{
+        .filename = "mutation_observer_characterData.js",
+        .html = "<html><body><div id=\"target\">initial</div></body></html>",
+        .script = @embedFile("wpt/mutation_observer_characterData.js"),
+    },
+    .{
+        .filename = "element_createElement_case.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/element_createElement_case.js"),
+    },
+    .{
+        .filename = "element_classList_toggle_returns.js",
+        .html = "<html><body><div id=\"node\"></div></body></html>",
+        .script = @embedFile("wpt/element_classList_toggle_returns.js"),
+    },
+    .{
+        .filename = "event_listener_options.js",
+        .html = "<html><body><div id=\"node\"></div></body></html>",
+        .script = @embedFile("wpt/event_listener_options.js"),
+    },
 };
 
 fn buildCaseHtml(allocator: std.mem.Allocator, case: WptCase) ![]u8 {
