@@ -1,6 +1,6 @@
-# Agent-Browser — active sub-spec
+# Agent-Browser — closure record
 
-> **Status:** ACTIVE
+> **Status:** CLOSED FOR CURRENT MVP SURFACE (per ADR 2026-04-28)
 > `spec/MVP.md` is the canonical umbrella spec. This file is the authority for
 > the agent-browser scope and its WPT/Test262 closure gates. Sits alongside
 > `spec/subspecs/wpt-conformance.md`, which remains the corpus and runner

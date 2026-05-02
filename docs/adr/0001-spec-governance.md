@@ -270,6 +270,20 @@ documentation governance.
 - Documents updated: `spec/MVP.md` (§5 added item 7; §7 reclassified
   rendering as closed), this ADR.
 
+### 2026-05-02 — Reconcile agent-browser.md status header with ADR 2026-04-28
+
+- Date: 2026-05-02
+- Change: Updated `spec/subspecs/agent-browser.md` heading and status line from
+  "active sub-spec / Status: ACTIVE" to "closure record / Status: CLOSED FOR
+  CURRENT MVP SURFACE (per ADR 2026-04-28)". No functional change — the closure
+  was already recorded in the ADR and reflected in `spec/MVP.md §7`; the sub-spec
+  file header was simply not updated at closure time.
+- Reason: governance drift surfaced during doc-hygiene reconciliation work
+  (`specs/wpt-conformance-doc-hygiene/spec.md`). The ADR 2026-04-28 entry and
+  `spec/MVP.md §7` both say agent-browser is closed; the sub-spec file itself
+  still said ACTIVE. Fixed in the same commit for consistency.
+- Documents updated: `spec/subspecs/agent-browser.md`, this ADR.
+
 ### Template for future amendments
 
 - Date:
