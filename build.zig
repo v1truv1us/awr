@@ -2,7 +2,9 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{
+        .preferred_optimize_mode = .ReleaseSafe,
+    });
 
     // ── Build options shared with Zig modules ──────────────────────────────
     // Historically we built this via `b.addOptions()` + git rev-parse, but
@@ -76,6 +78,7 @@ pub fn build(b: *std.Build) void {
     const test_test262_step = b.step("test-test262", "Run curated Test262 JS runtime tests");
     const test_corpus_step = b.step("test-corpus", "Run real-page render-quality corpus harness");
     const test_image_step = b.step("test-image", "Run image decoder + protocol + cache tests");
+    const test_doc_step = b.step("test-doc", "Run \xc2\xa78 \xe2\x86\x94 curated_cases doc-alignment check");
 
     // ── stb_image vendored paths ──────────────────────────────────────────
     // Header-only library at third_party/stb/stb_image.h with a single C
@@ -716,6 +719,74 @@ pub fn build(b: *std.Build) void {
         const run_test262 = b.addRunArtifact(test262_test);
         test_test262_step.dependOn(&run_test262.step);
         test_step.dependOn(&run_test262.step);
+    }
+
+    // ── §8 ↔ curated_cases doc-alignment check ───────────────────────────
+    // Pure std: no C libs, no QuickJS. Reads three repo files at runtime.
+    {
+        const doc_check_mod = b.createModule(.{
+            .root_source_file = b.path("tests/wpt_doc_check.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const doc_check_test = b.addTest(.{
+            .name = "doc_check",
+            .root_module = doc_check_mod,
+        });
+        const run_doc_check = b.addRunArtifact(doc_check_test);
+        test_doc_step.dependOn(&run_doc_check.step);
+        test_step.dependOn(&run_doc_check.step);
+    }
+
+    // ── Page load benchmark ─────────────────────────────────────────────
+    // Compares AWR's page load + render time. Run with `zig build test-bench`.
+    {
+        const bench_mod = b.createModule(.{
+            .root_source_file = b.path("tests/bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = supports_boringssl,
+        });
+        bench_mod.addImport("xev", xev_mod);
+        bench_mod.addImport("quickjs", qjs_mod);
+        bench_mod.linkLibrary(qjs_dep.artifact("quickjs-ng"));
+        bench_mod.addIncludePath(lexbor_include);
+        bench_mod.addLibraryPath(lexbor_lib);
+        bench_mod.linkSystemLibrary("lexbor", .{});
+
+        const page_import = b.createModule(.{
+            .root_source_file = b.path("src/page.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = supports_boringssl,
+        });
+        page_import.addImport("xev", xev_mod);
+        page_import.addImport("quickjs", qjs_mod);
+        page_import.linkLibrary(qjs_dep.artifact("quickjs-ng"));
+        page_import.addIncludePath(lexbor_include);
+        page_import.addLibraryPath(lexbor_lib);
+        page_import.linkSystemLibrary("lexbor", .{});
+        if (supports_boringssl) addBoringSslSupport(b, page_import, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
+        const bench_image_protocol_mod = b.createModule(.{
+            .root_source_file = b.path("src/image/protocol.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        page_import.addImport("image_protocol", bench_image_protocol_mod);
+        bench_mod.addImport("page", page_import);
+
+        const test_bench_step = b.step("test-bench", "Run page load benchmark");
+
+        const bench_test = b.addTest(.{
+            .name = "bench",
+            .root_module = bench_mod,
+            .use_llvm = true,
+        });
+        const run_bench = b.addRunArtifact(bench_test);
+        test_bench_step.dependOn(&run_bench.step);
     }
 }
 
