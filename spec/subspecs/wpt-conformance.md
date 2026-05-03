@@ -142,9 +142,10 @@ The default merge and MVP-closure commands are:
 zig build test
 zig build test-wpt
 zig build test-test262
+zig build test-doc
 ```
 
-Subsystem-specific checks remain useful, but these three are the minimum
+Subsystem-specific checks remain useful, but these four are the minimum
 conformance gates for this track.
 
 Rules:
@@ -154,6 +155,9 @@ Rules:
 3. `zig build test-test262` must stay green.
 4. tests that require real outbound network access must be explicitly gated and
    must not make the default test path hang or fail due to missing connectivity.
+5. `zig build test-doc` must stay green; §8 must mirror `curated_cases` at all
+   times. Any change to either runner's `curated_cases` array must also update
+   §8 in the same commit, or `zig build test-doc` will fail CI.
 
 ---
 

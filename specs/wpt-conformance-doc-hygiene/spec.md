@@ -1,6 +1,6 @@
 # WPT Conformance Doc Hygiene — Specification
 
-> **Phase:** specify
+> **Phase:** closed
 > **Source plan:** `.opencode/plans/archive/1777340566199-calm-knight.md`
 > **Closure authority:** `spec/subspecs/wpt-conformance.md` (this spec is an
 > addendum that defines the doc-accuracy contract for §8 of that file)
@@ -196,18 +196,20 @@ sub-specs, this spec gains a follow-on `plan.md` that implements:
 The implementation strategy (regex vs. hand-rolled scanner, exact
 section anchor matching) is left to the future plan.
 
-### 5.4. Test commands (today)
+### 5.4. Test commands
 
-The existing gates remain authoritative pre-closure:
+The active gates (as of MVP closure):
 
 ```bash
 zig build test-wpt        # all curated WPT cases pass
 zig build test-test262    # all curated Test262 cases pass
-zig build test            # full suite green
+zig build test-doc        # §8 ↔ curated_cases alignment check passes
+zig build test            # full suite green (includes test-doc)
 ```
 
-The doc-check command added at closure will run under `zig build test`
-without a dedicated subcommand.
+`zig build test-doc` runs `tests/wpt_doc_check.zig` — a pure-std Zig test
+that reads the three repo files at runtime and asserts all five alignment
+properties defined in §5.3. It has no C dependencies or network access.
 
 ---
 
@@ -249,27 +251,22 @@ This spec is **complete as a `specify`-phase artifact**. It does not need
 a `/ai-eng-core:plan` follow-on yet. It graduates to `plan` only when
 the closure gate fires — see §5.1.
 
-### Gating signal (when to draft the plan)
+### Gating signal — all gates fired (2026-05-02)
 
-Draft `specs/wpt-conformance-doc-hygiene/plan.md` once **all** of the
-following hold:
+All four gating conditions from the original checklist are now met and
+the mechanical enforcement has landed:
 
-- [ ] `spec/subspecs/wpt-conformance.md` has been declared closed in
-      `spec/MVP.md` (no further curated WPT case additions planned).
-- [ ] `tests/test262_runner.zig` has reached its closure case count
-      (no further curated Test262 case additions planned).
-- [ ] All other browser sub-specs referenced from `spec/MVP.md` are at
-      closure (specifically including `agent-browser.md`, the
-      rendering sub-spec, and `mvp-remainder.md`).
-- [ ] The §8 mapping table has been reconciled with the final
-      `curated_cases` content of both runners — the mechanical check
-      defined in §5.3 must pass on its introduction commit.
+- [x] `spec/subspecs/wpt-conformance.md` declared closed in `spec/MVP.md`.
+- [x] `tests/test262_runner.zig` at closure case count (46 cases).
+- [x] All browser sub-specs at closure (`agent-browser.md` 2026-04-28,
+      `rendering.md` 2026-04-30, `mvp-remainder.md` CLOSED).
+- [x] §8 reconciled (`4336250`) and mechanical check lands in this commit.
 
-### Today's work
+### Enforcement status
 
-The pre-closure conventional contract (§5.2 + §6 "Always do") is the
-deliverable. No code changes land from this spec until the gating
-signal above fires.
+`tests/wpt_doc_check.zig` is wired under `zig build test-doc` and `zig
+build test`. `spec/subspecs/wpt-conformance.md §6` Rule 5 enforces it as
+a merge gate. This spec is closed.
 
 ---
 
