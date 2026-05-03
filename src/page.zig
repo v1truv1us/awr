@@ -367,14 +367,12 @@ pub const Page = struct {
         }
 
         // ── Reset JS context to prevent state bleed between navigations ───
-        // Save the console sink (it lives inside the old host allocation),
-        // tear down the old runtime+context, then bring up a fresh one.
-        const saved_sink = self.js.host.sink;
-        self.js.deinit();
-        self.js = try engine.JsEngine.init(gpa, saved_sink);
+        // Reuses the underlying QuickJS Runtime (expensive to recreate) and
+        // the HostData allocation; only the per-context state is rebuilt.
         // The event loop holds Values tied to the previous context; discard
         // them and re-point at the new context, then re-attach timer/fetch
-        // bindings.
+        // bindings (idempotent — host pointers survive reset()).
+        try self.js.reset();
         self.event_loop.reset(self.js.ctx);
         self.attachHosts();
 
@@ -419,14 +417,15 @@ pub const Page = struct {
         // ── Drain microtask + macrotask queues ────────────────────────────
         // drainAll alternates QuickJS job drain with libxev ticks so that
         // setTimeout callbacks and fetch resolvers run before we extract
-        // page state. The cap is generous — long enough for real network
-        // fetches, short enough to bail out of a runaway setInterval.
-        self.drainAll(5_000);
+        // page state. Two-phase budget: interactive (1s) vs load (2s).
+        // Pages without pending timers exit immediately via hasPending();
+        // the cap only bounds the worst case (e.g. setInterval-heavy pages).
+        self.drainAll(1_000);
 
         bridge.setDocumentReadyState(&self.js, "complete");
         self.fireLifecycleEvent("document.dispatchEvent(new Event('readystatechange'))", "readystatechange-complete");
         self.fireLifecycleEvent("window.dispatchEvent(new Event('load'))", "load");
-        self.drainAll(5_000);
+        self.drainAll(2_000);
 
         // ── Extract window.__awrData__ (if set by page scripts) ───────────
         const window_data: ?[]const u8 = blk: {

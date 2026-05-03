@@ -177,6 +177,37 @@ pub const JsEngine = struct {
         self.allocator.destroy(self.host);
     }
 
+    /// Tear down the JS Context and bring up a fresh one on the same Runtime.
+    ///
+    /// Reuses the (expensive) `qjs.Runtime` and the `HostData` allocation —
+    /// only the per-context state (globals, JIT caches, value table) is
+    /// rebuilt. Used by `Page.processHtml` between navigations to clear
+    /// state bleed without paying the full Runtime+Context teardown cost.
+    ///
+    /// On failure leaves the engine in its prior state (rollback-safe):
+    /// the new context is created before the old one is destroyed, and the
+    /// `self.ctx` swap only commits when `installWebApis` succeeds.
+    ///
+    /// The caller is still responsible for re-attaching pointers that live
+    /// outside the engine — typically `event_loop.reset(self.ctx)` to
+    /// re-point any libxev timer entries at the new context.
+    pub fn reset(self: *JsEngine) JsError!void {
+        const new_ctx = qjs.Context.init(self.rt) catch return JsError.ContextInitFailed;
+        var success = false;
+        defer if (!success) new_ctx.deinit();
+
+        new_ctx.setOpaque(HostData, self.host);
+
+        const old_ctx = self.ctx;
+        self.ctx = new_ctx;
+        errdefer self.ctx = old_ctx;
+
+        try self.installWebApis();
+
+        success = true;
+        old_ctx.deinit();
+    }
+
     // ── Evaluation ──────────────────────────────────────────────────────
 
     /// Evaluate a JS source string.
