@@ -126,6 +126,9 @@ pub const Client = struct {
     cookies: cookie.CookieJar,
     conns: pool.ConnectionPool,
     options: ClientOptions,
+    /// Persistent std.http.Client reused across all fetches for connection
+    /// pooling and keep-alive. Initialized lazily on first fetch.
+    std_client: ?std.http.Client = null,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: ClientOptions) Client {
         var c = Client{
@@ -149,6 +152,7 @@ pub const Client = struct {
                 std.log.warn("cookie jar save to {s} failed: {s}", .{ path, @errorName(err) });
             };
         }
+        if (self.std_client) |*c| c.deinit();
         self.conns.deinit();
         self.cookies.deinit();
     }
@@ -217,12 +221,15 @@ pub const Client = struct {
         // before std.http.Client parses and returns its own error.
         const uri = std.Uri.parse(url_str) catch return FetchError.InvalidUrl;
 
-        var std_client: std.http.Client = .{
-            .allocator = self.allocator,
-            .io = self.io,
-            .read_buffer_size = self.options.max_response_header_bytes,
-        };
-        defer std_client.deinit();
+        // Lazily initialize the persistent std.http.Client for connection reuse.
+        if (self.std_client == null) {
+            self.std_client = std.http.Client{
+                .allocator = self.allocator,
+                .io = self.io,
+                .read_buffer_size = self.options.max_response_header_bytes,
+            };
+        }
+        const std_client = &self.std_client.?;
 
         var body_buf: std.Io.Writer.Allocating = .init(self.allocator);
         errdefer body_buf.deinit();
