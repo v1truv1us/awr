@@ -969,3 +969,177 @@ test "resolveRedirectUrl handles query-only and fragment-only locations" {
     defer std.testing.allocator.free(fragment);
     try std.testing.expectEqualStrings("http://a.com/dir/page.html?x=1#new", fragment);
 }
+
+// ── BoringSslPool tests ────────────────────────────────────────────────────
+//
+// These tests exercise the pool's bookkeeping (host/port matching, idle
+// timeout, request cap, release/discard) without touching real TLS. Entries
+// are manually allocated with the connection fields left undefined; tests
+// must use `cleanupBookkeepingPool` to tear down without calling TLS deinit.
+
+const BookkeepingOnlyPool = if (boringssl_fallback) struct {
+    fn makeEntry(allocator: std.mem.Allocator, host: []const u8, port: u16) !*BoringSslPool.Entry {
+        const e = try allocator.create(BoringSslPool.Entry);
+        errdefer allocator.destroy(e);
+        e.host = try allocator.dupe(u8, host);
+        e.port = port;
+        e.in_use = false;
+        e.last_used_ms = BoringSslPool.Entry.nowMs();
+        e.request_count = 0;
+        // tls/ctx/tcp_conn/reader intentionally left undefined.
+        return e;
+    }
+
+    fn cleanup(allocator: std.mem.Allocator, bs_pool: *BoringSslPool) void {
+        for (bs_pool.entries.items) |e| {
+            allocator.free(e.host);
+            allocator.destroy(e);
+        }
+        bs_pool.entries.deinit(allocator);
+    }
+} else struct {};
+
+test "BoringSslPool.acquire returns null on empty pool" {
+    if (!boringssl_fallback) return error.SkipZigTest;
+    var bs_pool = BoringSslPool{};
+    defer BookkeepingOnlyPool.cleanup(std.testing.allocator, &bs_pool);
+    try std.testing.expectEqual(@as(?*BoringSslPool.Entry, null), bs_pool.acquire("example.com", 443));
+}
+
+test "BoringSslPool.acquire matches host:port and marks in_use" {
+    if (!boringssl_fallback) return error.SkipZigTest;
+    var bs_pool = BoringSslPool{};
+    defer BookkeepingOnlyPool.cleanup(std.testing.allocator, &bs_pool);
+
+    const e = try BookkeepingOnlyPool.makeEntry(std.testing.allocator, "example.com", 443);
+    try bs_pool.add(std.testing.allocator, e);
+
+    const acquired = bs_pool.acquire("example.com", 443);
+    try std.testing.expect(acquired != null);
+    try std.testing.expectEqual(e, acquired.?);
+    try std.testing.expect(e.in_use);
+}
+
+test "BoringSslPool.acquire skips entries with mismatched host" {
+    if (!boringssl_fallback) return error.SkipZigTest;
+    var bs_pool = BoringSslPool{};
+    defer BookkeepingOnlyPool.cleanup(std.testing.allocator, &bs_pool);
+
+    const e = try BookkeepingOnlyPool.makeEntry(std.testing.allocator, "example.com", 443);
+    try bs_pool.add(std.testing.allocator, e);
+
+    try std.testing.expectEqual(@as(?*BoringSslPool.Entry, null), bs_pool.acquire("other.com", 443));
+}
+
+test "BoringSslPool.acquire skips entries with mismatched port" {
+    if (!boringssl_fallback) return error.SkipZigTest;
+    var bs_pool = BoringSslPool{};
+    defer BookkeepingOnlyPool.cleanup(std.testing.allocator, &bs_pool);
+
+    const e = try BookkeepingOnlyPool.makeEntry(std.testing.allocator, "example.com", 443);
+    try bs_pool.add(std.testing.allocator, e);
+
+    try std.testing.expectEqual(@as(?*BoringSslPool.Entry, null), bs_pool.acquire("example.com", 8443));
+}
+
+test "BoringSslPool.acquire skips entries already in use" {
+    if (!boringssl_fallback) return error.SkipZigTest;
+    var bs_pool = BoringSslPool{};
+    defer BookkeepingOnlyPool.cleanup(std.testing.allocator, &bs_pool);
+
+    const e = try BookkeepingOnlyPool.makeEntry(std.testing.allocator, "example.com", 443);
+    e.in_use = true;
+    try bs_pool.add(std.testing.allocator, e);
+
+    try std.testing.expectEqual(@as(?*BoringSslPool.Entry, null), bs_pool.acquire("example.com", 443));
+}
+
+test "BoringSslPool.acquire skips entries past IDLE_TIMEOUT_MS" {
+    if (!boringssl_fallback) return error.SkipZigTest;
+    var bs_pool = BoringSslPool{};
+    defer BookkeepingOnlyPool.cleanup(std.testing.allocator, &bs_pool);
+
+    const e = try BookkeepingOnlyPool.makeEntry(std.testing.allocator, "example.com", 443);
+    e.last_used_ms -= BoringSslPool.IDLE_TIMEOUT_MS + 1;
+    try bs_pool.add(std.testing.allocator, e);
+
+    try std.testing.expectEqual(@as(?*BoringSslPool.Entry, null), bs_pool.acquire("example.com", 443));
+}
+
+test "BoringSslPool.acquire skips entries at MAX_REQUESTS_PER_CONN" {
+    if (!boringssl_fallback) return error.SkipZigTest;
+    var bs_pool = BoringSslPool{};
+    defer BookkeepingOnlyPool.cleanup(std.testing.allocator, &bs_pool);
+
+    const e = try BookkeepingOnlyPool.makeEntry(std.testing.allocator, "example.com", 443);
+    e.request_count = BoringSslPool.MAX_REQUESTS_PER_CONN;
+    try bs_pool.add(std.testing.allocator, e);
+
+    try std.testing.expectEqual(@as(?*BoringSslPool.Entry, null), bs_pool.acquire("example.com", 443));
+}
+
+test "BoringSslPool.release makes entry available again and bumps count" {
+    if (!boringssl_fallback) return error.SkipZigTest;
+    var bs_pool = BoringSslPool{};
+    defer BookkeepingOnlyPool.cleanup(std.testing.allocator, &bs_pool);
+
+    const e = try BookkeepingOnlyPool.makeEntry(std.testing.allocator, "example.com", 443);
+    e.in_use = true;
+    try bs_pool.add(std.testing.allocator, e);
+
+    bs_pool.release(e);
+    try std.testing.expect(!e.in_use);
+    try std.testing.expectEqual(@as(u32, 1), e.request_count);
+    try std.testing.expectEqual(e, bs_pool.acquire("example.com", 443).?);
+}
+
+test "BoringSslPool.acquire is case-insensitive on host" {
+    if (!boringssl_fallback) return error.SkipZigTest;
+    var bs_pool = BoringSslPool{};
+    defer BookkeepingOnlyPool.cleanup(std.testing.allocator, &bs_pool);
+
+    const e = try BookkeepingOnlyPool.makeEntry(std.testing.allocator, "Example.COM", 443);
+    try bs_pool.add(std.testing.allocator, e);
+
+    try std.testing.expectEqual(e, bs_pool.acquire("example.com", 443).?);
+}
+
+test "BoringSslPool.countForOrigin tallies idle + in_use entries" {
+    if (!boringssl_fallback) return error.SkipZigTest;
+    var bs_pool = BoringSslPool{};
+    defer BookkeepingOnlyPool.cleanup(std.testing.allocator, &bs_pool);
+
+    const a = try BookkeepingOnlyPool.makeEntry(std.testing.allocator, "example.com", 443);
+    const b = try BookkeepingOnlyPool.makeEntry(std.testing.allocator, "example.com", 443);
+    const c = try BookkeepingOnlyPool.makeEntry(std.testing.allocator, "other.com", 443);
+    b.in_use = true;
+    try bs_pool.add(std.testing.allocator, a);
+    try bs_pool.add(std.testing.allocator, b);
+    try bs_pool.add(std.testing.allocator, c);
+
+    try std.testing.expectEqual(@as(usize, 2), bs_pool.countForOrigin("example.com", 443));
+    try std.testing.expectEqual(@as(usize, 1), bs_pool.countForOrigin("other.com", 443));
+    try std.testing.expectEqual(@as(usize, 0), bs_pool.countForOrigin("missing.com", 443));
+}
+
+test "Client.shouldSkipStdForUrl + rememberStdTlsFailure round-trip" {
+    var client = Client.init(std.testing.allocator, std.testing.io, .{});
+    defer client.deinit();
+
+    try std.testing.expect(!client.shouldSkipStdForUrl("https://news.ycombinator.com/"));
+    client.rememberStdTlsFailure("https://news.ycombinator.com/path?q=1");
+    try std.testing.expect(client.shouldSkipStdForUrl("https://news.ycombinator.com/other"));
+    try std.testing.expect(!client.shouldSkipStdForUrl("https://example.com/"));
+    // http:// URLs ignored even if host matches a recorded https failure
+    try std.testing.expect(!client.shouldSkipStdForUrl("http://news.ycombinator.com/"));
+}
+
+test "Client.rememberStdTlsFailure deduplicates same host" {
+    var client = Client.init(std.testing.allocator, std.testing.io, .{});
+    defer client.deinit();
+
+    client.rememberStdTlsFailure("https://news.ycombinator.com/a");
+    client.rememberStdTlsFailure("https://news.ycombinator.com/b");
+    client.rememberStdTlsFailure("https://news.ycombinator.com/c");
+    try std.testing.expectEqual(@as(usize, 1), client.std_tls_failed_hosts.count());
+}
