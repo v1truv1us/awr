@@ -323,6 +323,21 @@ pub const Client = struct {
             else => |e| return mapFetchError(e),
         };
 
+        // Drain any remaining transfer-encoding bytes so the body reader
+        // reaches `.ready`. `chunked + gzip` responses (e.g. Wikipedia, MDN)
+        // leave the chunked terminator unread — the decompressor stops at the
+        // gzip trailer, before the chunked `0\r\n\r\n`. Without this drain,
+        // `Request.deinit` interprets the non-`.ready` state as a partial
+        // read and marks the connection as closing instead of returning it to
+        // the pool, defeating P1's keep-alive on every same-origin
+        // sub-resource fetch (~6.5x slowdown on Wikipedia).
+        switch (req.reader.state) {
+            .body_remaining_content_length, .body_remaining_chunk_len => {
+                _ = req.reader.interface.discardRemaining() catch {};
+            },
+            else => {},
+        }
+
         var body_list = body_buf.toArrayList();
         errdefer body_list.deinit(self.allocator);
         const resp_body = try body_list.toOwnedSlice(self.allocator);

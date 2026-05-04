@@ -20,6 +20,37 @@ const bridge = @import("dom/bridge.zig");
 const render = @import("render.zig");
 const url_mod = @import("net/url.zig");
 const cookie_path = @import("util/cookie_path.zig");
+const time_util = @import("util/time.zig");
+
+/// Phase-timing probe gated on `AWR_TIMING=1`. Prints to stderr so the
+/// JSON-on-stdout contract is preserved. No allocations; safe to leave
+/// in the hot path because the env check is a single libc call resolved
+/// once at probe init.
+const TimingProbe = struct {
+    enabled: bool,
+    last_ms: i64 = 0,
+    start_ms: i64 = 0,
+
+    fn init() TimingProbe {
+        const on = std.c.getenv("AWR_TIMING") != null;
+        if (!on) return .{ .enabled = false };
+        const now = time_util.wallClockMillis();
+        return .{ .enabled = true, .last_ms = now, .start_ms = now };
+    }
+
+    fn mark(self: *TimingProbe, name: []const u8) void {
+        if (!self.enabled) return;
+        const now = time_util.wallClockMillis();
+        std.debug.print("[timing] {s}={d}ms\n", .{ name, now - self.last_ms });
+        self.last_ms = now;
+    }
+
+    fn finish(self: *TimingProbe) void {
+        if (!self.enabled) return;
+        const now = time_util.wallClockMillis();
+        std.debug.print("[timing] total={d}ms\n", .{now - self.start_ms});
+    }
+};
 
 pub const ScreenModel = render.ScreenModel;
 pub const ScreenLink = render.ScreenLink;
@@ -359,6 +390,7 @@ pub const Page = struct {
         html_src: []const u8,
     ) !PageResult {
         const gpa = self.allocator;
+        var probe = TimingProbe.init();
 
         if (self.current_doc) |*doc_ref| {
             bridge.removeDomBridge(&self.js);
@@ -375,6 +407,7 @@ pub const Page = struct {
         try self.js.reset();
         self.event_loop.reset(self.js.ctx);
         self.attachHosts();
+        probe.mark("js_reset");
 
         // Update base URL for fetch() relative resolution.
         gpa.free(self.base_url);
@@ -389,6 +422,7 @@ pub const Page = struct {
         // avoiding the cross-module cImport type-mismatch that arises when
         // html/parser.zig and dom/node.zig are imported separately.
         self.current_doc = try dom.parseDocument(gpa, html);
+        probe.mark("parse");
         errdefer {
             if (self.current_doc) |*doc_ref| {
                 doc_ref.deinit();
@@ -406,9 +440,11 @@ pub const Page = struct {
         self.setLocationFromUrl(url);
         self.setViewportGlobals();
         bridge.setDocumentReadyState(&self.js, "loading");
+        probe.mark("bridge");
 
         // ── Execute <script> tags (inline + external src=) in document order.
         if (zig_doc.htmlElement()) |root| self.executeScriptsInElement(root, url);
+        probe.mark("scripts");
 
         bridge.setDocumentReadyState(&self.js, "interactive");
         self.fireLifecycleEvent("document.dispatchEvent(new Event('readystatechange'))", "readystatechange-interactive");
@@ -421,11 +457,13 @@ pub const Page = struct {
         // Pages without pending timers exit immediately via hasPending();
         // the cap only bounds the worst case (e.g. setInterval-heavy pages).
         self.drainAll(1_000);
+        probe.mark("drain_interactive");
 
         bridge.setDocumentReadyState(&self.js, "complete");
         self.fireLifecycleEvent("document.dispatchEvent(new Event('readystatechange'))", "readystatechange-complete");
         self.fireLifecycleEvent("window.dispatchEvent(new Event('load'))", "load");
         self.drainAll(2_000);
+        probe.mark("drain_load");
 
         // ── Extract window.__awrData__ (if set by page scripts) ───────────
         const window_data: ?[]const u8 = blk: {
@@ -467,6 +505,8 @@ pub const Page = struct {
         errdefer gpa.free(body_text);
 
         const url_copy = try gpa.dupe(u8, url);
+        probe.mark("extract");
+        probe.finish();
 
         return PageResult{
             .url = url_copy,
@@ -740,22 +780,36 @@ pub const Page = struct {
         };
         defer self.allocator.free(resolved);
 
+        const timing_on = std.c.getenv("AWR_TIMING") != null;
+        const t_fetch_start = if (timing_on) time_util.wallClockMillis() else 0;
+
         const body = self.fetchExternalResource(resolved) catch |err| {
             logExternalScriptError("awr: external script fetch failed ({s}): {t}\n", .{ resolved, err });
             return;
         };
         defer self.allocator.free(body);
 
+        if (timing_on) {
+            const t_after_fetch = time_util.wallClockMillis();
+            std.debug.print("[timing]   ext_fetch={d}ms ({s} {d}B)\n", .{ t_after_fetch - t_fetch_start, resolved, body.len });
+        }
+
         if (body.len == 0) return;
         const buf = self.allocator.allocSentinel(u8, body.len, 0) catch return;
         defer self.allocator.free(buf);
         @memcpy(buf, body);
-        // QuickJS's eval wants a null-terminated filename for its stack traces;
+        // QuickJS wants a null-terminated filename for its stack traces;
         // allocate one alongside the script buffer so errors point at the URL.
         const name = self.allocator.allocSentinel(u8, resolved.len, 0) catch return;
         defer self.allocator.free(name);
         @memcpy(name, resolved);
+
+        const t_run_start = if (timing_on) time_util.wallClockMillis() else 0;
         self.js.eval(buf, name) catch {};
+        if (timing_on) {
+            const t_run_end = time_util.wallClockMillis();
+            std.debug.print("[timing]   ext_run={d}ms\n", .{t_run_end - t_run_start});
+        }
     }
 
     /// Fetch an external resource (e.g. `<script src>`) and return its body
