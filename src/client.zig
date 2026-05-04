@@ -1143,3 +1143,43 @@ test "Client.rememberStdTlsFailure deduplicates same host" {
     client.rememberStdTlsFailure("https://news.ycombinator.com/c");
     try std.testing.expectEqual(@as(usize, 1), client.std_tls_failed_hosts.count());
 }
+
+fn networkTestsEnabled() bool {
+    if (!@hasDecl(std.c, "getenv")) return false;
+    return std.c.getenv("AWR_RUN_NETWORK_TESTS") != null;
+}
+
+test "integration: BoringSSL pool reuses connection across same-origin fetches" {
+    if (!networkTestsEnabled()) return error.SkipZigTest;
+    if (!boringssl_fallback) return error.SkipZigTest;
+
+    var client = Client.init(std.testing.allocator, std.testing.io, .{});
+    defer client.deinit();
+
+    // First fetch: std attempt fails with TlsNotAvailable, BoringSSL fallback
+    // creates a fresh entry, sends, and releases it back to idle.
+    var resp1 = client.fetch("https://news.ycombinator.com/") catch |err| switch (err) {
+        FetchError.DnsResolutionFailed, FetchError.ConnectionFailed => return,
+        else => return err,
+    };
+    defer resp1.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resp1.status);
+
+    // After fetch 1: host is recorded as std-TLS-failing, and the pool has
+    // exactly one (idle) entry for HN:443 with request_count=1.
+    try std.testing.expect(client.std_tls_failed_hosts.contains("news.ycombinator.com"));
+    try std.testing.expectEqual(@as(usize, 1), client.boringssl_pool.countForOrigin("news.ycombinator.com", 443));
+    try std.testing.expectEqual(@as(u32, 1), client.boringssl_pool.entries.items[0].request_count);
+
+    // Second fetch on the same origin: should reuse the pooled connection
+    // (no new entry created) and the existing entry's request_count climbs.
+    var resp2 = client.fetch("https://news.ycombinator.com/") catch |err| switch (err) {
+        FetchError.DnsResolutionFailed, FetchError.ConnectionFailed => return,
+        else => return err,
+    };
+    defer resp2.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resp2.status);
+
+    try std.testing.expectEqual(@as(usize, 1), client.boringssl_pool.countForOrigin("news.ycombinator.com", 443));
+    try std.testing.expectEqual(@as(u32, 2), client.boringssl_pool.entries.items[0].request_count);
+}
