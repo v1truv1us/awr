@@ -303,16 +303,53 @@ pub const Page = struct {
     /// Drain microtasks + tick the event loop until both queues are empty.
     /// Caps the wait at `max_ms` wall-clock milliseconds so a runaway
     /// `setInterval` cannot wedge the test runner.
+    ///
+    /// **Timer-storm detection.** Some pages (RequireJS-style module loaders
+    /// like djangoproject.com) schedule setInterval / chained setTimeouts
+    /// that never converge — they poll for state that AWR's runtime can't
+    /// satisfy. Without intervention, drainAll burns the full wall-clock
+    /// budget on those pages even though no useful work is happening.
+    ///
+    /// We detect the storm by tracking the active-timer map size between
+    /// ticks. setInterval re-arms in place (size unchanged); a chained
+    /// setTimeout creates a new entry as the firing one is removed (also
+    /// size unchanged). Either pattern signals polling for an event that
+    /// won't arrive in our context. After
+    /// `STORM_NO_PROGRESS_TICKS` consecutive ticks with the timer count
+    /// neither dropping nor showing net new progress, we exit early.
+    /// Pages that genuinely converge (timer count drops to 0) hit the
+    /// `hasPending() == false` exit before this kicks in.
     pub fn drainAll(self: *Page, max_ms: u64) void {
         self.event_loop.loop.update_now();
         const start = self.event_loop.loop.now();
         const deadline = start +| @as(i64, @intCast(max_ms));
+
+        const STORM_NO_PROGRESS_TICKS: u8 = 8;
+        var no_progress_ticks: u8 = 0;
+        var last_count: usize = self.event_loop.timers.count();
+
         while (true) {
             self.js.drainMicrotasks();
             if (!self.event_loop.hasPending()) return;
             self.event_loop.loop.update_now();
             if (self.event_loop.loop.now() >= deadline) return;
+
+            const before_count = self.event_loop.timers.count();
             self.event_loop.tickOnce() catch return;
+            const after_count = self.event_loop.timers.count();
+
+            // "No progress" = timer count didn't shrink AND didn't drop below
+            // the running floor. setInterval re-arming holds before==after at
+            // the same value across many ticks; a setTimeout chain typically
+            // oscillates ±1. Either way, after STORM_NO_PROGRESS_TICKS of no
+            // net reduction below `last_count`, treat as a storm and exit.
+            if (after_count >= before_count and after_count >= last_count) {
+                no_progress_ticks += 1;
+                if (no_progress_ticks >= STORM_NO_PROGRESS_TICKS) return;
+            } else {
+                no_progress_ticks = 0;
+                last_count = after_count;
+            }
         }
     }
 
