@@ -220,3 +220,100 @@ whitespace and applies each term to children of the previous match-set.
 and multi-class selectors (`li.foo.bar`) are still unsupported. A durable
 fix is to swap in a real CSS-selector parser (e.g. call into lexbor's own
 selector engine) once Phase 3 work on the DOM layer lands.
+
+## HTTP fetch architecture — keep-alive on two paths
+
+AWR has *two* HTTP fetch paths and you need to keep them straight when
+debugging perf or correctness:
+
+1. **`fetchOnceStd`** — uses `std.http.Client` (Zig's pure-Zig TLS +
+   HTTP/1.1). Fast for sites whose TLS handshake the std stack can
+   complete (example.com, Wikipedia, MDN). Does **not** carry AWR's
+   Chrome-style JA4 fingerprint.
+2. **`fetchOnceBoringSslHttp1`** — uses BoringSSL via the
+   `tls_awr_shim.c` C interop, with the curated cipher/extension order
+   that produces the JA4. Falls back to here when std throws
+   `TlsNotAvailable`. This is the path that ships AWR's product value.
+
+Both paths now keep connections alive across same-origin requests, but
+via different mechanisms — and there are two non-obvious bugs that took
+the *originally landed* P1 commit (`7cdba9f`) from "expected 40-60%
+reduction" to "no measurable improvement on real sites." Document both
+so the next refactor doesn't re-introduce them.
+
+### Bug 1: chunked + gzip leaves the std reader off `.ready`
+
+`std.http.Client.Request.deinit` only releases a connection back to the
+pool when `r.reader.state == .ready`. For chunked transfer encoding,
+`.ready` is reached only when the chunked terminator (`0\r\n\r\n`) has
+been parsed.
+
+When the server responds with **chunked + gzip** (Wikipedia, MDN, HN —
+basically every modern origin), `streamRemaining` on a *decompressing*
+reader stops at the gzip trailer, before the chunked terminator. The
+underlying transfer reader stays in `.body_remaining_chunk_len`, so
+`Request.deinit` falls into the `else => true` branch, marks
+`connection.closing = true`, and the pool destroys the connection.
+
+**Fix in `fetchOnceStd`:** after `streamRemaining`, if the underlying
+reader's state is still `.body_remaining_*`, call
+`req.reader.interface.discardRemaining()` to drain the chunked
+terminator (or any leftover content-length bytes). State advances to
+`.ready` and the pool keeps the connection. See `src/client.zig`
+following `streamRemaining`.
+
+### Bug 2: every BoringSSL fetch was paying a doomed std attempt
+
+`fetchOnce` always tries `fetchOnceStd` first, falling back on
+`TlsNotAvailable`. For hosts that *will never* succeed with std (HN
+throws `TlsInitializationFailed` on every attempt), this costs ~100-160
+ms per request — a fresh TCP+TLS handshake before std gives up. That
+overhead alone wiped out most of the BoringSSL keep-alive savings.
+
+**Fix:** `Client.std_tls_failed_hosts` records hosts where std's TLS
+init has failed. `fetchOnce` checks the cache before attempting std and
+goes straight to BoringSSL on a hit. Cache lives for the Client's
+lifetime; never invalidated (a session is short enough that origins
+don't change TLS posture mid-flight).
+
+### BoringSSL pool design notes
+
+`BoringSslPool` (in `src/client.zig`, gated on `boringssl_fallback`)
+keeps `(host, port) -> *Entry` mappings, with each entry owning its
+`TcpConn + TlsCtx + TlsConn + TlsBufferedReader`.
+
+Why the reader lives **inside** the entry rather than being recreated
+per request: `TlsBufferedReader.readUntilDelimiter` can over-read past
+the line it's parsing (it pulls up to 8KB into its internal buffer at a
+time). Those buffered bytes belong to the next response's framing — if
+we drop the reader between requests, we lose them and the next response
+fails to parse. Keep the reader alive with the connection.
+
+Why HTTP/1.1 (vs the original HTTP/1.0): keep-alive is the implicit
+default in 1.1. We deliberately **omit** the `Connection: close` header
+and trust the server to leave the connection open. If the server
+responds with `Connection: close` we discard the entry instead of
+releasing it. Same behavior on hitting `MAX_REQUESTS_PER_CONN` (100,
+matching Chrome's published limit).
+
+Why per-Client (not global): no thread-safety story today, and a
+session-scoped pool is the right abstraction for a CLI browser. The
+pool is destroyed in `Client.deinit`, which closes every entry's TLS
+and TCP cleanly.
+
+### Bench-driven debug recipe
+
+`AWR_TIMING=1` on any `awr <url>` invocation prints per-phase wall-clock
+(probe in `src/page.zig`). Phases:
+
+  - `js_reset` / `parse` / `bridge` — pre-script setup
+  - `scripts` — total time inside `executeScriptsInElement`
+  - `  ext_fetch` — per-external-script HTTP fetch + body bytes
+  - `  ext_run`   — per-external-script QuickJS eval
+  - `drain_interactive` / `drain_load` — drainAll budgets
+  - `extract` — title/body/window-data extraction
+  - `total`   — sum from start of processHtml
+
+If `ext_fetch` for a same-origin sub-resource is much higher than what
+`curl --next` produces against the same URL, the connection pool is not
+reusing — check both bugs above.
