@@ -23,6 +23,109 @@ const tls_conn = if (boringssl_fallback) @import("net/tls_conn.zig") else struct
 
 pub const Url = url_mod.Url;
 
+// ── BoringSSL keep-alive connection pool ──────────────────────────────────
+//
+// AWR's std.http.Client path can't establish TLS to many large origins
+// (e.g. HN throws TlsInitializationFailed in Zig's pure-Zig TLS stack).
+// Those origins fall back to fetchOnceBoringSslHttp1, which previously
+// did a fresh DNS+TCP+TLS handshake per request and sent
+// `Connection: close` — guaranteeing a ~270ms hit on every same-origin
+// sub-resource. This pool keeps the (TCP+TLS) tuple alive across
+// requests so HTTP/1.1 keep-alive can deliver the same ~67ms warm fetch
+// the std path enjoys.
+//
+// The pool is per-Client, single-threaded (matching all current
+// fetch call sites). Constants follow Chrome's published limits.
+const BoringSslPool = if (boringssl_fallback) struct {
+    entries: std.ArrayList(*Entry) = .empty,
+
+    pub const MAX_PER_ORIGIN: usize = 6;
+    pub const MAX_REQUESTS_PER_CONN: u32 = 100;
+    pub const IDLE_TIMEOUT_MS: i64 = 30_000;
+
+    pub const Entry = struct {
+        host: []const u8,
+        port: u16,
+        ctx: tls_conn.TlsCtx,
+        tcp_conn: tcp.TcpConn,
+        tls: tls_conn.TlsConn,
+        reader: TlsBufferedReader,
+        in_use: bool,
+        last_used_ms: i64,
+        request_count: u32,
+
+        fn nowMs() i64 {
+            var ts: std.posix.timespec = undefined;
+            _ = std.posix.system.clock_gettime(.REALTIME, &ts);
+            return @as(i64, @intCast(ts.sec)) * std.time.ms_per_s +
+                @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        }
+    };
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        for (self.entries.items) |e| destroyEntry(allocator, e);
+        self.entries.deinit(allocator);
+    }
+
+    fn destroyEntry(allocator: std.mem.Allocator, e: *Entry) void {
+        e.tls.deinit();
+        e.ctx.deinit();
+        e.tcp_conn.deinit();
+        allocator.free(e.host);
+        allocator.destroy(e);
+    }
+
+    /// Find a healthy idle connection for (host, port), mark it in_use.
+    pub fn acquire(self: *@This(), host: []const u8, port: u16) ?*Entry {
+        const now = Entry.nowMs();
+        for (self.entries.items) |e| {
+            if (e.in_use) continue;
+            if (e.port != port) continue;
+            if (!std.ascii.eqlIgnoreCase(e.host, host)) continue;
+            if (now - e.last_used_ms >= IDLE_TIMEOUT_MS) continue;
+            if (e.request_count >= MAX_REQUESTS_PER_CONN) continue;
+            e.in_use = true;
+            return e;
+        }
+        return null;
+    }
+
+    /// Return entry to the idle pool (still usable for the next request).
+    pub fn release(self: *@This(), e: *Entry) void {
+        _ = self;
+        e.in_use = false;
+        e.last_used_ms = Entry.nowMs();
+        e.request_count += 1;
+    }
+
+    /// Tear down and remove an entry. Use for stale connections, server-
+    /// requested closes, or when a request fails mid-stream.
+    pub fn discard(self: *@This(), allocator: std.mem.Allocator, e: *Entry) void {
+        for (self.entries.items, 0..) |x, i| {
+            if (x == e) {
+                _ = self.entries.swapRemove(i);
+                destroyEntry(allocator, e);
+                return;
+            }
+        }
+    }
+
+    /// Total entries (idle + in_use) for an origin.
+    pub fn countForOrigin(self: *const @This(), host: []const u8, port: u16) usize {
+        var n: usize = 0;
+        for (self.entries.items) |e| {
+            if (e.port == port and std.ascii.eqlIgnoreCase(e.host, host)) n += 1;
+        }
+        return n;
+    }
+
+    pub fn add(self: *@This(), allocator: std.mem.Allocator, e: *Entry) !void {
+        try self.entries.append(allocator, e);
+    }
+} else struct {
+    pub fn deinit(_: *@This(), _: std.mem.Allocator) void {}
+};
+
 // ── Request shape ─────────────────────────────────────────────────────────
 
 pub const Method = enum { GET, POST };
@@ -129,6 +232,17 @@ pub const Client = struct {
     /// Persistent std.http.Client reused across all fetches for connection
     /// pooling and keep-alive. Initialized lazily on first fetch.
     std_client: ?std.http.Client = null,
+    /// Per-origin pool of live TCP+TLS connections used by the BoringSSL
+    /// fallback path. Lives only on platforms where boringssl_fallback is
+    /// active; an empty stub elsewhere.
+    boringssl_pool: BoringSslPool = .{},
+    /// Hosts where `fetchOnceStd` has already returned `TlsNotAvailable`.
+    /// On subsequent requests we skip the std attempt (which costs ~100-160ms
+    /// on a fresh TCP+TLS handshake before failing) and go straight to
+    /// `fetchOnceBoringSslHttp1`. Hosts are duped on first failure and freed
+    /// in `Client.deinit`. Bounded by the number of distinct origins a
+    /// session visits — fine for an MVP browse session.
+    std_tls_failed_hosts: std.StringHashMapUnmanaged(void) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: ClientOptions) Client {
         var c = Client{
@@ -153,6 +267,10 @@ pub const Client = struct {
             };
         }
         if (self.std_client) |*c| c.deinit();
+        self.boringssl_pool.deinit(self.allocator);
+        var key_it = self.std_tls_failed_hosts.keyIterator();
+        while (key_it.next()) |k| self.allocator.free(k.*);
+        self.std_tls_failed_hosts.deinit(self.allocator);
         self.conns.deinit();
         self.cookies.deinit();
     }
@@ -207,12 +325,47 @@ pub const Client = struct {
     }
 
     fn fetchOnce(self: *Client, url_str: []const u8, method: Method, body: ?[]const u8) anyerror!Response {
+        // Skip the std attempt for hosts where its TLS stack has already
+        // failed once. Without this cache, every same-host fetch pays the
+        // full TCP+TLS handshake on the std side (~100-160ms) before falling
+        // back to BoringSSL — wiping out most of the keep-alive savings.
+        if (self.shouldSkipStdForUrl(url_str)) {
+            if (boringsslFallbackAllowed(url_str)) {
+                return self.fetchOnceBoringSslHttp1(url_str, method, body) catch |e| return mapFetchError(e);
+            }
+        }
+
         return self.fetchOnceStd(url_str, method, body) catch |err| switch (err) {
-            FetchError.TlsNotAvailable => if (boringsslFallbackAllowed(url_str))
-                self.fetchOnceBoringSslHttp1(url_str, method, body) catch |fallback_err| return mapFetchError(fallback_err)
-            else
-                return err,
+            FetchError.TlsNotAvailable => {
+                self.rememberStdTlsFailure(url_str);
+                return if (boringsslFallbackAllowed(url_str))
+                    self.fetchOnceBoringSslHttp1(url_str, method, body) catch |fallback_err| return mapFetchError(fallback_err)
+                else
+                    err;
+            },
             else => return err,
+        };
+    }
+
+    /// Returns true if a previous `fetchOnceStd` call to this URL's host
+    /// returned `TlsNotAvailable`. Only meaningful for https:// URLs.
+    fn shouldSkipStdForUrl(self: *const Client, url_str: []const u8) bool {
+        const u = url_mod.Url.parse(url_str) catch return false;
+        if (!u.is_https) return false;
+        return self.std_tls_failed_hosts.contains(u.host);
+    }
+
+    /// Record that std's TLS stack failed for this URL's host so future
+    /// requests skip straight to the BoringSSL path. No-op on non-https
+    /// or already-recorded hosts. Allocation failure here is non-fatal — the
+    /// next request just pays the std-attempt cost again.
+    fn rememberStdTlsFailure(self: *Client, url_str: []const u8) void {
+        const u = url_mod.Url.parse(url_str) catch return;
+        if (!u.is_https) return;
+        if (self.std_tls_failed_hosts.contains(u.host)) return;
+        const host_owned = self.allocator.dupe(u8, u.host) catch return;
+        self.std_tls_failed_hosts.put(self.allocator, host_owned, {}) catch {
+            self.allocator.free(host_owned);
         };
     }
 
@@ -358,23 +511,89 @@ pub const Client = struct {
         const u = url_mod.Url.parse(url_str) catch return FetchError.InvalidUrl;
         if (!u.is_https) return FetchError.InvalidUrl;
 
-        const addr = dns.resolve(self.io, u.host, u.port) catch |err| return mapFetchError(err);
-        var tcp_conn = tcp.TcpConn.init(self.allocator, addr) catch return FetchError.ConnectionFailed;
-        defer tcp_conn.deinit();
-        tcp_conn.connect() catch |err| return mapFetchError(err);
+        // Try a pooled idle connection first. On any failure (server closed
+        // the connection during idle, RST, framing error mid-response), drop
+        // the entry and fall through to a fresh handshake. We do not retry
+        // pooled-then-fresh blindly across arbitrary error classes — only when
+        // the *first* request on a pooled connection failed before any
+        // application-level response framing.
+        if (self.boringssl_pool.acquire(u.host, u.port)) |entry| {
+            if (self.sendOnBoringSslEntry(entry, &u, url_str, method, body)) |resp| {
+                self.maybeReleaseBoringSsl(entry, &resp);
+                return resp;
+            } else |_| {
+                self.boringssl_pool.discard(self.allocator, entry);
+                // fall through to fresh handshake
+            }
+        }
 
-        var ctx = tls_conn.initCompatHttp11WithBundle() catch return FetchError.TlsNotAvailable;
-        defer ctx.deinit();
+        // Fresh handshake. The errdefer covers: send failure, response parse
+        // failure, allocation failure between handshake and Response return.
+        const entry = try self.createBoringSslEntry(&u);
+        errdefer self.boringssl_pool.discard(self.allocator, entry);
+
+        const resp = try self.sendOnBoringSslEntry(entry, &u, url_str, method, body);
+        self.maybeReleaseBoringSsl(entry, &resp);
+        return resp;
+    }
+
+    /// Allocate, handshake, and register a new pool entry for `u`. The entry
+    /// is added to the pool with `in_use=true` so a concurrent acquire would
+    /// not steal it (single-threaded today, but the invariant matters).
+    fn createBoringSslEntry(self: *Client, u: *const Url) anyerror!*BoringSslPool.Entry {
+        if (!boringssl_fallback) return FetchError.TlsNotAvailable;
+
+        const addr = dns.resolve(self.io, u.host, u.port) catch |err| return mapFetchError(err);
+
+        const entry = try self.allocator.create(BoringSslPool.Entry);
+        errdefer self.allocator.destroy(entry);
+
+        entry.host = try self.allocator.dupe(u8, u.host);
+        errdefer self.allocator.free(entry.host);
+
+        entry.port = u.port;
+        entry.in_use = true;
+        entry.last_used_ms = BoringSslPool.Entry.nowMs();
+        entry.request_count = 0;
+
+        entry.tcp_conn = tcp.TcpConn.init(self.allocator, addr) catch return FetchError.ConnectionFailed;
+        errdefer entry.tcp_conn.deinit();
+        entry.tcp_conn.connect() catch |err| return mapFetchError(err);
+
+        entry.ctx = tls_conn.initCompatHttp11WithBundle() catch return FetchError.TlsNotAvailable;
+        errdefer entry.ctx.deinit();
 
         const hostname_z = try self.allocator.dupeZ(u8, u.host);
         defer self.allocator.free(hostname_z);
 
-        var tls = tls_conn.TlsConn.connectNoAlps(&ctx, tcp_conn.socket.?.fd, hostname_z.ptr) catch return FetchError.TlsNotAvailable;
-        defer tls.deinit();
+        entry.tls = tls_conn.TlsConn.connectNoAlps(&entry.ctx, entry.tcp_conn.socket.?.fd, hostname_z.ptr) catch return FetchError.TlsNotAvailable;
+        errdefer entry.tls.deinit();
 
-        const host_header = try hostHeader(self.allocator, &u);
+        // Reader buffers across requests on this connection so any bytes
+        // over-read past the previous response (rare with strict framing,
+        // but possible) survive into the next request's readUntilDelimiter.
+        entry.reader = .{ .conn = &entry.tls };
+
+        try self.boringssl_pool.add(self.allocator, entry);
+        return entry;
+    }
+
+    /// Send one request on `entry` and read the response. Caller decides via
+    /// `maybeReleaseBoringSsl` whether to keep or discard the entry based on
+    /// the response's `Connection` header and request count.
+    fn sendOnBoringSslEntry(
+        self: *Client,
+        entry: *BoringSslPool.Entry,
+        u: *const Url,
+        url_str: []const u8,
+        method: Method,
+        body: ?[]const u8,
+    ) anyerror!Response {
+        if (!boringssl_fallback) return FetchError.TlsNotAvailable;
+
+        const host_header = try hostHeader(self.allocator, u);
         defer self.allocator.free(host_header);
-        const path = try pathWithQueryAlloc(self.allocator, &u);
+        const path = try pathWithQueryAlloc(self.allocator, u);
         defer self.allocator.free(path);
 
         const method_str: []const u8 = switch (method) {
@@ -384,13 +603,14 @@ pub const Client = struct {
 
         var req_buf: std.Io.Writer.Allocating = .init(self.allocator);
         defer req_buf.deinit();
-        try req_buf.writer.print("{s} {s} HTTP/1.0\r\n", .{ method_str, path });
+        // HTTP/1.1 — keep-alive by default. No `Connection: close` so the
+        // server is willing to leave the connection open after the response.
+        try req_buf.writer.print("{s} {s} HTTP/1.1\r\n", .{ method_str, path });
         try req_buf.writer.print("Host: {s}\r\n", .{host_header});
         try req_buf.writer.print("User-Agent: {s}\r\n", .{effectiveUserAgent(self.options)});
         try req_buf.writer.writeAll("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n");
         try req_buf.writer.writeAll("Accept-Language: en-US,en;q=0.9\r\n");
         try req_buf.writer.writeAll("Accept-Encoding: identity\r\n");
-        try req_buf.writer.writeAll("Connection: close\r\n");
         if (method == .POST) {
             const body_bytes = body orelse "";
             try req_buf.writer.writeAll("Content-Type: application/x-www-form-urlencoded\r\n");
@@ -400,10 +620,9 @@ pub const Client = struct {
         } else {
             try req_buf.writer.writeAll("\r\n");
         }
-        try writeAllTls(&tls, req_buf.written());
+        try writeAllTls(&entry.tls, req_buf.written());
 
-        var reader = TlsBufferedReader{ .conn = &tls };
-        var parsed = try http1.readResponse(&reader, self.allocator);
+        var parsed = try http1.readResponse(&entry.reader, self.allocator);
         errdefer parsed.deinit();
 
         const effective_url = try self.allocator.dupe(u8, url_str);
@@ -416,6 +635,27 @@ pub const Client = struct {
             .body = parsed.body,
             .allocator = self.allocator,
         };
+    }
+
+    /// Either return the entry to the idle pool (server willing to keep
+    /// going) or discard it (server sent `Connection: close`, or we hit the
+    /// per-connection request cap).
+    fn maybeReleaseBoringSsl(self: *Client, entry: *BoringSslPool.Entry, resp: *const Response) void {
+        if (!boringssl_fallback) return;
+
+        const close_requested = blk: {
+            if (resp.headers.get("connection")) |c| {
+                const trimmed = std.mem.trim(u8, c, " \t");
+                if (std.ascii.eqlIgnoreCase(trimmed, "close")) break :blk true;
+            }
+            break :blk false;
+        };
+
+        if (close_requested or entry.request_count + 1 >= BoringSslPool.MAX_REQUESTS_PER_CONN) {
+            self.boringssl_pool.discard(self.allocator, entry);
+        } else {
+            self.boringssl_pool.release(entry);
+        }
     }
 };
 
