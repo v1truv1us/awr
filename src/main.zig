@@ -6,6 +6,17 @@ const browser_mod = @import("browser.zig");
 const image_protocol = @import("image_protocol");
 const image_pipeline = @import("image_pipeline");
 
+/// Wall-clock millis without the `Io` capability detour. See
+/// `src/util/time.zig` for the rationale; this duplicate avoids
+/// re-importing the file from main (which would create a module
+/// conflict with `page`'s import).
+fn nowMs() i64 {
+    var ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.REALTIME, &ts);
+    return @as(i64, @intCast(ts.sec)) * std.time.ms_per_s +
+        @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+}
+
 fn writeJsonStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
     try list.append(alloc, '"');
     for (s) |c| {
@@ -327,14 +338,21 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
 
     // Default: treat arg as a URL/path and print the full JSON envelope.
     const url = args[1];
+    const timing_on = std.c.getenv("AWR_TIMING") != null;
+    const t_startup_done = if (timing_on) nowMs() else 0;
     var p = try page_mod.Page.init(alloc, io);
     defer p.deinit();
+    if (timing_on) {
+        const elapsed = nowMs() - t_startup_done;
+        std.debug.print("[timing] page_init={d}ms\n", .{elapsed});
+    }
 
     var result = loadPage(&p, alloc, io, url) catch |err| {
         fatalLoadError("fetching", url, err);
     };
     defer result.deinit();
 
+    const t_render_start = if (timing_on) nowMs() else 0;
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
 
@@ -355,6 +373,10 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     try buf.appendSlice(alloc, "}\n");
 
     try stdoutWrite(io, buf.items);
+    if (timing_on) {
+        const elapsed = nowMs() - t_render_start;
+        std.debug.print("[timing] json_emit={d}ms ({d}B)\n", .{ elapsed, buf.items.len });
+    }
 }
 
 test "isFailedCallEnvelope detects {ok:false}" {

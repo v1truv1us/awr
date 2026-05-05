@@ -509,8 +509,14 @@ pub const Page = struct {
     /// Fetch `url`, parse the HTML, execute inline <script> tags, and return
     /// the post-JS document state.  Caller must call result.deinit().
     pub fn navigate(self: *Page, url: []const u8) !PageResult {
+        const timing_on = std.c.getenv("AWR_TIMING") != null;
+        const t_fetch_start = if (timing_on) time_util.wallClockMillis() else 0;
         var resp = try self.client.fetch(url);
         defer resp.deinit();
+        if (timing_on) {
+            const elapsed = time_util.wallClockMillis() - t_fetch_start;
+            std.debug.print("[timing] navigate_fetch={d}ms ({d}B)\n", .{ elapsed, resp.body.len });
+        }
         return self.processHtml(resp.url, resp.status, resp.body);
     }
 
