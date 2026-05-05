@@ -59,6 +59,157 @@ pub const ImageLookup = render.ImageLookup;
 pub const RenderOptions = render.RenderOptions;
 pub const Element = dom.Element;
 
+// ── Parallel external-script prefetch ─────────────────────────────────────
+//
+// Github-class pages have 50-100 external `<script src>` tags. With
+// keep-alive each fetch is ~25ms, but 100-in-series is 2.5s of pure
+// RTT. This subsystem walks the DOM up front, collects unique external
+// URLs in document order, and fetches them concurrently with a small
+// thread pool. `executeScriptsInElement` then pulls each script's body
+// from the cache, preserving document-order eval semantics while
+// overlapping the network. Cache misses fall back to a direct fetch
+// on the main Client.
+//
+// **Cookie limitation.** Each worker has its own `Client` (and therefore
+// its own connection pool, cookie jar, and std-TLS-fail cache). Cookies
+// set by `Set-Cookie` headers on script responses do NOT propagate to
+// the main Client. Acceptable for static page rendering; revisit if a
+// real auth-gated subresource scenario appears.
+
+const PREFETCH_WORKER_COUNT: usize = 6;
+/// Below this URL count the orchestration cost outweighs the benefit;
+/// fall back to sequential fetching via the existing main-Client path.
+const PREFETCH_MIN_URLS: usize = 4;
+
+/// Atomic spin-lock for the prefetch cache. Workers process disjoint URL
+/// strides, so the only contention is on StringHashMap internals (rehashing
+/// on growth). A handful of cache.put calls × 6 workers = microseconds of
+/// total wait — a real Mutex's syscall overhead would dominate.
+const SpinLock = struct {
+    state: std.atomic.Value(u8) = .init(0),
+
+    fn lock(self: *SpinLock) void {
+        while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic)) |_| {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    fn unlock(self: *SpinLock) void {
+        self.state.store(0, .release);
+    }
+};
+
+const ScriptPrefetchCache = struct {
+    map: std.StringHashMapUnmanaged([]const u8) = .empty,
+    mutex: SpinLock = .{},
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *ScriptPrefetchCache) void {
+        var it = self.map.iterator();
+        while (it.next()) |kv| {
+            self.allocator.free(kv.key_ptr.*);
+            self.allocator.free(kv.value_ptr.*);
+        }
+        self.map.deinit(self.allocator);
+    }
+
+    fn put(self: *ScriptPrefetchCache, url: []const u8, body: []const u8) !void {
+        const url_copy = try self.allocator.dupe(u8, url);
+        errdefer self.allocator.free(url_copy);
+        const body_copy = try self.allocator.dupe(u8, body);
+        errdefer self.allocator.free(body_copy);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        // If two workers race on the same URL (shouldn't happen — workers
+        // process disjoint strides — but defend anyway), the first write
+        // wins and we drop the duplicate.
+        const gop = try self.map.getOrPut(self.allocator, url_copy);
+        if (gop.found_existing) {
+            self.allocator.free(url_copy);
+            self.allocator.free(body_copy);
+            return;
+        }
+        gop.value_ptr.* = body_copy;
+    }
+
+    fn get(self: *ScriptPrefetchCache, url: []const u8) ?[]const u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.map.get(url);
+    }
+};
+
+const PrefetchWorker = struct {
+    allocator: std.mem.Allocator,
+    options: client.ClientOptions,
+    urls: []const []const u8,
+    start: usize,
+    stride: usize,
+    cache: *ScriptPrefetchCache,
+};
+
+fn prefetchWorkerMain(ctx: PrefetchWorker) void {
+    // Each worker owns its own Threaded I/O capability. Sharing the
+    // parent Page.io across threads triggered ISCONN panics inside
+    // std.Io.Threaded.groupAsync (happy-eyeballs DNS races on shared
+    // task scheduler state). Per-worker Threaded instances are
+    // independent and cheap (no extra threads spawned until used).
+    var threaded: std.Io.Threaded = .init(ctx.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var c = client.Client.init(ctx.allocator, io, ctx.options);
+    defer c.deinit();
+
+    var i = ctx.start;
+    while (i < ctx.urls.len) : (i += ctx.stride) {
+        const url = ctx.urls[i];
+        var resp = c.fetch(url) catch continue;
+        defer resp.deinit();
+        // Only cache 2xx successes — 4xx/5xx bodies aren't useful as
+        // script source and would just confuse runExternalScript's eval.
+        if (resp.status < 200 or resp.status >= 300) continue;
+        ctx.cache.put(url, resp.body) catch continue;
+    }
+}
+
+fn collectExternalScriptUrls(
+    allocator: std.mem.Allocator,
+    elem: *const dom.Element,
+    page_url: []const u8,
+    out: *std.ArrayList([]const u8),
+    seen: *std.StringHashMapUnmanaged(void),
+) !void {
+    if (std.ascii.eqlIgnoreCase(elem.tag, "script")) {
+        if (elem.getAttribute("src")) |raw_src| {
+            const trimmed = std.mem.trim(u8, raw_src, " \t\r\n");
+            if (trimmed.len == 0) return;
+            const resolved = resolveUrlAlloc(allocator, page_url, trimmed) catch return;
+            errdefer allocator.free(resolved);
+
+            // Only http/https; skip file://, data:, etc.
+            if (!std.mem.startsWith(u8, resolved, "http://") and
+                !std.mem.startsWith(u8, resolved, "https://"))
+            {
+                allocator.free(resolved);
+                return;
+            }
+
+            const dedup = try seen.getOrPut(allocator, resolved);
+            if (dedup.found_existing) {
+                allocator.free(resolved);
+                return;
+            }
+            try out.append(allocator, resolved);
+        }
+        return; // do not recurse into <script> body
+    }
+    for (elem.children.items) |child| {
+        if (child == .element) try collectExternalScriptUrls(allocator, child.element, page_url, out, seen);
+    }
+}
+
 // ── PageResult ────────────────────────────────────────────────────────────
 
 /// Result of a Page.navigate() or Page.processHtml() call.
@@ -479,8 +630,19 @@ pub const Page = struct {
         bridge.setDocumentReadyState(&self.js, "loading");
         probe.mark("bridge");
 
+        // ── Pre-fetch external scripts in parallel ────────────────────────
+        // Pages with many same-origin scripts (github, go.dev) win big from
+        // overlapping the network. The cache lives until processHtml returns;
+        // executeScriptsInElement consults it, falls back on miss.
+        var prefetch_cache: ScriptPrefetchCache = .{ .allocator = gpa };
+        defer prefetch_cache.deinit();
+        if (zig_doc.htmlElement()) |root| {
+            self.prefetchExternalScripts(&prefetch_cache, root, url) catch {};
+        }
+        probe.mark("prefetch");
+
         // ── Execute <script> tags (inline + external src=) in document order.
-        if (zig_doc.htmlElement()) |root| self.executeScriptsInElement(root, url);
+        if (zig_doc.htmlElement()) |root| self.executeScriptsInElement(root, url, &prefetch_cache);
         probe.mark("scripts");
 
         bridge.setDocumentReadyState(&self.js, "interactive");
@@ -778,21 +940,73 @@ pub const Page = struct {
     /// with browser semantics where a failed subresource does not halt
     /// page loading. Recursion stops at the `<script>` node (its children
     /// are the source, not further DOM to scan).
+    /// Walk the DOM, collect every unique http(s) external script URL in
+    /// document order, then fan out to a thread pool that fetches them in
+    /// parallel into `cache`. Returns when all workers join. Errors during
+    /// individual fetches are swallowed — runExternalScript falls back to
+    /// a direct fetch on cache miss.
+    fn prefetchExternalScripts(
+        self: *Page,
+        cache: *ScriptPrefetchCache,
+        root: *const dom.Element,
+        page_url: []const u8,
+    ) !void {
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        defer seen.deinit(self.allocator);
+
+        var urls: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (urls.items) |u| self.allocator.free(u);
+            urls.deinit(self.allocator);
+        }
+
+        try collectExternalScriptUrls(self.allocator, root, page_url, &urls, &seen);
+        if (urls.items.len < PREFETCH_MIN_URLS) return;
+
+        const n = @min(PREFETCH_WORKER_COUNT, urls.items.len);
+
+        // Strip cookie persistence from worker options — only the main
+        // Client owns the on-disk jar, and concurrent file writes from
+        // multiple Clients would race.
+        var worker_options = self.client.options;
+        worker_options.persist_cookies = false;
+        worker_options.cookie_jar_path = null;
+
+        var threads: [PREFETCH_WORKER_COUNT]std.Thread = undefined;
+        var ctxs: [PREFETCH_WORKER_COUNT]PrefetchWorker = undefined;
+        var spawned: usize = 0;
+
+        for (0..n) |i| {
+            ctxs[i] = .{
+                .allocator = self.allocator,
+                .options = worker_options,
+                .urls = urls.items,
+                .start = i,
+                .stride = n,
+                .cache = cache,
+            };
+            threads[i] = std.Thread.spawn(.{}, prefetchWorkerMain, .{ctxs[i]}) catch break;
+            spawned = i + 1;
+        }
+        for (0..spawned) |i| threads[i].join();
+    }
+
     fn executeScriptsInElement(
         self: *Page,
         elem: *const dom.Element,
         page_url: []const u8,
+        cache: ?*ScriptPrefetchCache,
     ) void {
         if (std.ascii.eqlIgnoreCase(elem.tag, "script")) {
             if (elem.getAttribute("src")) |raw_src| {
-                self.runExternalScript(page_url, raw_src);
+                self.runExternalScript(page_url, raw_src, cache);
             } else {
                 self.runInlineScript(elem);
             }
             return;
         }
         for (elem.children.items) |child| {
-            if (child == .element) self.executeScriptsInElement(child.element, page_url);
+            if (child == .element) self.executeScriptsInElement(child.element, page_url, cache);
         }
     }
 
@@ -807,7 +1021,12 @@ pub const Page = struct {
         self.js.eval(buf, "<inline-script>") catch {};
     }
 
-    fn runExternalScript(self: *Page, page_url: []const u8, raw_src: []const u8) void {
+    fn runExternalScript(
+        self: *Page,
+        page_url: []const u8,
+        raw_src: []const u8,
+        cache: ?*ScriptPrefetchCache,
+    ) void {
         const trimmed_src = std.mem.trim(u8, raw_src, " \t\r\n");
         if (trimmed_src.len == 0) return;
 
@@ -820,15 +1039,34 @@ pub const Page = struct {
         const timing_on = std.c.getenv("AWR_TIMING") != null;
         const t_fetch_start = if (timing_on) time_util.wallClockMillis() else 0;
 
-        const body = self.fetchExternalResource(resolved) catch |err| {
-            logExternalScriptError("awr: external script fetch failed ({s}): {t}\n", .{ resolved, err });
-            return;
-        };
-        defer self.allocator.free(body);
+        // Try prefetch cache first; fall back to direct fetch on miss. The
+        // cache stores allocator-owned bodies that live until processHtml
+        // returns, so we borrow rather than dupe here.
+        var body: []const u8 = undefined;
+        var body_owned = false;
+        if (cache) |c| {
+            if (c.get(resolved)) |cached| {
+                body = cached;
+            } else {
+                body = self.fetchExternalResource(resolved) catch |err| {
+                    logExternalScriptError("awr: external script fetch failed ({s}): {t}\n", .{ resolved, err });
+                    return;
+                };
+                body_owned = true;
+            }
+        } else {
+            body = self.fetchExternalResource(resolved) catch |err| {
+                logExternalScriptError("awr: external script fetch failed ({s}): {t}\n", .{ resolved, err });
+                return;
+            };
+            body_owned = true;
+        }
+        defer if (body_owned) self.allocator.free(body);
 
         if (timing_on) {
             const t_after_fetch = time_util.wallClockMillis();
-            std.debug.print("[timing]   ext_fetch={d}ms ({s} {d}B)\n", .{ t_after_fetch - t_fetch_start, resolved, body.len });
+            const tag: []const u8 = if (body_owned) "ext_fetch" else "ext_cache";
+            std.debug.print("[timing]   {s}={d}ms ({s} {d}B)\n", .{ tag, t_after_fetch - t_fetch_start, resolved, body.len });
         }
 
         if (body.len == 0) return;

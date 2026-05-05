@@ -307,8 +307,10 @@ and TCP cleanly.
 (probe in `src/page.zig`). Phases:
 
   - `js_reset` / `parse` / `bridge` — pre-script setup
+  - `prefetch` — total time inside `prefetchExternalScripts` (worker pool)
   - `scripts` — total time inside `executeScriptsInElement`
-  - `  ext_fetch` — per-external-script HTTP fetch + body bytes
+  - `  ext_cache` — per-script body served from prefetch cache (≈0ms)
+  - `  ext_fetch` — per-script body fetched on the main Client (cache miss)
   - `  ext_run`   — per-external-script QuickJS eval
   - `drain_interactive` / `drain_load` — drainAll budgets
   - `extract` — title/body/window-data extraction
@@ -317,3 +319,50 @@ and TCP cleanly.
 If `ext_fetch` for a same-origin sub-resource is much higher than what
 `curl --next` produces against the same URL, the connection pool is not
 reusing — check both bugs above.
+
+If `prefetch` is high but every `ext_cache` shows 0ms, that's the
+expected pattern: the worker pool paid the network cost up front so
+the main thread can stream-eval scripts in document order without
+blocking on I/O.
+
+## Parallel script prefetch — `ScriptPrefetchCache`
+
+For pages with many same-origin `<script src>` tags (github, go.dev),
+serial fetching dominates total time even with keep-alive: 60 scripts
+× ~25ms RTT = 1.5s of pure round-trips. The prefetch subsystem
+(`src/page.zig`) walks the DOM up front, collects unique URLs in
+document order, and fans them out to a small worker pool that fills a
+shared cache. `runExternalScript` reads from the cache and falls back
+to a direct fetch on miss — preserving document-order eval semantics
+while overlapping the network.
+
+### Why per-worker `std.Io.Threaded`
+
+The first cut shared one `Io` capability (`Page.io`) across worker
+threads. That panicked inside `std.Io.Threaded.posixConnect` with
+`syscall error: ISCONN` — `groupAsync`'s happy-eyeballs DNS scheduler
+holds shared task state and isn't reentrant from multiple OS threads.
+The fix: each worker calls `std.Io.Threaded.init(allocator, .{})` and
+gets its own `Io`. Threaded's `argv0`/`environ` defaults of `.empty`
+are fine — those only matter for `processSpawn` and OpenBSD/Haiku
+`processExecutablePath`.
+
+### Why a `SpinLock` instead of `std.Thread.Mutex`
+
+Workers process disjoint URL strides, so cache contention is rare —
+typically just `StringHashMap`'s rehash-on-growth. With ~6 workers and
+microsecond-scale critical sections, a syscall-free atomic spin lock
+beats a Mutex's wakeup overhead. Plus: `std.Thread.Mutex` doesn't
+exist in Zig 0.16 (moved to `std.Io.Mutex`, which would need an `Io`
+capability we don't want to thread through). The `SpinLock` is 9
+lines, uses `std.atomic.Value(u8).cmpxchgWeak`, and is correct under
+the workload (no priority inversion, no long holds).
+
+### Cookie limitation
+
+Each worker has its own `Client` and therefore its own cookie jar.
+`Set-Cookie` headers from script responses do **not** propagate to the
+main `Client`. Workers also have `persist_cookies = false` forced —
+concurrent file writes to one jar would race. Acceptable for static
+page rendering; revisit if a real auth-gated subresource scenario
+appears.
