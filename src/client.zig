@@ -164,6 +164,13 @@ pub const ClientOptions = struct {
     /// owns `cookie_jar_path`; Client borrows the slice.
     persist_cookies: bool = false,
     cookie_jar_path: ?[]const u8 = null,
+    /// When non-null, Client.init reads the cached `std_tls_failed_hosts`
+    /// list from disk on startup and Client.deinit writes it back. The
+    /// cache lets subsequent CLI invocations skip the doomed
+    /// `fetchOnceStd` attempt for hosts where the std TLS stack always
+    /// fails (~100-160ms saved per cold fetch to a known-failing host).
+    /// Caller owns the slice; Client borrows it.
+    tls_fail_cache_path: ?[]const u8 = null,
 };
 
 // ── Response ──────────────────────────────────────────────────────────────
@@ -229,6 +236,80 @@ fn saveCookiesToDisk(jar: *const cookie.CookieJar, io: std.Io, path: []const u8)
     try file.writeStreamingAll(io, aw.written());
 }
 
+// ── std-TLS-fail cache persistence ────────────────────────────────────────
+//
+// Hosts where std.http.Client's TLS stack fails get cached so subsequent
+// process invocations skip the doomed attempt (~100-160ms saved per cold
+// fetch). Format: one host per line, ASCII, no metadata. Comment lines
+// starting with `#` are ignored. Hostnames are validated as ASCII +
+// digits + `.-` to defend against a corrupted/attacker-controlled cache
+// file injecting whitespace or paths into the in-memory hash.
+
+const TLS_FAIL_CACHE_MAX_BYTES: usize = 64 * 1024;
+
+fn loadTlsFailCacheFromDisk(
+    set: *std.StringHashMapUnmanaged(void),
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+) !void {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(TLS_FAIL_CACHE_MAX_BYTES)) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer allocator.free(bytes);
+
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    while (it.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r");
+        if (line.len == 0) continue;
+        if (line[0] == '#') continue;
+        if (!isValidHost(line)) continue;
+        if (set.contains(line)) continue;
+        const host = try allocator.dupe(u8, line);
+        errdefer allocator.free(host);
+        try set.put(allocator, host, {});
+    }
+}
+
+fn saveTlsFailCacheToDisk(
+    set: *const std.StringHashMapUnmanaged(void),
+    io: std.Io,
+    path: []const u8,
+) !void {
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{
+        .truncate = true,
+        .permissions = .fromMode(0o644),
+    });
+    defer file.close(io);
+
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.writeAll("# AWR std-TLS fail cache. Hosts that fail std.http.Client's TLS handshake.\n");
+    try file.writeStreamingAll(io, w.buffered());
+
+    var key_it = set.keyIterator();
+    while (key_it.next()) |k| {
+        const host = k.*;
+        if (!isValidHost(host)) continue;
+        var line_buf: [256]u8 = undefined;
+        if (host.len + 1 > line_buf.len) continue;
+        @memcpy(line_buf[0..host.len], host);
+        line_buf[host.len] = '\n';
+        try file.writeStreamingAll(io, line_buf[0 .. host.len + 1]);
+    }
+}
+
+fn isValidHost(s: []const u8) bool {
+    if (s.len == 0 or s.len > 253) return false;
+    for (s) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '.' or c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
 // ── Client ────────────────────────────────────────────────────────────────
 
 pub const Client = struct {
@@ -272,6 +353,11 @@ pub const Client = struct {
                 std.log.warn("cookie jar load from {s} failed: {s}", .{ path, @errorName(err) });
             };
         }
+        if (options.tls_fail_cache_path) |path| {
+            loadTlsFailCacheFromDisk(&c.std_tls_failed_hosts, allocator, io, path) catch |err| {
+                std.log.warn("tls-fail cache load from {s} failed: {s}", .{ path, @errorName(err) });
+            };
+        }
         return c;
     }
 
@@ -279,6 +365,11 @@ pub const Client = struct {
         if (self.options.persist_cookies) {
             if (self.options.cookie_jar_path) |path| saveCookiesToDisk(&self.cookies, self.io, path) catch |err| {
                 std.log.warn("cookie jar save to {s} failed: {s}", .{ path, @errorName(err) });
+            };
+        }
+        if (self.options.tls_fail_cache_path) |path| {
+            saveTlsFailCacheToDisk(&self.std_tls_failed_hosts, self.io, path) catch |err| {
+                std.log.warn("tls-fail cache save to {s} failed: {s}", .{ path, @errorName(err) });
             };
         }
         if (self.std_client) |*c| c.deinit();
@@ -353,8 +444,15 @@ pub const Client = struct {
             }
         }
 
+        const timing_on = std.c.getenv("AWR_TIMING") != null;
+        const std_start_ms = if (timing_on) nowMsForTiming() else 0;
+
         return self.fetchOnceStd(url_str, method, body) catch |err| switch (err) {
             FetchError.TlsNotAvailable => {
+                if (timing_on) {
+                    const elapsed = nowMsForTiming() - std_start_ms;
+                    std.debug.print("[timing]   doomed_std_tls={d}ms ({s})\n", .{ elapsed, url_str });
+                }
                 self.rememberStdTlsFailure(url_str);
                 return if (boringsslFallbackAllowed(url_str))
                     self.fetchOnceBoringSslHttp1(url_str, method, body) catch |fallback_err| return mapFetchError(fallback_err)
@@ -363,6 +461,13 @@ pub const Client = struct {
             },
             else => return err,
         };
+    }
+
+    fn nowMsForTiming() i64 {
+        var ts: std.posix.timespec = undefined;
+        _ = std.posix.system.clock_gettime(.REALTIME, &ts);
+        return @as(i64, @intCast(ts.sec)) * std.time.ms_per_s +
+            @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
     }
 
     /// Returns true if a previous `fetchOnceStd` call to this URL's host
@@ -1170,6 +1275,71 @@ test "Client.rememberStdTlsFailure deduplicates same host" {
     client.rememberStdTlsFailure("https://news.ycombinator.com/b");
     client.rememberStdTlsFailure("https://news.ycombinator.com/c");
     try std.testing.expectEqual(@as(usize, 1), client.std_tls_failed_hosts.count());
+}
+
+test "tls-fail cache: round-trip through disk preserves recorded hosts" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // tmpDir is rooted at .zig-cache/tmp/<sub_path>; build a relative
+    // path so loadTlsFailCacheFromDisk's std.Io.Dir.cwd() reaches it.
+    const cache_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/tls_fail.txt", .{tmp.sub_path});
+    defer allocator.free(cache_path);
+
+    {
+        var client = Client.init(allocator, io, .{ .tls_fail_cache_path = cache_path });
+        defer client.deinit();
+        client.rememberStdTlsFailure("https://news.ycombinator.com/");
+        client.rememberStdTlsFailure("https://other.example.com/path");
+    }
+
+    var client2 = Client.init(allocator, io, .{ .tls_fail_cache_path = cache_path });
+    defer client2.deinit();
+    try std.testing.expectEqual(@as(usize, 2), client2.std_tls_failed_hosts.count());
+    try std.testing.expect(client2.shouldSkipStdForUrl("https://news.ycombinator.com/"));
+    try std.testing.expect(client2.shouldSkipStdForUrl("https://other.example.com/"));
+    try std.testing.expect(!client2.shouldSkipStdForUrl("https://example.com/"));
+}
+
+test "tls-fail cache: rejects malformed lines and survives missing file" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cache_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/bad.txt", .{tmp.sub_path});
+    defer allocator.free(cache_path);
+
+    // Missing file is not an error.
+    {
+        var client = Client.init(allocator, io, .{ .tls_fail_cache_path = cache_path });
+        defer client.deinit();
+        try std.testing.expectEqual(@as(usize, 0), client.std_tls_failed_hosts.count());
+    }
+
+    // Hand-write a file with valid + invalid + comment lines via the same
+    // io capability the load path uses, so we exercise the same vtable.
+    {
+        var f = try std.Io.Dir.cwd().createFile(io, cache_path, .{ .truncate = true });
+        defer f.close(io);
+        try f.writeStreamingAll(io,
+            \\# comment
+            \\good.example.com
+            \\
+            \\bad host with spaces
+            \\../traversal
+            \\also-good.com
+            \\
+        );
+    }
+
+    var client = Client.init(allocator, io, .{ .tls_fail_cache_path = cache_path });
+    defer client.deinit();
+    try std.testing.expectEqual(@as(usize, 2), client.std_tls_failed_hosts.count());
+    try std.testing.expect(client.shouldSkipStdForUrl("https://good.example.com/"));
+    try std.testing.expect(client.shouldSkipStdForUrl("https://also-good.com/"));
 }
 
 fn networkTestsEnabled() bool {

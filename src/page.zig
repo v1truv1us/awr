@@ -20,6 +20,7 @@ const bridge = @import("dom/bridge.zig");
 const render = @import("render.zig");
 const url_mod = @import("net/url.zig");
 const cookie_path = @import("util/cookie_path.zig");
+const tls_fail_cache_path = @import("util/tls_fail_cache_path.zig");
 const time_util = @import("util/time.zig");
 
 /// Phase-timing probe gated on `AWR_TIMING=1`. Prints to stderr so the
@@ -301,6 +302,8 @@ pub const Page = struct {
     /// Owned cookie-jar path for persistence (or null when not configured).
     /// The Client borrows this slice for its lifetime; Page frees it.
     cookie_jar_path: ?[]u8 = null,
+    /// Owned tls-fail-cache path. Borrowed by Client, freed by Page.
+    tls_fail_cache_path: ?[]u8 = null,
 
     /// Initialise a new Page with default client options.
     /// `io` is threaded through to the HTTP client for all network fetches
@@ -324,6 +327,15 @@ pub const Page = struct {
         };
         errdefer if (jar_path) |p| allocator.free(p);
 
+        // Resolve std-TLS-fail cache path. Auto-activated (no env opt-in)
+        // — see util/tls_fail_cache_path.zig for rationale. Failure here
+        // is non-fatal; missing path just disables the cache.
+        const tls_cache_path = tls_fail_cache_path.resolveTlsFailCachePath(allocator, io) catch |err| blk: {
+            std.log.warn("tls-fail cache path resolution failed: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        errdefer if (tls_cache_path) |p| allocator.free(p);
+
         var page = Page{
             .allocator = allocator,
             .io = io,
@@ -331,12 +343,14 @@ pub const Page = struct {
                 .use_chrome_headers = false, // plain headers → uncompressed body
                 .persist_cookies = jar_path != null,
                 .cookie_jar_path = jar_path,
+                .tls_fail_cache_path = tls_cache_path,
             }),
             .js = js_engine,
             .event_loop = el,
             .base_url = base_url,
             .current_doc = null,
             .cookie_jar_path = jar_path,
+            .tls_fail_cache_path = tls_cache_path,
         };
         page.attachHosts();
         return page;
@@ -353,6 +367,7 @@ pub const Page = struct {
         self.client.deinit();
         self.allocator.free(self.base_url);
         if (self.cookie_jar_path) |p| self.allocator.free(p);
+        if (self.tls_fail_cache_path) |p| self.allocator.free(p);
     }
 
     /// Wire the Page's event loop and fetch adapter into the JsEngine so
