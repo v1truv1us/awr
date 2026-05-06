@@ -718,9 +718,13 @@ pub const Page = struct {
         errdefer if (title) |t| gpa.free(t);
 
         // ── Extract body text ─────────────────────────────────────────────
+        // Uses textContentForExtract (not textContent) so embedded
+        // `<style>` / `<script>` source doesn't leak into the agent-facing
+        // body_text field. textContent itself remains DOM-spec-compliant
+        // for the curated WPT corpus. See src/dom/node.zig.
         const body_text: []const u8 = blk: {
             const body = zig_doc.body() orelse break :blk try gpa.dupe(u8, "");
-            break :blk body.textContent(gpa) catch try gpa.dupe(u8, "");
+            break :blk body.textContentForExtract(gpa) catch try gpa.dupe(u8, "");
         };
         errdefer gpa.free(body_text);
 
@@ -1307,6 +1311,30 @@ test "Page.processHtml — extracts body text" {
     var result = try page.processHtml("http://example.com/", 200, "<html><body><p>Hello World</p></body></html>");
     defer result.deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.body_text, "Hello World") != null);
+}
+
+test "Page.processHtml — body_text excludes <style> and <script> source" {
+    var page = try Page.init(std.testing.allocator, std.testing.io);
+    defer page.deinit();
+    var result = try page.processHtml(
+        "http://example.com/",
+        200,
+        "<html><body>" ++
+            "<style>.mdn-search{align-items:center;color:red}</style>" ++
+            "<p>Real prose</p>" ++
+            "<script>var leak = 'should-not-appear';</script>" ++
+            "</body></html>",
+    );
+    defer result.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.body_text, "Real prose") != null);
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        std.mem.indexOf(u8, result.body_text, "align-items"),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        std.mem.indexOf(u8, result.body_text, "should-not-appear"),
+    );
 }
 
 test "Page.processHtml — html field is raw source" {

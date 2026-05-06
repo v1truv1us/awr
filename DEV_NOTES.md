@@ -366,3 +366,31 @@ main `Client`. Workers also have `persist_cookies = false` forced —
 concurrent file writes to one jar would race. Acceptable for static
 page rendering; revisit if a real auth-gated subresource scenario
 appears.
+
+## body_text extraction — `textContent` vs `textContentForExtract`
+
+Two near-identical methods on `dom.Element`, intentionally:
+
+- **`textContent`** is the DOM-spec-compliant version. It concatenates
+  every descendant text node, including the source code inside
+  `<style>`, `<script>`, `<noscript>`, and `<template>` elements. The
+  curated WPT corpus asserts this exact behaviour. Do **not** filter
+  here.
+- **`textContentForExtract`** is the agent-facing variant. It walks the
+  same tree but skips descendants of opaque-content tags
+  (`<style>`, `<script>`, `<noscript>`, `<template>`). The JSON
+  envelope's `body_text` field uses this method
+  (`src/page.zig` body_text block).
+
+Why both exist: the JSON envelope promises "page text" to consumers
+(LLMs, scripts), but the DOM contract requires source code to be
+visible via `textContent`. Splitting the two preserves WPT compliance
+without leaking ~30 KB of CSS into agent context windows on
+MDN-class pages. Verified pre/post on
+`https://developer.mozilla.org/en-US/docs/Web/HTML/Element/select`:
+body_text shrank from 76 677 → 32 879 chars (45 CSS blocks → 0).
+
+If a future caller needs an even more aggressive Reader-View extract
+(omit nav/header/footer chrome, not just opaque content), use
+`page.renderBrowseModel(...)` instead — that is what `awr render`
+emits and what the corpus runner snapshots.

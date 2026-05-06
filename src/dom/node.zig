@@ -121,6 +121,41 @@ pub const Element = struct {
         }
     }
 
+    /// Like `textContent`, but skips descendants of opaque-content tags
+    /// (`<style>`, `<script>`, `<noscript>`, `<template>`) whose text
+    /// nodes are source code or fallback markup, not page prose.
+    ///
+    /// Use this for agent-facing extraction (e.g. the JSON envelope's
+    /// `body_text` field). `textContent` itself remains spec-compliant
+    /// per DOM and is asserted by the curated WPT corpus — do not
+    /// route WPT consumers through this method.
+    pub fn textContentForExtract(self: *const Element, allocator: std.mem.Allocator) ![]u8 {
+        var buf: std.ArrayList(u8) = .empty;
+        errdefer buf.deinit(allocator);
+        collectTextForExtract(allocator, self, &buf);
+        return buf.toOwnedSlice(allocator);
+    }
+
+    fn isOpaqueContentTag(tag: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(tag, "style") or
+            std.ascii.eqlIgnoreCase(tag, "script") or
+            std.ascii.eqlIgnoreCase(tag, "noscript") or
+            std.ascii.eqlIgnoreCase(tag, "template");
+    }
+
+    fn collectTextForExtract(alloc: std.mem.Allocator, elem: *const Element, buf: *std.ArrayList(u8)) void {
+        for (elem.children.items) |child| {
+            switch (child) {
+                .text => |t| buf.appendSlice(alloc, t.data) catch {},
+                .element => |e| {
+                    if (isOpaqueContentTag(e.tag)) continue;
+                    collectTextForExtract(alloc, e, buf);
+                },
+                else => {},
+            }
+        }
+    }
+
     pub fn firstChildByTag(self: *const Element, tag: []const u8) ?*Element {
         for (self.children.items) |child| {
             if (child == .element and std.ascii.eqlIgnoreCase(child.element.tag, tag))
@@ -705,6 +740,55 @@ test "Element.textContent — contains inner text" {
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "hello") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "world") != null);
+}
+
+test "Element.textContentForExtract — skips <style>, <script>, <noscript>, <template>" {
+    var doc = try parseDocument(
+        std.testing.allocator,
+        "<html><body>" ++
+            "<style>.x{color:red}</style>" ++
+            "<p>hi</p>" ++
+            "<script>alert(1)</script>" ++
+            "<noscript>js disabled</noscript>" ++
+            "<template><span>tpl</span></template>" ++
+            "<p>bye</p>" ++
+            "</body></html>",
+    );
+    defer doc.deinit();
+    const body = doc.querySelector("body") orelse return error.SkipZigTest;
+
+    // Spec-compliant textContent still includes everything (WPT contract).
+    const raw = try body.textContent(std.testing.allocator);
+    defer std.testing.allocator.free(raw);
+    try std.testing.expect(std.mem.indexOf(u8, raw, "color:red") != null);
+    try std.testing.expect(std.mem.indexOf(u8, raw, "alert(1)") != null);
+
+    // Agent-facing extract drops opaque-content descendants.
+    const clean = try body.textContentForExtract(std.testing.allocator);
+    defer std.testing.allocator.free(clean);
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, clean, "color:red"));
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, clean, "alert(1)"));
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, clean, "js disabled"));
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, clean, "tpl"));
+    try std.testing.expect(std.mem.indexOf(u8, clean, "hi") != null);
+    try std.testing.expect(std.mem.indexOf(u8, clean, "bye") != null);
+}
+
+test "Element.textContentForExtract — case-insensitive tag matching" {
+    // HTML tags are case-insensitive in markup but the parser may
+    // normalize. Assert by feeding mixed-case markup; if the parser
+    // lowercases tags, the filter still applies; if it preserves
+    // case, the std.ascii.eqlIgnoreCase guard still applies.
+    var doc = try parseDocument(
+        std.testing.allocator,
+        "<html><body><STYLE>.y{}</STYLE><p>kept</p></body></html>",
+    );
+    defer doc.deinit();
+    const body = doc.querySelector("body") orelse return error.SkipZigTest;
+    const clean = try body.textContentForExtract(std.testing.allocator);
+    defer std.testing.allocator.free(clean);
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, clean, ".y{}"));
+    try std.testing.expect(std.mem.indexOf(u8, clean, "kept") != null);
 }
 
 test "template content is included in DOM queries and text" {

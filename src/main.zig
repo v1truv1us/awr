@@ -172,6 +172,17 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         return;
     }
 
+    // `awr --help` / `-h` / `help` — print USAGE and exit 0.
+    // Distinct from the args.len < 2 branch above, which prints USAGE and
+    // exits 1 because no argument was supplied at all (error condition).
+    if (std.mem.eql(u8, args[1], "--help") or
+        std.mem.eql(u8, args[1], "-h") or
+        std.mem.eql(u8, args[1], "help"))
+    {
+        try stdoutWrite(io, USAGE);
+        return;
+    }
+
     // Subcommand: awr mock [--port N] [--root DIR]
     if (std.mem.eql(u8, args[1], "mock")) {
         var port: u16 = 7777;
