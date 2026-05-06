@@ -13,7 +13,7 @@ Can AWR be turned into a **CLI-first agent-usable web browser** — link navigat
 
 ## 2. Triggering observation
 
-`AWR.png` shows `awr browse https://example.com` rendered with a clear "line wider than terminal" pattern on a portrait-oriented iOS terminal in tmux:
+`./AWR.png` shows `awr browse https://example.com` rendered with a clear "line wider than terminal" pattern on a portrait-oriented iOS terminal in tmux:
 
 - Body text "This domain is for use in documentation examples without needing permission. Avoid use in operations." displays with bouncing leading whitespace and mid-word breaks (`permi`/`ssion`).
 - The AWR footer `link 1/1: https://iana.org/domains/example | https://example.com/` wraps with the same pattern.
@@ -176,7 +176,7 @@ Each step is a separate session per CLAUDE.md "One Deliverable Per Session" rule
 
 | Question | Verdict |
 |---|---|
-| Fix the render bug shown in `AWR.png` | **Feasible immediately.** ~30 LOC in one file, no spec change. |
+| Fix the render bug shown in `./AWR.png` | **Feasible immediately.** ~30 LOC in one file, no spec change. |
 | Make AWR an agent-usable browser | **Feasible with discipline.** Requires `spec/MVP.md` amendment first (Session 2). Implementation cleanly decomposes into 4–5 surgical sessions, each landing with WPT cases. |
 | Stay WPT-gated throughout | **Yes.** `wpt-conformance.md` §3 already provides the inclusion rules; corpus needs widening, not the runner. |
 | Avoid breaking the JA4 fingerprint | **Yes.** None of the proposed changes touch `src/net/tls_conn.zig`, `src/net/fingerprint.zig`, or header ordering — POST adds a body, but request-line and header-list semantics stay intact. Verify with `zig build test-tls` after Session 3. |
