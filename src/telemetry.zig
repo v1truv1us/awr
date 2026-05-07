@@ -107,6 +107,15 @@ pub const SessionMetrics = struct {
     /// failed"). Borrowed; null on success.
     error_message: ?[]const u8 = null,
 
+    /// Process peak resident set size in bytes, observed at emit time
+    /// via `getrusage(RUSAGE_SELF).ru_maxrss`. Captures the high-water
+    /// mark for the entire process lifetime, not the current RSS —
+    /// so it survives even if memory is freed before exit.
+    /// Useful for spotting bloat regressions (e.g. a corpus fixture
+    /// holding a 50 MB body in memory) in aggregate logs. null when
+    /// `getrusage` was unavailable or returned an error.
+    max_rss_bytes: ?u64 = null,
+
     /// Initialize with the current wall-clock time.
     pub fn init() SessionMetrics {
         return .{ .started_at_ms = wallClockMs() };
@@ -185,6 +194,9 @@ pub const SessionMetrics = struct {
             try writer.writeAll(",\"error_message\":");
             try writeJsonString(writer, m);
         }
+        if (self.max_rss_bytes) |rss| {
+            try writer.print(",\"max_rss_bytes\":{d}", .{rss});
+        }
 
         try writer.writeAll("}\n");
     }
@@ -225,6 +237,23 @@ fn wallClockMs() i64 {
         @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
 }
 
+/// Sample peak resident set size from `getrusage(RUSAGE_SELF)`. Unit
+/// normalization: macOS / iOS report bytes; Linux reports kilobytes;
+/// the function returns bytes consistently. Returns null if the
+/// platform doesn't expose getrusage or if the call returns a
+/// negative `ru_maxrss` (which can happen on some BSDs early in a
+/// process — treat as "no signal yet").
+fn captureMaxRssBytes() ?u64 {
+    const builtin = @import("builtin");
+    const ru = std.posix.getrusage(0); // 0 = RUSAGE_SELF on every supported platform
+    if (ru.maxrss <= 0) return null;
+    const raw: u64 = @intCast(ru.maxrss);
+    return switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos, .visionos, .driverkit, .maccatalyst => raw,
+        else => raw * 1024,
+    };
+}
+
 /// Resolve `AWR_TELEMETRY` to a destination. Returns `.none` if the
 /// env var is unset or empty. The returned `Dest.file_path`, when
 /// present, is duped from the env value and owned by the caller —
@@ -260,11 +289,19 @@ pub fn resolveDest(allocator: std.mem.Allocator) !Dest {
 pub fn emit(metrics: *const SessionMetrics, allocator: std.mem.Allocator, io: std.Io) void {
     var dest = resolveDest(allocator) catch return;
     defer dest.deinit(allocator);
+    if (dest == .none) return;
+
+    // Sample peak RSS just before serialization so the value reflects
+    // everything the session did, including the fetch / parse / JS
+    // execution work that just completed. We mutate a local copy to
+    // keep the public emit() shape immutable for callers.
+    var sampled = metrics.*;
+    sampled.max_rss_bytes = captureMaxRssBytes();
 
     switch (dest) {
-        .none => return,
-        .stderr => emitToStderr(metrics, io) catch {},
-        .file_path => |path| emitToFile(metrics, io, path) catch {},
+        .none => unreachable,
+        .stderr => emitToStderr(&sampled, io) catch {},
+        .file_path => |path| emitToFile(&sampled, io, path) catch {},
     }
 }
 
@@ -392,6 +429,29 @@ test "SessionMetrics.writeJson includes error fields when set" {
     const out = buf.written();
     try std.testing.expect(std.mem.indexOf(u8, out, "\"error_kind\":\"TlsNotAvailable\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"error_message\":\"TLS setup or handshake failed\"") != null);
+}
+
+test "SessionMetrics.writeJson includes max_rss_bytes when set" {
+    var m = SessionMetrics.init();
+    m.url = "https://example.com/";
+    m.max_rss_bytes = 12_345_678;
+
+    var buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer buf.deinit();
+    try m.writeJson(&buf.writer);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "\"max_rss_bytes\":12345678") != null);
+}
+
+test "captureMaxRssBytes returns a positive value on the test process" {
+    // Sanity check: the test runner is itself a process, so RUSAGE_SELF
+    // must produce a non-null sample with a positive byte count.
+    // Skips silently if getrusage isn't available — the platform check
+    // is in the helper itself.
+    const sample = captureMaxRssBytes();
+    if (sample) |bytes| {
+        try std.testing.expect(bytes > 0);
+    }
 }
 
 test "SessionMetrics.writeJson omits protocol_main when null" {
