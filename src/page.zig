@@ -562,6 +562,7 @@ pub const Page = struct {
                 s.navigate_fetch_ms = elapsed;
             }
         }
+        if (self.metrics_sink) |s| s.protocol_main = resp.protocol.tag();
         return self.processHtml(resp.url, resp.status, resp.body);
     }
 

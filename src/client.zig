@@ -44,11 +44,6 @@ const BoringSslPool = if (boringssl_fallback) struct {
     pub const MAX_REQUESTS_PER_CONN: u32 = 100;
     pub const IDLE_TIMEOUT_MS: i64 = 30_000;
 
-    /// Application-layer protocol negotiated during the TLS handshake.
-    /// Determines which send path runs on this entry: h1.1 framing
-    /// (`sendOnBoringSslEntry`) or H2 streams (`sendOnBoringSslEntryH2`).
-    pub const Protocol = enum { http_1_1, http_2 };
-
     pub const Entry = struct {
         host: []const u8,
         port: u16,
@@ -199,12 +194,42 @@ pub const ClientOptions = struct {
 
 // ── Response ──────────────────────────────────────────────────────────────
 
+/// Which transport actually delivered the response. Surfaced via
+/// `Response.protocol` for telemetry consumers — observing the
+/// distribution of std_lib / http_1_1 / http_2 in aggregate logs is
+/// how you spot fingerprint or H2-routing regressions without
+/// instrumenting every site individually.
+pub const Protocol = enum {
+    /// Zig std-lib `std.http.Client` path (HTTP/1.1, sometimes h2 if
+    /// std-lib's TLS picks it). Used for hosts whose handshake works
+    /// against std's pure-Zig TLS stack.
+    std_lib,
+    /// BoringSSL fallback — TLS handshake negotiated `http/1.1` ALPN.
+    http_1_1,
+    /// BoringSSL fallback — TLS handshake negotiated `h2` ALPN.
+    http_2,
+
+    /// Lower-case ASCII tag suitable for JSON / log emission.
+    pub fn tag(self: Protocol) []const u8 {
+        return switch (self) {
+            .std_lib => "std",
+            .http_1_1 => "h1.1",
+            .http_2 => "h2",
+        };
+    }
+};
+
 pub const Response = struct {
     status: u16,
     url: []const u8,
     headers: http1.HeaderList,
     body: []u8,
     allocator: std.mem.Allocator,
+    /// Transport that delivered this response. Defaults to `.std_lib`
+    /// because that's the path historical callers (and tests that
+    /// fabricate Responses by hand) end up on; the BoringSSL paths
+    /// override this explicitly before returning.
+    protocol: Protocol = .std_lib,
 
     pub fn deinit(self: *Response) void {
         self.allocator.free(self.url);
@@ -655,6 +680,7 @@ pub const Client = struct {
             .headers = headers,
             .body = resp_body,
             .allocator = self.allocator,
+            .protocol = .std_lib,
         };
     }
 
@@ -713,6 +739,11 @@ pub const Client = struct {
         return switch (entry.protocol) {
             .http_1_1 => self.sendOnBoringSslEntry(entry, u, url_str, method, body),
             .http_2 => self.sendOnBoringSslEntryH2(entry, u, url_str),
+            // `.std_lib` belongs to the std.http path and never reaches
+            // a BoringSSL pool entry. Entries are always tagged
+            // `http_1_1` or `http_2` after the handshake (see
+            // `createBoringSslEntry`); seeing this here is a bug.
+            .std_lib => unreachable,
         };
     }
 
@@ -878,6 +909,7 @@ pub const Client = struct {
             .headers = parsed.headers,
             .body = parsed.body,
             .allocator = self.allocator,
+            .protocol = .http_1_1,
         };
     }
 
@@ -977,6 +1009,7 @@ pub const Client = struct {
             .headers = headers_out,
             .body = body_dup,
             .allocator = self.allocator,
+            .protocol = .http_2,
         };
     }
 

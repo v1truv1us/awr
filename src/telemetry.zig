@@ -88,6 +88,15 @@ pub const SessionMetrics = struct {
     /// Total bytes fetched across all external scripts.
     ext_fetch_bytes: usize = 0,
 
+    /// Transport that delivered the main page response — short
+    /// lower-case tag like `"std"`, `"h1.1"`, or `"h2"`. Borrowed
+    /// from a `static` string literal, so no allocator concerns.
+    /// Aggregating this in production logs is how you spot
+    /// fingerprint or H2-routing regressions: if a host that should
+    /// be on h2 suddenly reports h1.1, something changed upstream
+    /// (or in our ctx / pool wiring). null when not measured.
+    protocol_main: ?[]const u8 = null,
+
     /// Initialize with the current wall-clock time.
     pub fn init() SessionMetrics {
         return .{ .started_at_ms = wallClockMs() };
@@ -152,6 +161,11 @@ pub const SessionMetrics = struct {
         try writer.print(",\"ext_fetch_count\":{d}", .{self.ext_fetch_count});
         try writer.print(",\"ext_fetch_total_ms\":{d}", .{self.ext_fetch_total_ms});
         try writer.print(",\"ext_fetch_bytes\":{d}", .{self.ext_fetch_bytes});
+
+        if (self.protocol_main) |p| {
+            try writer.writeAll(",\"protocol_main\":");
+            try writeJsonString(writer, p);
+        }
 
         try writer.writeAll("}\n");
     }
@@ -325,6 +339,31 @@ test "SessionMetrics.writeJson emits valid one-line JSON" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"ext_fetch_count\":1") != null);
     // Unset phases (-1) are omitted from output.
     try std.testing.expect(std.mem.indexOf(u8, body, "\"bridge_ms\"") == null);
+}
+
+test "SessionMetrics.writeJson includes protocol_main when set" {
+    var m = SessionMetrics.init();
+    m.url = "https://example.com/";
+    m.status = 200;
+    m.protocol_main = "h2";
+
+    var buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer buf.deinit();
+    try m.writeJson(&buf.writer);
+
+    const out = buf.written();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"protocol_main\":\"h2\"") != null);
+}
+
+test "SessionMetrics.writeJson omits protocol_main when null" {
+    var m = SessionMetrics.init();
+    m.url = "https://example.com/";
+
+    var buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer buf.deinit();
+    try m.writeJson(&buf.writer);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "protocol_main") == null);
 }
 
 test "SessionMetrics.writeJson escapes JSON-special chars in url" {

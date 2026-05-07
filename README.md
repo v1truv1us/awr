@@ -137,6 +137,27 @@ JS sees real page data through a thin polyfill over five Zig callbacks:
   `test-e2e`, `test-wpt`, `test-test262`.
 - macOS Homebrew paths auto-detected; Linux reads from `/usr/local`.
 
+### Observability
+
+`AWR_TIMING=1` prints `[timing] phase=Nms` lines to stderr — useful for
+interactive debugging of a single fetch.
+
+`AWR_TELEMETRY` opts into structured per-session metrics emitted as one
+JSON Lines record per invocation. Catches perf regressions in
+aggregate logs without linking against any observability SDK.
+
+```bash
+AWR_TELEMETRY=1                  awr <url>   # → stderr
+AWR_TELEMETRY=stderr             awr <url>   # → stderr (alias)
+AWR_TELEMETRY=/var/log/awr.jsonl awr <url>   # → append to file
+```
+
+The schema is versioned (`v: 1`) and includes top-level phase
+timings, sub-phase breakdowns, and external-script-fetch
+aggregates. See `src/telemetry.zig` for the current field list.
+Pipe to `jq`, ship to Loki / Datadog / Sentry / OTLP-via-fluentbit
+without recompiling AWR.
+
 ---
 
 ## Current caveats
