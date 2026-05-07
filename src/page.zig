@@ -1103,7 +1103,8 @@ pub const Page = struct {
         defer self.allocator.free(resolved);
 
         const timing_on = std.c.getenv("AWR_TIMING") != null;
-        const t_fetch_start = if (timing_on) time_util.wallClockMillis() else 0;
+        const measure = timing_on or self.metrics_sink != null;
+        const t_fetch_start = if (measure) time_util.wallClockMillis() else 0;
 
         // Try prefetch cache first; fall back to direct fetch on miss. The
         // cache stores allocator-owned bodies that live until processHtml
@@ -1129,10 +1130,18 @@ pub const Page = struct {
         }
         defer if (body_owned) self.allocator.free(body);
 
-        if (timing_on) {
-            const t_after_fetch = time_util.wallClockMillis();
-            const tag: []const u8 = if (body_owned) "ext_fetch" else "ext_cache";
-            std.debug.print("[timing]   {s}={d}ms ({s} {d}B)\n", .{ tag, t_after_fetch - t_fetch_start, resolved, body.len });
+        if (measure) {
+            const elapsed = time_util.wallClockMillis() - t_fetch_start;
+            if (timing_on) {
+                const tag: []const u8 = if (body_owned) "ext_fetch" else "ext_cache";
+                std.debug.print("[timing]   {s}={d}ms ({s} {d}B)\n", .{ tag, elapsed, resolved, body.len });
+            }
+            // Aggregate into telemetry. For cache hits, `elapsed` is
+            // effectively zero (the fetch already ran in a prefetch
+            // worker thread); for cache misses, it's the full network
+            // RTT. Either way it's the time the main thread spent
+            // waiting on this script body — the user-visible cost.
+            if (self.metrics_sink) |s| s.recordExtFetch(elapsed, body.len);
         }
 
         if (body.len == 0) return;
