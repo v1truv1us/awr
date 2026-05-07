@@ -461,6 +461,14 @@ pub const Client = struct {
         var redirects: u8 = 0;
         while (true) {
             var resp = try self.fetchOnce(current_url, current_method, current_body);
+
+            // Absorb any Set-Cookie headers into the jar BEFORE deciding
+            // about redirects. Auth flows commonly issue
+            // `302 Set-Cookie: session=…` and the next-hop request must
+            // carry the new cookie — if we deferred parsing until after
+            // the loop, the second fetch would go out with no session.
+            absorbSetCookies(&self.cookies, current_url, &resp.headers);
+
             if (!self.options.follow_redirects or !resp.isRedirect()) return resp;
             const location = resp.location() orelse return resp;
             if (redirects >= self.options.max_redirects) {
@@ -573,7 +581,9 @@ pub const Client = struct {
             else
                 "awr";
 
-        var extra_headers: [10]std.http.Header = undefined;
+        // Capacity 12: 1 user-agent + up to 9 chrome + 1 content-type +
+        // 1 cookie. Fits the worst-case header set for this path.
+        var extra_headers: [12]std.http.Header = undefined;
         var extra_header_count: usize = 0;
 
         extra_headers[extra_header_count] = .{ .name = "user-agent", .value = effective_user_agent };
@@ -604,6 +614,17 @@ pub const Client = struct {
         // is set automatically by std.http.Client when we use sendBodyComplete.
         if (method == .POST) {
             extra_headers[extra_header_count] = .{ .name = "content-type", .value = "application/x-www-form-urlencoded" };
+            extra_header_count += 1;
+        }
+
+        // Cookie header — derived from the jar based on URL host / path /
+        // https. The owned slice must outlive `req.send*`; we free it
+        // after the response head is parsed (defer below).
+        const u_for_cookies = url_mod.Url.parse(url_str) catch return FetchError.InvalidUrl;
+        const cookie_value = try buildCookieHeaderValue(&self.cookies, self.allocator, u_for_cookies.host, u_for_cookies.path, u_for_cookies.is_https);
+        defer self.allocator.free(cookie_value);
+        if (cookie_value.len > 0) {
+            extra_headers[extra_header_count] = .{ .name = "cookie", .value = cookie_value };
             extra_header_count += 1;
         }
 
@@ -886,6 +907,15 @@ pub const Client = struct {
         try req_buf.writer.writeAll("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n");
         try req_buf.writer.writeAll("Accept-Language: en-US,en;q=0.9\r\n");
         try req_buf.writer.writeAll("Accept-Encoding: identity\r\n");
+        // Cookie header — empty if the jar has no matching cookies.
+        // Position before Content-* headers matches Chrome 132's typical
+        // outbound order; doesn't affect JA4 (TLS-only) but keeps the
+        // HTTP-level ordering consistent across paths.
+        const cookie_header = try buildCookieHeaderValue(&self.cookies, self.allocator, u.host, path, u.is_https);
+        defer self.allocator.free(cookie_header);
+        if (cookie_header.len > 0) {
+            try req_buf.writer.print("Cookie: {s}\r\n", .{cookie_header});
+        }
         if (method == .POST) {
             const body_bytes = body orelse "";
             try req_buf.writer.writeAll("Content-Type: application/x-www-form-urlencoded\r\n");
@@ -951,19 +981,32 @@ pub const Client = struct {
         const accept_lang = "en-US,en;q=0.9";
         const accept_enc = "identity";
 
-        const headers = [_]h2session.H2Session.HeaderField{
-            .{ .name = "user-agent", .name_len = 10, .value = ua.ptr, .value_len = ua.len },
-            .{ .name = "accept", .name_len = 6, .value = accept, .value_len = accept.len },
-            .{ .name = "accept-language", .name_len = 15, .value = accept_lang, .value_len = accept_lang.len },
-            .{ .name = "accept-encoding", .name_len = 15, .value = accept_enc, .value_len = accept_enc.len },
-        };
+        // Cookie value, optionally added to the headers array below.
+        // Always allocates (possibly empty); we free unconditionally
+        // via defer.
+        const cookie_value = try buildCookieHeaderValue(&self.cookies, self.allocator, u.host, path, u.is_https);
+        defer self.allocator.free(cookie_value);
+
+        // Build the header array on the stack with worst-case length.
+        // The cookie slot is conditional — when empty, we drop the entry
+        // and submit count=4 instead of 5.
+        var headers_buf: [5]h2session.H2Session.HeaderField = undefined;
+        headers_buf[0] = .{ .name = "user-agent", .name_len = 10, .value = ua.ptr, .value_len = ua.len };
+        headers_buf[1] = .{ .name = "accept", .name_len = 6, .value = accept, .value_len = accept.len };
+        headers_buf[2] = .{ .name = "accept-language", .name_len = 15, .value = accept_lang, .value_len = accept_lang.len };
+        headers_buf[3] = .{ .name = "accept-encoding", .name_len = 15, .value = accept_enc, .value_len = accept_enc.len };
+        var header_count: usize = 4;
+        if (cookie_value.len > 0) {
+            headers_buf[4] = .{ .name = "cookie", .name_len = 6, .value = cookie_value.ptr, .value_len = cookie_value.len };
+            header_count = 5;
+        }
 
         const sid = sess.submitGetWithHeaders(
             "GET",
             "https",
             authority_z.ptr,
             path_z.ptr,
-            &headers,
+            headers_buf[0..header_count],
         ) catch return FetchError.ConnectionFailed;
 
         // Mark the active stream so `h2RecvCallback` knows when to
@@ -1067,6 +1110,42 @@ fn writeAllTls(conn: anytype, bytes: []const u8) !void {
         if (n == 0) return FetchError.SendFailed;
         written += n;
     }
+}
+
+/// Walk a response's headers and feed every `Set-Cookie` into the jar.
+/// `request_url` is the URL we sent the request to (not the response's
+/// final URL); the cookie's effective domain comes from there.
+///
+/// Multiple Set-Cookie headers are not folded into one comma-separated
+/// value the way other headers are — RFC 6265 mandates one Set-Cookie
+/// per directive. The HeaderList preserves the wire order so iterating
+/// with `eqlIgnoreCase` covers all of them.
+///
+/// Parse failures are non-fatal — a malformed Set-Cookie shouldn't kill
+/// the whole fetch. Real browsers tolerate the wide range of bad
+/// cookies servers ship.
+fn absorbSetCookies(jar: *cookie.CookieJar, request_url: []const u8, headers: *const http1.HeaderList) void {
+    const u = url_mod.Url.parse(request_url) catch return;
+    for (headers.items.items) |h| {
+        if (!std.ascii.eqlIgnoreCase(h.name, "set-cookie")) continue;
+        jar.parseSetCookie(h.value, u.host) catch continue;
+    }
+}
+
+/// Build the `Cookie:` header value to send with a request to
+/// (host, path, https). Returns an owned, possibly-empty slice — the
+/// caller owns it. Empty result means "no matching cookies, omit the
+/// header entirely". Mirrors `cookie.CookieJar.getCookieHeader` but
+/// hides the same-site default in one place.
+fn buildCookieHeaderValue(
+    jar: *cookie.CookieJar,
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    path: []const u8,
+    https: bool,
+) ![]u8 {
+    _ = allocator; // jar uses its own allocator internally
+    return jar.getCookieHeader(host, path, https);
 }
 
 // ── H2 session send/recv callbacks ────────────────────────────────────────
@@ -1419,6 +1498,73 @@ const BookkeepingOnlyPool = if (boringssl_fallback) struct {
         bs_pool.entries.deinit(allocator);
     }
 } else struct {};
+
+test "absorbSetCookies parses Set-Cookie from response headers into the jar" {
+    var jar = cookie.CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    var headers = http1.HeaderList{ .owns_strings = false };
+    defer headers.deinit(std.testing.allocator);
+    try headers.append(std.testing.allocator, "content-type", "text/html");
+    try headers.append(std.testing.allocator, "Set-Cookie", "session=abc123; Path=/; HttpOnly");
+    try headers.append(std.testing.allocator, "set-cookie", "tracking=xyz; Path=/");
+
+    absorbSetCookies(&jar, "https://example.com/", &headers);
+
+    // Both case-variants should have been picked up.
+    try std.testing.expectEqual(@as(usize, 2), jar.cookies.items.len);
+
+    // The jar should now produce a Cookie header that includes both.
+    const sent = try jar.getCookieHeader("example.com", "/", true);
+    defer std.testing.allocator.free(sent);
+    try std.testing.expect(std.mem.indexOf(u8, sent, "session=abc123") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sent, "tracking=xyz") != null);
+}
+
+test "absorbSetCookies tolerates malformed Set-Cookie without crashing" {
+    var jar = cookie.CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    var headers = http1.HeaderList{ .owns_strings = false };
+    defer headers.deinit(std.testing.allocator);
+    try headers.append(std.testing.allocator, "set-cookie", ""); // empty value
+    try headers.append(std.testing.allocator, "set-cookie", "=novalue"); // no name
+    try headers.append(std.testing.allocator, "set-cookie", "session=ok; Path=/");
+
+    absorbSetCookies(&jar, "https://example.com/", &headers);
+
+    // Only the well-formed one should land — but the call shouldn't
+    // have crashed on the malformed entries.
+    try std.testing.expect(jar.cookies.items.len >= 1);
+    const found = jar.getCookieHeader("example.com", "/", true) catch unreachable;
+    defer std.testing.allocator.free(found);
+    try std.testing.expect(std.mem.indexOf(u8, found, "session=ok") != null);
+}
+
+test "absorbSetCookies skips non-Set-Cookie headers" {
+    var jar = cookie.CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    var headers = http1.HeaderList{ .owns_strings = false };
+    defer headers.deinit(std.testing.allocator);
+    try headers.append(std.testing.allocator, "content-type", "text/html");
+    try headers.append(std.testing.allocator, "x-frame-options", "DENY");
+    try headers.append(std.testing.allocator, "cookie", "incoming=val"); // request-side, not response
+
+    absorbSetCookies(&jar, "https://example.com/", &headers);
+
+    try std.testing.expectEqual(@as(usize, 0), jar.cookies.items.len);
+}
+
+test "buildCookieHeaderValue returns empty when jar has no matching cookies" {
+    var jar = cookie.CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+    try jar.parseSetCookie("foo=bar; Path=/", "other.example.com");
+
+    const value = try buildCookieHeaderValue(&jar, std.testing.allocator, "example.com", "/", true);
+    defer std.testing.allocator.free(value);
+    try std.testing.expectEqual(@as(usize, 0), value.len);
+}
 
 test "BoringSslPool.acquire returns null on empty pool" {
     if (!boringssl_fallback) return error.SkipZigTest;
