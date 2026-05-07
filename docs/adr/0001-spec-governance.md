@@ -284,6 +284,39 @@ documentation governance.
   still said ACTIVE. Fixed in the same commit for consistency.
 - Documents updated: `spec/subspecs/agent-browser.md`, this ADR.
 
+### 2026-05-07 — Promote daemon-mode to an active sub-spec
+
+- Date: 2026-05-07
+- Change: Added `spec/subspecs/daemon-mode.md` as a new active sub-spec
+  governing the long-lived `awrd` process, Unix-socket JSON-RPC IPC,
+  per-cookie-scope state partitioning, and lifecycle (spawn-on-first-use,
+  flock singleton, build-hash check, 5-minute idle shutdown). Updated
+  `spec/MVP.md §2` (canonical doc map) and §7 (deferred-tracks block now
+  carries a daemon-mode "active" callout alongside the rendering closure
+  record). The companion design doc
+  `docs/research/2026-05-07-daemon-mode-design.md` records the
+  candidates-considered analysis and ~42% expected savings on a 5-fetch
+  chained agent flow.
+- Reason: per-invocation startup cost (~95 ms baseline) is the floor on
+  AWR's cold latency. For chained agent fetches, that cost is
+  multiplicative dead time — Lane A's H2 multiplexing closed the
+  fingerprint and protocol gaps but can't address the per-process
+  spawn cost. Daemon mode amortizes startup across many fetches via a
+  long-lived `awrd` process. Decision was driven by the B1 design doc;
+  this ADR records the spec-governance promotion.
+- The sub-spec is **active**, not closed: B3 (implementation) is
+  pending. No code lands until B3 has its own plan and follows the
+  closure-gates in `spec/subspecs/daemon-mode.md §4`. Per-process
+  `awr <url>` flow continues unchanged; daemon-mode opt-in via
+  `AWR_DAEMON=1` for safe rollout.
+- Decision on overlap with `spec/subspecs/mcp-stdio.md`: mcp-stdio
+  remains deferred but its eventual implementation will be a thin
+  client of the daemon, not embedded inside it. Documented in the
+  daemon sub-spec §3.
+- Documents updated: `spec/subspecs/daemon-mode.md` (new),
+  `spec/MVP.md §2 + §7`, `docs/research/2026-05-07-daemon-mode-design.md`
+  (already committed earlier today as B1), this ADR.
+
 ### Template for future amendments
 
 - Date:

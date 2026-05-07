@@ -32,13 +32,14 @@ correctness is the primary MVP authority.
 | `spec/subspecs/mvp-remainder.md` | Active MVP completion track and execution order |
 | `spec/subspecs/wpt-conformance.md` | Canonical WPT/Test262 runner, corpus, and merge-gate spec |
 | `spec/subspecs/agent-browser.md` | Active agent-browser scope: POST in fetch+XHR, form `method=post`, cookie persistence |
+| `spec/subspecs/daemon-mode.md` | Active daemon-mode scope: long-lived `awrd` + JSON-RPC IPC for amortized startup |
 | `docs/adr/0001-spec-governance.md` | Historical record for spec/documentation governance decisions |
 
 ### Deferred, documented, not active now
 
 | Document | Role |
 |---|---|
-| `spec/subspecs/mcp-stdio.md` | Deferred native MCP stdio server track |
+| `spec/subspecs/mcp-stdio.md` | Deferred native MCP stdio server track (will be a thin client of daemon-mode per its B1 design doc) |
 | `spec/subspecs/browser-tui.md` | Deferred browser/TUI product track |
 | `spec/Fingerprint-Plan.md` | Future-only fingerprinting roadmap |
 
@@ -163,6 +164,14 @@ iTerm / Sixel / braille encoders, `<picture>` / `srcset` picker, CSS
 are both green against `spec/subspecs/rendering.md §6`. The corpus
 harness is exercised via `zig build test-corpus`; the encoder + picker
 test surface via `zig build test-image` (113 tests across 8 modules).
+
+The daemon-mode scope (long-lived `awrd` process + Unix-socket JSON-RPC
+IPC + per-cookie-scope state partitioning) is governed by
+`spec/subspecs/daemon-mode.md` and is **active** (proposed
+2026-05-07). Companion design doc:
+`docs/research/2026-05-07-daemon-mode-design.md`. Does not weaken the
+in-process MVP closure — daemon mode reuses the same `Client` /
+`Page` / `JsEngine` code paths.
 
 Do not treat deferred tracks as blockers for the active MVP closure work unless
 this spec is amended.
