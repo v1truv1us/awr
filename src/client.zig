@@ -664,9 +664,25 @@ pub const Client = struct {
     /// invocation that never touches the BoringSSL path (file:// URLs,
     /// std-only hosts) doesn't pay the ~5-15ms PEM parse cost. Returns
     /// a borrowed pointer; ownership stays with the Client.
+    ///
+    /// Uses the **full** Chrome 132 ctx (`initWithBundle`) — the cipher
+    /// list, curve order, and sigalg list that produce the published
+    /// JA4 fingerprint constants in `src/net/fingerprint.zig`.
+    /// Earlier code used `initCompatHttp11WithBundle`, a strip-down ctx
+    /// that left BoringSSL defaults in place and produced a generic
+    /// fingerprint (`t13d86_b6101760603d_…`) instead of the claimed
+    /// Chrome 132 (`t13d1512h1_8daaf6152771_…`). This restored the
+    /// fingerprint claim on 2026-05-06.
+    ///
+    /// ALPN is currently restricted to `http/1.1` to keep wire framing
+    /// unchanged on this commit. Lane A's H2 multiplexing pass (next
+    /// commit) drops this restriction and routes h2-negotiated entries
+    /// through `H2Session`.
     fn getSharedTlsCtx(self: *Client) anyerror!*tls_conn.TlsCtx {
         if (self.shared_tls_ctx) |*ctx| return ctx;
-        self.shared_tls_ctx = tls_conn.initCompatHttp11WithBundle() catch return FetchError.TlsNotAvailable;
+        var ctx = tls_conn.initWithBundle() catch return FetchError.TlsNotAvailable;
+        tls_conn.forceHttp11Alpn(&ctx);
+        self.shared_tls_ctx = ctx;
         return &self.shared_tls_ctx.?;
     }
 
@@ -699,7 +715,13 @@ pub const Client = struct {
         const hostname_z = try self.allocator.dupeZ(u8, u.host);
         defer self.allocator.free(hostname_z);
 
-        entry.tls = tls_conn.TlsConn.connectNoAlps(entry.ctx, entry.tcp_conn.socket.?.fd, hostname_z.ptr) catch return FetchError.TlsNotAvailable;
+        // Use `connect` (with ALPS) not `connectNoAlps` so the handshake
+        // includes the ALPS extension that Chrome 132 sends. ALPS is the
+        // 12th extension whose hash distinguishes the published
+        // `awr_ja4_h1` (`t13d1512h1_…`) from the 11-extension variant
+        // (`t13d1511h1_…`). ALPS is harmless when ALPN is http/1.1 —
+        // the server just ignores the embedded H2 settings.
+        entry.tls = tls_conn.TlsConn.connect(entry.ctx, entry.tcp_conn.socket.?.fd, hostname_z.ptr) catch return FetchError.TlsNotAvailable;
         errdefer entry.tls.deinit();
 
         // Reader buffers across requests on this connection so any bytes
