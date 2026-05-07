@@ -1403,3 +1403,53 @@ test "integration: BoringSSL pool reuses connection across same-origin fetches" 
     try std.testing.expectEqual(@as(usize, 1), client.boringssl_pool.countForOrigin("news.ycombinator.com", 443));
     try std.testing.expectEqual(@as(u32, 2), client.boringssl_pool.entries.items[0].request_count);
 }
+
+test "integration: production BoringSSL fetch path sends awr_ja4_h1 fingerprint" {
+    // Pins the production code path's TLS fingerprint to the published
+    // Chrome 132 + http/1.1-only ALPN constant in src/net/fingerprint.zig.
+    // This test exists because of a 2026-05-06 finding where production
+    // had silently drifted to a generic BoringSSL fingerprint
+    // (t13d86_b6101760603d_5301e1d12640) — no test was exercising the
+    // actual Client.getSharedTlsCtx + createBoringSslEntry path against
+    // a fingerprint-reporting endpoint.
+    if (!networkTestsEnabled()) return error.SkipZigTest;
+    if (!boringssl_fallback) return error.SkipZigTest;
+
+    const fingerprint = @import("net/fingerprint.zig");
+
+    var client = Client.init(std.testing.allocator, std.testing.io, .{});
+    defer client.deinit();
+
+    // Force the BoringSSL fallback: tls.peet.ws's TLS works in std-lib,
+    // so without this hint the fetch would go through std.http (whose
+    // fingerprint is unrelated to AWR's claim).
+    const host = std.testing.allocator.dupe(u8, "tls.peet.ws") catch return;
+    client.std_tls_failed_hosts.put(std.testing.allocator, host, {}) catch {
+        std.testing.allocator.free(host);
+        return;
+    };
+
+    var resp = client.fetch("https://tls.peet.ws/api/all") catch |err| switch (err) {
+        FetchError.DnsResolutionFailed, FetchError.ConnectionFailed => return,
+        else => return err,
+    };
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+
+    // tls.peet.ws returns its capture as JSON. Find `"ja4"` then skip
+    // ASCII whitespace + the colon + the opening quote. Avoids depending
+    // on whether the server's serializer inserts a space after `:`.
+    const key = "\"ja4\"";
+    const key_idx = std.mem.indexOf(u8, resp.body, key) orelse return error.Ja4FieldMissing;
+    var cursor = key_idx + key.len;
+    while (cursor < resp.body.len and (resp.body[cursor] == ' ' or resp.body[cursor] == ':' or
+        resp.body[cursor] == '\t' or resp.body[cursor] == '\n')) : (cursor += 1)
+    {}
+    if (cursor >= resp.body.len or resp.body[cursor] != '"') return error.Ja4FieldMalformed;
+    const value_start = cursor + 1;
+    const end = std.mem.indexOfScalarPos(u8, resp.body, value_start, '"') orelse
+        return error.Ja4FieldUnterminated;
+    const ja4 = resp.body[value_start..end];
+
+    try std.testing.expectEqualStrings(fingerprint.awr_ja4_h1, ja4);
+}
