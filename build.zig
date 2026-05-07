@@ -235,6 +235,7 @@ pub fn build(b: *std.Build) void {
         page_mod.addLibraryPath(lexbor_lib);
         page_mod.linkSystemLibrary("lexbor", .{});
         if (supports_boringssl) addBoringSslSupport(b, page_mod, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
+        if (supports_boringssl) addNgHttp2Support(b, page_mod, nghttp2_include, nghttp2_include_sys, nghttp2_lib);
 
         // render.zig (transitively imported via page) needs the
         // image_protocol module by name for its RenderOptions field.
@@ -266,6 +267,7 @@ pub fn build(b: *std.Build) void {
     });
     client_mod.addImport("xev", xev_mod);
     if (supports_boringssl) addBoringSslSupport(b, client_mod, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
+    if (supports_boringssl) addNgHttp2Support(b, client_mod, nghttp2_include, nghttp2_include_sys, nghttp2_lib);
     const client_test = b.addTest(.{
         .name = "client",
         .root_module = client_mod,
@@ -293,6 +295,7 @@ pub fn build(b: *std.Build) void {
         exe_page_mod.addLibraryPath(lexbor_lib);
         exe_page_mod.linkSystemLibrary("lexbor", .{});
         if (supports_boringssl) addBoringSslSupport(b, exe_page_mod, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
+        if (supports_boringssl) addNgHttp2Support(b, exe_page_mod, nghttp2_include, nghttp2_include_sys, nghttp2_lib);
 
         // Shared image-protocol module: both main.zig (root) and
         // render.zig (transitively under page) need it. Without a
@@ -461,6 +464,7 @@ pub fn build(b: *std.Build) void {
         page_import.addLibraryPath(lexbor_lib);
         page_import.linkSystemLibrary("lexbor", .{});
         if (supports_boringssl) addBoringSslSupport(b, page_import, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
+        if (supports_boringssl) addNgHttp2Support(b, page_import, nghttp2_include, nghttp2_include_sys, nghttp2_lib);
         // render.zig (transitively under page) needs image_protocol.
         const wpt_image_protocol_mod = b.createModule(.{
             .root_source_file = b.path("src/image/protocol.zig"),
@@ -514,6 +518,7 @@ pub fn build(b: *std.Build) void {
         page_import.addLibraryPath(lexbor_lib);
         page_import.linkSystemLibrary("lexbor", .{});
         if (supports_boringssl) addBoringSslSupport(b, page_import, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
+        if (supports_boringssl) addNgHttp2Support(b, page_import, nghttp2_include, nghttp2_include_sys, nghttp2_lib);
         // render.zig (transitively under page) needs image_protocol.
         const corpus_image_protocol_mod = b.createModule(.{
             .root_source_file = b.path("src/image/protocol.zig"),
@@ -805,4 +810,27 @@ fn addBoringSslSupport(
     mod.addIncludePath(boringssl_include);
     mod.addObjectFile(boringssl_lib_ssl);
     mod.addObjectFile(boringssl_lib_crpt);
+}
+
+/// Wire H2 (nghttp2 + h2_shim.c) into a module that imports
+/// `src/net/h2session.zig` as source. Mirrors `addBoringSslSupport` so
+/// non-test link units (the `awr` exe; the client test target) can
+/// resolve `awr_h2_*` symbols. Without this, every binary that
+/// transitively imports `Client` would fail at link time once H2
+/// dispatch is in the BoringSSL fallback path.
+fn addNgHttp2Support(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    nghttp2_include: std.Build.LazyPath,
+    nghttp2_include_sys: std.Build.LazyPath,
+    nghttp2_lib: std.Build.LazyPath,
+) void {
+    mod.addCSourceFile(.{
+        .file = b.path("src/net/h2_shim.c"),
+        .flags = &.{ "-std=c11", "-Wall" },
+    });
+    mod.addIncludePath(nghttp2_include);
+    mod.addIncludePath(nghttp2_include_sys);
+    mod.addLibraryPath(nghttp2_lib);
+    mod.linkSystemLibrary("nghttp2", .{});
 }

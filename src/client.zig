@@ -20,6 +20,7 @@ const tcp = @import("net/tcp.zig");
 const dns = @import("util/dns.zig");
 const boringssl_fallback = builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
 const tls_conn = if (boringssl_fallback) @import("net/tls_conn.zig") else struct {};
+const h2session = if (boringssl_fallback) @import("net/h2session.zig") else struct {};
 
 pub const Url = url_mod.Url;
 
@@ -43,6 +44,11 @@ const BoringSslPool = if (boringssl_fallback) struct {
     pub const MAX_REQUESTS_PER_CONN: u32 = 100;
     pub const IDLE_TIMEOUT_MS: i64 = 30_000;
 
+    /// Application-layer protocol negotiated during the TLS handshake.
+    /// Determines which send path runs on this entry: h1.1 framing
+    /// (`sendOnBoringSslEntry`) or H2 streams (`sendOnBoringSslEntryH2`).
+    pub const Protocol = enum { http_1_1, http_2 };
+
     pub const Entry = struct {
         host: []const u8,
         port: u16,
@@ -59,6 +65,23 @@ const BoringSslPool = if (boringssl_fallback) struct {
         in_use: bool,
         last_used_ms: i64,
         request_count: u32,
+        /// Set from `tls.alpn` after the handshake completes. Drives
+        /// the dispatch in `fetchOnceBoringSsl`.
+        protocol: Protocol = .http_1_1,
+        /// Owned H2 session — non-null only when `protocol == .http_2`.
+        /// `H2Session` callbacks receive `*Entry` as `user_data`; the
+        /// entry pointer is stable for the entry's lifetime (entries
+        /// are always `*Entry` in the pool, never moved by value).
+        h2_session: ?h2session.H2Session = null,
+        /// Stream ID of the in-flight H2 GET request, or 0 when no
+        /// request is active. Set by `sendOnBoringSslEntryH2` before
+        /// driving the I/O loop and cleared on return. The recv
+        /// callback consults this + `H2Session.streamComplete` to
+        /// signal `WOULDBLOCK` after the response END_STREAM has been
+        /// processed — without this, `nghttp2_session_recv` would loop
+        /// blocking on `tls.readFn` waiting for additional data the
+        /// server has no reason to send.
+        current_h2_stream_id: i32 = 0,
 
         fn nowMs() i64 {
             var ts: std.posix.timespec = undefined;
@@ -74,9 +97,10 @@ const BoringSslPool = if (boringssl_fallback) struct {
     }
 
     /// Tear down a per-connection entry. The SSL_CTX is borrowed and
-    /// outlives the entry; only per-connection state (TCP, TLS, host
-    /// dup) is freed here.
+    /// outlives the entry; only per-connection state (H2 session, TCP,
+    /// TLS, host dup) is freed here.
     fn destroyEntry(allocator: std.mem.Allocator, e: *Entry) void {
+        if (e.h2_session) |*sess| sess.deinit();
         e.tls.deinit();
         e.tcp_conn.deinit();
         allocator.free(e.host);
@@ -332,6 +356,11 @@ pub const Client = struct {
     /// BoringSSL/OpenSSL document SSL_CTX as immutable post-init and
     /// safe for many SSL_new() calls.
     shared_tls_ctx: ?tls_conn.TlsCtx = null,
+    /// Sibling SSL_CTX restricted to `http/1.1` ALPN, used when a
+    /// request must run on H1.1 framing even though the default ctx
+    /// would let the server pick H2 (e.g. POST, since the H2 submit
+    /// path is GET-only in this MVP). Lazy-initialized on first POST.
+    shared_tls_ctx_h1: ?tls_conn.TlsCtx = null,
     /// Hosts where `fetchOnceStd` has already returned `TlsNotAvailable`.
     /// On subsequent requests we skip the std attempt (which costs ~100-160ms
     /// on a fresh TCP+TLS handshake before failing) and go straight to
@@ -377,6 +406,7 @@ pub const Client = struct {
         // Pool entries borrow the shared ctx — destroy them first, then
         // the ctx (above order is enforced by the .deinit() sequence).
         if (self.shared_tls_ctx) |*ctx| ctx.deinit();
+        if (self.shared_tls_ctx_h1) |*ctx| ctx.deinit();
         var key_it = self.std_tls_failed_hosts.keyIterator();
         while (key_it.next()) |k| self.allocator.free(k.*);
         self.std_tls_failed_hosts.deinit(self.allocator);
@@ -641,23 +671,49 @@ pub const Client = struct {
         // the *first* request on a pooled connection failed before any
         // application-level response framing.
         if (self.boringssl_pool.acquire(u.host, u.port)) |entry| {
-            if (self.sendOnBoringSslEntry(entry, &u, url_str, method, body)) |resp| {
-                self.maybeReleaseBoringSsl(entry, &resp);
-                return resp;
-            } else |_| {
+            // POST on a pooled H2 entry: discard. The H2 submit path is
+            // GET-only in this MVP, so we'd corrupt the connection if we
+            // tried to mix HTTP/1.1 framing onto an H2 stream.
+            if (method != .GET and entry.protocol == .http_2) {
                 self.boringssl_pool.discard(self.allocator, entry);
-                // fall through to fresh handshake
+            } else {
+                if (self.sendOnBoringSslEntryDispatch(entry, &u, url_str, method, body)) |resp| {
+                    self.maybeReleaseBoringSsl(entry, &resp);
+                    return resp;
+                } else |_| {
+                    self.boringssl_pool.discard(self.allocator, entry);
+                    // fall through to fresh handshake
+                }
             }
         }
 
         // Fresh handshake. The errdefer covers: send failure, response parse
         // failure, allocation failure between handshake and Response return.
-        const entry = try self.createBoringSslEntry(&u);
+        const entry = try self.createBoringSslEntry(&u, method);
         errdefer self.boringssl_pool.discard(self.allocator, entry);
 
-        const resp = try self.sendOnBoringSslEntry(entry, &u, url_str, method, body);
+        const resp = try self.sendOnBoringSslEntryDispatch(entry, &u, url_str, method, body);
         self.maybeReleaseBoringSsl(entry, &resp);
         return resp;
+    }
+
+    /// Route to the H1.1 or H2 send path based on `entry.protocol`.
+    /// `entry.protocol == .http_2` requires `method == .GET` because the
+    /// H2 submit shim is GET-only — callers (`fetchOnceBoringSslHttp1`)
+    /// guarantee that invariant by discarding H2 pool entries when the
+    /// request is non-GET.
+    fn sendOnBoringSslEntryDispatch(
+        self: *Client,
+        entry: *BoringSslPool.Entry,
+        u: *const Url,
+        url_str: []const u8,
+        method: Method,
+        body: ?[]const u8,
+    ) anyerror!Response {
+        return switch (entry.protocol) {
+            .http_1_1 => self.sendOnBoringSslEntry(entry, u, url_str, method, body),
+            .http_2 => self.sendOnBoringSslEntryH2(entry, u, url_str),
+        };
     }
 
     /// Lazy-init the shared SSL_CTX. Done outside `Client.init` so a CLI
@@ -665,34 +721,46 @@ pub const Client = struct {
     /// std-only hosts) doesn't pay the ~5-15ms PEM parse cost. Returns
     /// a borrowed pointer; ownership stays with the Client.
     ///
-    /// Uses the **full** Chrome 132 ctx (`initWithBundle`) — the cipher
-    /// list, curve order, and sigalg list that produce the published
-    /// JA4 fingerprint constants in `src/net/fingerprint.zig`.
-    /// Earlier code used `initCompatHttp11WithBundle`, a strip-down ctx
-    /// that left BoringSSL defaults in place and produced a generic
-    /// fingerprint (`t13d86_b6101760603d_…`) instead of the claimed
-    /// Chrome 132 (`t13d1512h1_8daaf6152771_…`). This restored the
-    /// fingerprint claim on 2026-05-06.
-    ///
-    /// ALPN is currently restricted to `http/1.1` to keep wire framing
-    /// unchanged on this commit. Lane A's H2 multiplexing pass (next
-    /// commit) drops this restriction and routes h2-negotiated entries
-    /// through `H2Session`.
+    /// Uses the **full** Chrome 132 ctx (`initWithBundle`) — cipher list,
+    /// curve order, sigalg list, and ALPN advertise list `["h2",
+    /// "http/1.1"]` matching what tls.peet.ws confirms is Chrome 132's
+    /// fingerprint (`awr_ja4_h2`). The negotiated protocol per
+    /// connection is read from `TlsConn.alpn` post-handshake and
+    /// dispatched in `fetchOnceBoringSsl`.
     fn getSharedTlsCtx(self: *Client) anyerror!*tls_conn.TlsCtx {
         if (self.shared_tls_ctx) |*ctx| return ctx;
+        self.shared_tls_ctx = tls_conn.initWithBundle() catch return FetchError.TlsNotAvailable;
+        return &self.shared_tls_ctx.?;
+    }
+
+    /// Sibling ctx restricted to `http/1.1` ALPN. Used by POST requests
+    /// because the H2 shim only exposes a GET submit path
+    /// (`awr_h2_submit_get_ex`). Forcing H1.1 ALPN guarantees the
+    /// resulting TlsConn negotiates `http/1.1`, which `sendOnBoringSslEntry`
+    /// can drive directly. The published JA4 for this ctx is `awr_ja4_h1`.
+    fn getSharedTlsCtxH1Only(self: *Client) anyerror!*tls_conn.TlsCtx {
+        if (self.shared_tls_ctx_h1) |*ctx| return ctx;
         var ctx = tls_conn.initWithBundle() catch return FetchError.TlsNotAvailable;
         tls_conn.forceHttp11Alpn(&ctx);
-        self.shared_tls_ctx = ctx;
-        return &self.shared_tls_ctx.?;
+        self.shared_tls_ctx_h1 = ctx;
+        return &self.shared_tls_ctx_h1.?;
     }
 
     /// Allocate, handshake, and register a new pool entry for `u`. The entry
     /// is added to the pool with `in_use=true` so a concurrent acquire would
     /// not steal it (single-threaded today, but the invariant matters).
-    fn createBoringSslEntry(self: *Client, u: *const Url) anyerror!*BoringSslPool.Entry {
+    ///
+    /// `method` selects the shared ctx: GET uses the h2-capable ctx
+    /// (`["h2", "http/1.1"]` ALPN; the entry's `protocol` field reflects
+    /// what the server picked). POST forces `http/1.1`-only ALPN because
+    /// the H2 submit shim is GET-only in this MVP.
+    fn createBoringSslEntry(self: *Client, u: *const Url, method: Method) anyerror!*BoringSslPool.Entry {
         if (!boringssl_fallback) return FetchError.TlsNotAvailable;
 
-        const shared_ctx = try self.getSharedTlsCtx();
+        const shared_ctx = if (method == .GET)
+            try self.getSharedTlsCtx()
+        else
+            try self.getSharedTlsCtxH1Only();
 
         const addr = dns.resolve(self.io, u.host, u.port) catch |err| return mapFetchError(err);
 
@@ -707,6 +775,8 @@ pub const Client = struct {
         entry.last_used_ms = BoringSslPool.Entry.nowMs();
         entry.request_count = 0;
         entry.ctx = shared_ctx;
+        entry.protocol = .http_1_1;
+        entry.h2_session = null;
 
         entry.tcp_conn = tcp.TcpConn.init(self.allocator, addr) catch return FetchError.ConnectionFailed;
         errdefer entry.tcp_conn.deinit();
@@ -727,7 +797,26 @@ pub const Client = struct {
         // Reader buffers across requests on this connection so any bytes
         // over-read past the previous response (rare with strict framing,
         // but possible) survive into the next request's readUntilDelimiter.
+        // For H2 entries the reader is unused — the H2 session reads
+        // directly from `entry.tls` via the recv callback.
         entry.reader = .{ .conn = &entry.tls };
+
+        // Tag the negotiated protocol and lazily create the H2 session.
+        // The H2 callbacks take `*Entry` as user_data so the recv
+        // callback can short-circuit nghttp2's internal recv loop
+        // after the active stream completes (see `h2RecvCallback`).
+        // The entry pointer is stable for the entry's lifetime —
+        // entries are always heap-allocated `*Entry` in the pool
+        // array, never moved by value.
+        if (entry.tls.alpn == .h2) {
+            entry.protocol = .http_2;
+            entry.h2_session = h2session.H2Session.init(
+                h2SendCallback,
+                h2RecvCallback,
+                @as(*anyopaque, @ptrCast(entry)),
+            ) catch return FetchError.TlsNotAvailable;
+        }
+        errdefer if (entry.h2_session) |*sess| sess.deinit();
 
         try self.boringssl_pool.add(self.allocator, entry);
         return entry;
@@ -792,6 +881,105 @@ pub const Client = struct {
         };
     }
 
+    /// Send one GET request on `entry` over an H2 stream and read the
+    /// response. Builds Chrome 132 lowercase request headers, submits a
+    /// new stream to the entry's H2Session, runs the I/O loop until the
+    /// stream completes, and translates the H2Response to AWR's
+    /// Response shape.
+    ///
+    /// MVP scope: GET only. POST is routed elsewhere because the H2
+    /// shim only exposes `awr_h2_submit_get_ex` for now.
+    fn sendOnBoringSslEntryH2(
+        self: *Client,
+        entry: *BoringSslPool.Entry,
+        u: *const Url,
+        url_str: []const u8,
+    ) anyerror!Response {
+        if (!boringssl_fallback) return FetchError.TlsNotAvailable;
+
+        var sess = &entry.h2_session.?;
+
+        // Pseudo-headers must be NUL-terminated for the C shim. authority
+        // is host (with explicit port if non-default).
+        const authority = try hostHeader(self.allocator, u);
+        defer self.allocator.free(authority);
+        const authority_z = try self.allocator.dupeZ(u8, authority);
+        defer self.allocator.free(authority_z);
+        const path = try pathWithQueryAlloc(self.allocator, u);
+        defer self.allocator.free(path);
+        const path_z = try self.allocator.dupeZ(u8, path);
+        defer self.allocator.free(path_z);
+
+        // Chrome 132 mirrors of the H1.1 headers, lowercased per the H2
+        // spec. The HPACK encoder will compress these on subsequent
+        // requests across the same H2 session — connection reuse is the
+        // perf win Lane A is chasing.
+        const ua = effectiveUserAgent(self.options);
+        const accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+        const accept_lang = "en-US,en;q=0.9";
+        const accept_enc = "identity";
+
+        const headers = [_]h2session.H2Session.HeaderField{
+            .{ .name = "user-agent", .name_len = 10, .value = ua.ptr, .value_len = ua.len },
+            .{ .name = "accept", .name_len = 6, .value = accept, .value_len = accept.len },
+            .{ .name = "accept-language", .name_len = 15, .value = accept_lang, .value_len = accept_lang.len },
+            .{ .name = "accept-encoding", .name_len = 15, .value = accept_enc, .value_len = accept_enc.len },
+        };
+
+        const sid = sess.submitGetWithHeaders(
+            "GET",
+            "https",
+            authority_z.ptr,
+            path_z.ptr,
+            &headers,
+        ) catch return FetchError.ConnectionFailed;
+
+        // Mark the active stream so `h2RecvCallback` knows when to
+        // return WOULDBLOCK and break nghttp2's internal recv loop.
+        // Reset on every exit path (success and error) — leaving it
+        // stale would make a subsequent request misread completion.
+        entry.current_h2_stream_id = sid;
+        defer entry.current_h2_stream_id = 0;
+
+        // 4096 iters is generous — most responses complete in < 10. The
+        // loop bound exists to bail on a stalled server rather than
+        // hang forever; runUntilComplete returns StreamNotComplete in
+        // that case which surfaces as a fetch error.
+        var h2_resp = sess.runUntilComplete(sid, 4096) catch return FetchError.ConnectionFailed;
+        defer h2_resp.deinit();
+
+        // Translate H2Response → AWR Response. Body and header buffers
+        // are duped because h2_resp.deinit() frees the C-side allocation.
+        const effective_url = try self.allocator.dupe(u8, url_str);
+        errdefer self.allocator.free(effective_url);
+
+        const body_dup = if (h2_resp.body.len > 0)
+            try self.allocator.dupe(u8, h2_resp.body)
+        else
+            try self.allocator.alloc(u8, 0);
+        errdefer self.allocator.free(body_dup);
+
+        var headers_out = http1.HeaderList{ .owns_strings = true };
+        errdefer headers_out.deinit(self.allocator);
+
+        var it = h2_resp.headerIterator();
+        while (it.next()) |pair| {
+            const name_dup = try self.allocator.dupe(u8, pair.name);
+            errdefer self.allocator.free(name_dup);
+            const value_dup = try self.allocator.dupe(u8, pair.value);
+            errdefer self.allocator.free(value_dup);
+            try headers_out.append(self.allocator, name_dup, value_dup);
+        }
+
+        return Response{
+            .status = h2_resp.status,
+            .url = effective_url,
+            .headers = headers_out,
+            .body = body_dup,
+            .allocator = self.allocator,
+        };
+    }
+
     /// Either return the entry to the idle pool (server willing to keep
     /// going) or discard it (server sent `Connection: close`, or we hit the
     /// per-connection request cap).
@@ -846,6 +1034,51 @@ fn writeAllTls(conn: anytype, bytes: []const u8) !void {
         if (n == 0) return FetchError.SendFailed;
         written += n;
     }
+}
+
+// ── H2 session send/recv callbacks ────────────────────────────────────────
+//
+// nghttp2 (via h2_shim.c) calls these whenever it has bytes to push out
+// or wants more bytes to read. `user_data` is a `*BoringSslPool.Entry`
+// that owns the H2 session — stable for the entry's lifetime because
+// entries are heap-allocated `*Entry` pointers in the pool array.
+//
+// Return values follow the `cb_send` / `cb_recv` contract in h2_shim.c:
+//   send: positive = bytes written, -1 = error
+//   recv: positive = bytes read, 0 = WOULDBLOCK, -2 = EOF, <0 = error
+//
+// The recv callback's WOULDBLOCK return is the key to making blocking
+// TLS I/O work with `nghttp2_session_recv`'s internal loop. After the
+// active stream's END_STREAM is processed, we return 0 so nghttp2
+// stops calling us — otherwise the next `tls.readFn` would block
+// forever waiting for data the server has no reason to send.
+
+fn h2SendCallback(data: [*c]const u8, len: usize, ud: ?*anyopaque) callconv(.c) c_int {
+    if (!boringssl_fallback) return -1;
+    const entry: *BoringSslPool.Entry = @ptrCast(@alignCast(ud orelse return -1));
+    const slice = data[0..len];
+    const n = entry.tls.writeFn(slice) catch return -1;
+    return @intCast(n);
+}
+
+fn h2RecvCallback(buf: [*c]u8, len: usize, ud: ?*anyopaque) callconv(.c) c_int {
+    if (!boringssl_fallback) return -1;
+    const entry: *BoringSslPool.Entry = @ptrCast(@alignCast(ud orelse return -1));
+
+    // If we have an active stream and it has already received END_STREAM,
+    // tell nghttp2 there's nothing more to read so its internal recv
+    // loop returns. Without this, `tls.readFn` blocks indefinitely
+    // because the server keeps the H2 connection open for keep-alive.
+    if (entry.current_h2_stream_id != 0) {
+        if (entry.h2_session) |*sess| {
+            if (sess.streamComplete(entry.current_h2_stream_id)) return 0;
+        }
+    }
+
+    const slice = buf[0..len];
+    const n = entry.tls.readFn(slice) catch return -1;
+    if (n == 0) return -2; // EOF — TlsConn.readFn returns 0 at end-of-stream
+    return @intCast(n);
 }
 
 const TlsBufferedReader = if (boringssl_fallback) struct {
@@ -1404,9 +1637,13 @@ test "integration: BoringSSL pool reuses connection across same-origin fetches" 
     try std.testing.expectEqual(@as(u32, 2), client.boringssl_pool.entries.items[0].request_count);
 }
 
-test "integration: production BoringSSL fetch path sends awr_ja4_h1 fingerprint" {
+test "integration: production BoringSSL fetch path sends awr_ja4_h2 fingerprint" {
     // Pins the production code path's TLS fingerprint to the published
-    // Chrome 132 + http/1.1-only ALPN constant in src/net/fingerprint.zig.
+    // Chrome 132 ALPN-h2 constant in src/net/fingerprint.zig. The GET
+    // path uses the h2-capable ctx (`["h2", "http/1.1"]` ALPN); a
+    // server that supports H2 (tls.peet.ws does) will pick h2 and the
+    // resulting JA4 ends in `_h2`.
+    //
     // This test exists because of a 2026-05-06 finding where production
     // had silently drifted to a generic BoringSSL fingerprint
     // (t13d86_b6101760603d_5301e1d12640) — no test was exercising the
@@ -1451,5 +1688,5 @@ test "integration: production BoringSSL fetch path sends awr_ja4_h1 fingerprint"
         return error.Ja4FieldUnterminated;
     const ja4 = resp.body[value_start..end];
 
-    try std.testing.expectEqualStrings(fingerprint.awr_ja4_h1, ja4);
+    try std.testing.expectEqualStrings(fingerprint.awr_ja4_h2, ja4);
 }

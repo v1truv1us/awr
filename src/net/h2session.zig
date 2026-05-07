@@ -133,6 +133,15 @@ pub const H2Session = struct {
         return c.awr_h2_stream_complete(self.sess, stream_id) != 0;
     }
 
+    /// Whether the named stream's END_STREAM has been processed.
+    /// Cheap check — used by the recv callback to break nghttp2's
+    /// internal recv loop after the response is fully received,
+    /// rather than blocking on the next `tls.readFn` waiting for
+    /// data the server has no reason to send.
+    pub fn streamComplete(self: *H2Session, stream_id: i32) bool {
+        return c.awr_h2_stream_complete(self.sess, stream_id) != 0;
+    }
+
     /// Spin the I/O loop up to `max_iters` times until `stream_id` completes.
     /// Returns H2Error.StreamNotComplete if the limit is reached.
     pub fn runUntilComplete(self: *H2Session, stream_id: i32, max_iters: u32) H2Error!H2Response {
