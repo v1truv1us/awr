@@ -22,32 +22,50 @@ const url_mod = @import("net/url.zig");
 const cookie_path = @import("util/cookie_path.zig");
 const tls_fail_cache_path = @import("util/tls_fail_cache_path.zig");
 const time_util = @import("util/time.zig");
+const telemetry = @import("telemetry");
 
-/// Phase-timing probe gated on `AWR_TIMING=1`. Prints to stderr so the
-/// JSON-on-stdout contract is preserved. No allocations; safe to leave
-/// in the hot path because the env check is a single libc call resolved
-/// once at probe init.
+/// Phase-timing probe.
+///
+/// Two independent outputs, each opt-in via env var:
+///   - `AWR_TIMING=1`: prints `[timing] phase=Nms` lines to stderr for
+///     interactive debugging.
+///   - `AWR_TELEMETRY=…`: routes the same numbers into a
+///     `telemetry.SessionMetrics` sink for structured aggregation.
+///
+/// The probe always runs when *either* output is enabled — so a session
+/// that only sets `AWR_TELEMETRY` still gets accurate per-phase times,
+/// not zeros. Both outputs share the same `last_ms` clock to keep
+/// stderr text and JSON timings byte-identical.
 const TimingProbe = struct {
-    enabled: bool,
+    enabled_print: bool,
+    sink: ?*telemetry.SessionMetrics,
     last_ms: i64 = 0,
     start_ms: i64 = 0,
 
-    fn init() TimingProbe {
-        const on = std.c.getenv("AWR_TIMING") != null;
-        if (!on) return .{ .enabled = false };
+    fn init(sink: ?*telemetry.SessionMetrics) TimingProbe {
+        const enabled_print = std.c.getenv("AWR_TIMING") != null;
+        const enabled_any = enabled_print or sink != null;
+        if (!enabled_any) return .{ .enabled_print = false, .sink = null };
         const now = time_util.wallClockMillis();
-        return .{ .enabled = true, .last_ms = now, .start_ms = now };
+        return .{
+            .enabled_print = enabled_print,
+            .sink = sink,
+            .last_ms = now,
+            .start_ms = now,
+        };
     }
 
     fn mark(self: *TimingProbe, name: []const u8) void {
-        if (!self.enabled) return;
+        if (!self.enabled_print and self.sink == null) return;
         const now = time_util.wallClockMillis();
-        std.debug.print("[timing] {s}={d}ms\n", .{ name, now - self.last_ms });
+        const elapsed = now - self.last_ms;
+        if (self.enabled_print) std.debug.print("[timing] {s}={d}ms\n", .{ name, elapsed });
+        if (self.sink) |s| s.setSubPhase(name, elapsed);
         self.last_ms = now;
     }
 
     fn finish(self: *TimingProbe) void {
-        if (!self.enabled) return;
+        if (!self.enabled_print) return;
         const now = time_util.wallClockMillis();
         std.debug.print("[timing] total={d}ms\n", .{now - self.start_ms});
     }
@@ -304,6 +322,12 @@ pub const Page = struct {
     cookie_jar_path: ?[]u8 = null,
     /// Owned tls-fail-cache path. Borrowed by Client, freed by Page.
     tls_fail_cache_path: ?[]u8 = null,
+    /// Optional structured-metrics sink. When non-null, the
+    /// per-phase TimingProbe writes sub-phase ms values into it
+    /// (in addition to its existing AWR_TIMING-gated stderr output).
+    /// Caller owns the sink; Page borrows the pointer for the lifetime
+    /// of `processHtml` calls. Set via `setMetricsSink`.
+    metrics_sink: ?*telemetry.SessionMetrics = null,
 
     /// Initialise a new Page with default client options.
     /// `io` is threaded through to the HTTP client for all network fetches
@@ -525,12 +549,18 @@ pub const Page = struct {
     /// the post-JS document state.  Caller must call result.deinit().
     pub fn navigate(self: *Page, url: []const u8) !PageResult {
         const timing_on = std.c.getenv("AWR_TIMING") != null;
-        const t_fetch_start = if (timing_on) time_util.wallClockMillis() else 0;
+        const measure = timing_on or self.metrics_sink != null;
+        const t_fetch_start = if (measure) time_util.wallClockMillis() else 0;
         var resp = try self.client.fetch(url);
         defer resp.deinit();
-        if (timing_on) {
+        if (measure) {
             const elapsed = time_util.wallClockMillis() - t_fetch_start;
-            std.debug.print("[timing] navigate_fetch={d}ms ({d}B)\n", .{ elapsed, resp.body.len });
+            if (timing_on) {
+                std.debug.print("[timing] navigate_fetch={d}ms ({d}B)\n", .{ elapsed, resp.body.len });
+            }
+            if (self.metrics_sink) |s| {
+                s.navigate_fetch_ms = elapsed;
+            }
         }
         return self.processHtml(resp.url, resp.status, resp.body);
     }
@@ -599,7 +629,7 @@ pub const Page = struct {
         html_src: []const u8,
     ) !PageResult {
         const gpa = self.allocator;
-        var probe = TimingProbe.init();
+        var probe = TimingProbe.init(self.metrics_sink);
 
         if (self.current_doc) |*doc_ref| {
             bridge.removeDomBridge(&self.js);
@@ -731,6 +761,16 @@ pub const Page = struct {
         const url_copy = try gpa.dupe(u8, url);
         probe.mark("extract");
         probe.finish();
+
+        // Mirror the final response shape into telemetry. status and
+        // body_bytes here describe the post-processing observable
+        // state (what an agent consumer sees), not the raw HTTP
+        // response. That's consistent with what the JSON envelope
+        // exposes.
+        if (self.metrics_sink) |s| {
+            s.status = status;
+            s.body_bytes = body_text.len;
+        }
 
         return PageResult{
             .url = url_copy,

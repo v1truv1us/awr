@@ -113,6 +113,23 @@ pub fn build(b: *std.Build) void {
         if (std.mem.eql(u8, m.name, "http2")) test_h2_step.dependOn(&run_t.step);
     }
 
+    // ── telemetry module (pure-Zig, no deps) ──────────────────────────────
+    // Per-session structured-metrics emission. Imported by main.zig and
+    // page.zig but stands alone for testing.
+    {
+        const telemetry_mod = b.createModule(.{
+            .root_source_file = b.path("src/telemetry.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const telemetry_test = b.addTest(.{
+            .name = "telemetry",
+            .root_module = telemetry_mod,
+        });
+        const run_telemetry = b.addRunArtifact(telemetry_test);
+        test_step.dependOn(&run_telemetry.step);
+    }
+
     // ── tcp module (depends on libxev) ────────────────────────────────────
     {
         const tcp_mod = b.createModule(.{
@@ -247,6 +264,16 @@ pub fn build(b: *std.Build) void {
         });
         page_mod.addImport("image_protocol", page_image_protocol_mod);
 
+        // page.zig imports telemetry by name. Same pattern as
+        // image_protocol — single-file pure-Zig module shared across
+        // module instances within the same build unit.
+        const page_telemetry_mod = b.createModule(.{
+            .root_source_file = b.path("src/telemetry.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        page_mod.addImport("telemetry", page_telemetry_mod);
+
         const page_test = b.addTest(.{
             .name = "page",
             .root_module = page_mod,
@@ -310,6 +337,16 @@ pub fn build(b: *std.Build) void {
         });
         exe_page_mod.addImport("image_protocol", exe_image_protocol_mod);
 
+        // Shared telemetry module — same pattern as image_protocol.
+        // main.zig (root) and page.zig both `@import("telemetry")`,
+        // so we need one module instance both can resolve to.
+        const exe_telemetry_mod = b.createModule(.{
+            .root_source_file = b.path("src/telemetry.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        exe_page_mod.addImport("telemetry", exe_telemetry_mod);
+
         // Image pipeline — orchestrates fetch + decode + encode for
         // every <img> on a page. Lives in its own named module so it
         // can pull in stb_image once (via decode.zig) without polluting
@@ -355,6 +392,7 @@ pub fn build(b: *std.Build) void {
         exe_mod.addImport("build_opts", opts_mod);
         exe_mod.addImport("image_protocol", exe_image_protocol_mod);
         exe_mod.addImport("image_pipeline", exe_image_pipeline_mod);
+        exe_mod.addImport("telemetry", exe_telemetry_mod);
 
         const exe = b.addExecutable(.{
             .name = "awr",
@@ -473,6 +511,13 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         page_import.addImport("image_protocol", wpt_image_protocol_mod);
+        // page.zig imports "telemetry"; mirror exe / page_mod patterns.
+        const wpt_telemetry_mod = b.createModule(.{
+            .root_source_file = b.path("src/telemetry.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        page_import.addImport("telemetry", wpt_telemetry_mod);
         wpt_mod.addImport("page", page_import);
 
         const wpt_test = b.addTest(.{
@@ -527,6 +572,13 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         page_import.addImport("image_protocol", corpus_image_protocol_mod);
+        // page.zig imports "telemetry"; mirror exe / page_mod patterns.
+        const corpus_telemetry_mod = b.createModule(.{
+            .root_source_file = b.path("src/telemetry.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        page_import.addImport("telemetry", corpus_telemetry_mod);
         corpus_mod.addImport("page", page_import);
 
         const corpus_test = b.addTest(.{

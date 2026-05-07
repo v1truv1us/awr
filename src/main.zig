@@ -3,6 +3,7 @@ const build_opts = @import("build_opts");
 const page_mod = @import("page");
 const mock_mod = @import("mock.zig");
 const browser_mod = @import("browser.zig");
+const telemetry = @import("telemetry");
 const image_protocol = @import("image_protocol");
 const image_pipeline = @import("image_pipeline");
 
@@ -350,20 +351,35 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     // Default: treat arg as a URL/path and print the full JSON envelope.
     const url = args[1];
     const timing_on = std.c.getenv("AWR_TIMING") != null;
-    const t_startup_done = if (timing_on) nowMs() else 0;
+
+    // Telemetry sink — populated through the fetch pipeline whenever
+    // AWR_TELEMETRY is set, ignored otherwise. The sink lives across
+    // every phase; emission happens in `defer` so even early exits via
+    // unhandled errors still get a record. Attaching to Page via
+    // `metrics_sink` is what plumbs the sub-phase timings.
+    var metrics = telemetry.SessionMetrics.init();
+    metrics.url = url;
+    defer telemetry.emit(&metrics, alloc, io);
+
+    const t_startup_done = if (timing_on or telemetry.resolveDest(alloc) catch .none != .none) nowMs() else 0;
     var p = try page_mod.Page.init(alloc, io);
     defer p.deinit();
-    if (timing_on) {
+    p.metrics_sink = &metrics;
+    if (t_startup_done != 0) {
         const elapsed = nowMs() - t_startup_done;
-        std.debug.print("[timing] page_init={d}ms\n", .{elapsed});
+        if (timing_on) std.debug.print("[timing] page_init={d}ms\n", .{elapsed});
+        metrics.page_init_ms = elapsed;
     }
 
+    const t_process_start = nowMs();
     var result = loadPage(&p, alloc, io, url) catch |err| {
         fatalLoadError("fetching", url, err);
     };
     defer result.deinit();
+    metrics.process_html_ms = nowMs() - t_process_start - metrics.navigate_fetch_ms;
+    if (metrics.process_html_ms < 0) metrics.process_html_ms = 0;
 
-    const t_render_start = if (timing_on) nowMs() else 0;
+    const t_render_start = if (timing_on or p.metrics_sink != null) nowMs() else 0;
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
 
@@ -384,9 +400,11 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     try buf.appendSlice(alloc, "}\n");
 
     try stdoutWrite(io, buf.items);
-    if (timing_on) {
+    if (t_render_start != 0) {
         const elapsed = nowMs() - t_render_start;
-        std.debug.print("[timing] json_emit={d}ms ({d}B)\n", .{ elapsed, buf.items.len });
+        if (timing_on) std.debug.print("[timing] json_emit={d}ms ({d}B)\n", .{ elapsed, buf.items.len });
+        metrics.json_emit_ms = elapsed;
+        metrics.envelope_bytes = buf.items.len;
     }
 }
 
