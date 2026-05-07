@@ -288,10 +288,19 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
             .env = image_protocol.realEnvSnapshot(),
             .probe_sixel = if (image_mode == .auto) &image_protocol.probeSixel else null,
         });
+
+        // Per-session telemetry — same pattern as the default URL path.
+        // The render path emits rendered terminal text instead of a
+        // JSON envelope, so `envelope_bytes` reflects screen.text.len.
+        var metrics = telemetry.SessionMetrics.init();
+        metrics.url = args[2];
+        defer telemetry.emit(&metrics, alloc, io);
+
         var p = try page_mod.Page.init(alloc, io);
         defer p.deinit();
+        p.metrics_sink = &metrics;
         var result = loadPage(&p, alloc, io, args[2]) catch |err| {
-            fatalLoadError("loading", args[2], err);
+            fatalLoadErrorWithMetrics(&metrics, alloc, io, "loading", args[2], err);
         };
         defer result.deinit();
 
@@ -328,6 +337,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         if (screen.text.len == 0 or screen.text[screen.text.len - 1] != '\n') {
             try stdoutWrite(io, "\n");
         }
+        metrics.envelope_bytes = screen.text.len;
         return;
     }
 
@@ -337,15 +347,21 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
             try stdoutWrite(io, "usage: awr tools <url>\n");
             std.process.exit(1);
         }
+        var metrics = telemetry.SessionMetrics.init();
+        metrics.url = args[2];
+        defer telemetry.emit(&metrics, alloc, io);
+
         var p = try page_mod.Page.init(alloc, io);
         defer p.deinit();
+        p.metrics_sink = &metrics;
         var result = loadPage(&p, alloc, io, args[2]) catch |err| {
-            fatalLoadError("loading", args[2], err);
+            fatalLoadErrorWithMetrics(&metrics, alloc, io, "loading", args[2], err);
         };
         defer result.deinit();
         const tj = result.tools_json orelse "[]";
         try stdoutWrite(io, tj);
         try stdoutWrite(io, "\n");
+        metrics.envelope_bytes = tj.len + 1; // +1 for newline
         return;
     }
 
@@ -355,17 +371,32 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
             try stdoutWrite(io, "usage: awr call <url> <tool-name> <json-args>\n");
             std.process.exit(1);
         }
+        var metrics = telemetry.SessionMetrics.init();
+        metrics.url = args[2];
+        defer telemetry.emit(&metrics, alloc, io);
+
         var p = try page_mod.Page.init(alloc, io);
         defer p.deinit();
+        p.metrics_sink = &metrics;
         var result = loadPage(&p, alloc, io, args[2]) catch |err| {
-            fatalLoadError("loading", args[2], err);
+            fatalLoadErrorWithMetrics(&metrics, alloc, io, "loading", args[2], err);
         };
         defer result.deinit();
         const out = try p.callTool(args[3], args[4]);
         defer alloc.free(out);
         try stdoutWrite(io, out);
         try stdoutWrite(io, "\n");
-        if (isFailedCallEnvelope(out)) std.process.exit(1);
+        metrics.envelope_bytes = out.len + 1;
+        // Tool-call failures are app-level, not transport-level: the
+        // page loaded fine (200) but the JS tool returned `{ok:false}`.
+        // Surface this distinct from network errors via error_kind so
+        // aggregate logs can split "couldn't reach the page" from
+        // "the page's tool said no".
+        if (isFailedCallEnvelope(out)) {
+            metrics.error_kind = "ToolCallFailed";
+            telemetry.emit(&metrics, alloc, io);
+            std.process.exit(1);
+        }
         return;
     }
 
