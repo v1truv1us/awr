@@ -88,6 +88,27 @@ fn fatalLoadError(action: []const u8, location: []const u8, err: anyerror) noret
     });
 }
 
+/// Telemetry-aware variant of `fatalLoadError`. Records the error
+/// onto the session metrics and emits before calling fatal, so failed
+/// fetches show up in aggregate logs alongside successful ones.
+/// std.process.fatal calls posix.exit which does NOT run deferred
+/// cleanup, including the deferred telemetry.emit at the top of
+/// main — without this manual emit, the error path would be invisible
+/// to telemetry.
+fn fatalLoadErrorWithMetrics(
+    metrics: *telemetry.SessionMetrics,
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    action: []const u8,
+    location: []const u8,
+    err: anyerror,
+) noreturn {
+    metrics.error_kind = @errorName(err);
+    metrics.error_message = describeLoadError(err);
+    telemetry.emit(metrics, alloc, io);
+    fatalLoadError(action, location, err);
+}
+
 /// Detect whether `awr call` returned the error envelope shape
 /// `{ "ok": false, ... }` (with or without spaces after the colon).
 fn isFailedCallEnvelope(out: []const u8) bool {
@@ -373,7 +394,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
 
     const t_process_start = nowMs();
     var result = loadPage(&p, alloc, io, url) catch |err| {
-        fatalLoadError("fetching", url, err);
+        fatalLoadErrorWithMetrics(&metrics, alloc, io, "fetching", url, err);
     };
     defer result.deinit();
     metrics.process_html_ms = nowMs() - t_process_start - metrics.navigate_fetch_ms;

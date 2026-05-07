@@ -97,6 +97,16 @@ pub const SessionMetrics = struct {
     /// (or in our ctx / pool wiring). null when not measured.
     protocol_main: ?[]const u8 = null,
 
+    /// When the session ended with a fatal error, the Zig error tag
+    /// (`@errorName(err)` — e.g. "TlsNotAvailable",
+    /// "DnsResolutionFailed"). Borrowed from a static string. null
+    /// on the success path.
+    error_kind: ?[]const u8 = null,
+    /// Human-readable description of the same error
+    /// (`describeLoadError` output — e.g. "TLS setup or handshake
+    /// failed"). Borrowed; null on success.
+    error_message: ?[]const u8 = null,
+
     /// Initialize with the current wall-clock time.
     pub fn init() SessionMetrics {
         return .{ .started_at_ms = wallClockMs() };
@@ -165,6 +175,15 @@ pub const SessionMetrics = struct {
         if (self.protocol_main) |p| {
             try writer.writeAll(",\"protocol_main\":");
             try writeJsonString(writer, p);
+        }
+
+        if (self.error_kind) |e| {
+            try writer.writeAll(",\"error_kind\":");
+            try writeJsonString(writer, e);
+        }
+        if (self.error_message) |m| {
+            try writer.writeAll(",\"error_message\":");
+            try writeJsonString(writer, m);
         }
 
         try writer.writeAll("}\n");
@@ -250,11 +269,16 @@ pub fn emit(metrics: *const SessionMetrics, allocator: std.mem.Allocator, io: st
 }
 
 fn emitToStderr(metrics: *const SessionMetrics, io: std.Io) !void {
-    var stderr = std.Io.File.stderr();
-    var buffer: [2048]u8 = undefined;
-    var fw = stderr.writer(io, &buffer);
-    try metrics.writeJson(&fw.interface);
-    try fw.interface.flush();
+    // Build the JSON line in a single allocation, then write it to
+    // stderr in one call. This avoids interleaving with anything else
+    // that writes to fd 2 — most importantly `std.process.fatal`,
+    // which our caller may invoke immediately after telemetry emits.
+    // A buffered writer here would race the fatal-path's own writes
+    // and produce a torn line in the resulting log.
+    var line: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
+    defer line.deinit();
+    try metrics.writeJson(&line.writer);
+    try std.Io.File.stderr().writeStreamingAll(io, line.written());
 }
 
 fn emitToFile(metrics: *const SessionMetrics, io: std.Io, path: []const u8) !void {
@@ -353,6 +377,21 @@ test "SessionMetrics.writeJson includes protocol_main when set" {
 
     const out = buf.written();
     try std.testing.expect(std.mem.indexOf(u8, out, "\"protocol_main\":\"h2\"") != null);
+}
+
+test "SessionMetrics.writeJson includes error fields when set" {
+    var m = SessionMetrics.init();
+    m.url = "https://broken.example/";
+    m.error_kind = "TlsNotAvailable";
+    m.error_message = "TLS setup or handshake failed";
+
+    var buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer buf.deinit();
+    try m.writeJson(&buf.writer);
+
+    const out = buf.written();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"error_kind\":\"TlsNotAvailable\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"error_message\":\"TLS setup or handshake failed\"") != null);
 }
 
 test "SessionMetrics.writeJson omits protocol_main when null" {
