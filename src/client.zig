@@ -1178,7 +1178,7 @@ fn absorbSetCookies(jar: *cookie.CookieJar, request_url: []const u8, headers: *c
 /// caller owns it. Empty result means "no matching cookies, omit the
 /// header entirely". Mirrors `cookie.CookieJar.getCookieHeader` but
 /// hides the same-site default in one place.
-fn buildCookieHeaderValue(
+pub fn buildCookieHeaderValue(
     jar: *cookie.CookieJar,
     allocator: std.mem.Allocator,
     host: []const u8,

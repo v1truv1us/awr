@@ -403,6 +403,38 @@ pub const Page = struct {
             .ptr = self,
             .fetchFn = fetchAdapter,
         });
+        self.js.attachCookieHost(.{
+            .ptr = self,
+            .getFn = cookieGetAdapter,
+            .setFn = cookieSetAdapter,
+        });
+    }
+
+    /// CookieHost.getCookies — return the request-side `Cookie:` header
+    /// value the page would send for its current origin. Empty string
+    /// when the jar has no matching cookies (or the page is on a
+    /// `file://` URL with no parseable origin).
+    fn cookieGetAdapter(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *Page = @ptrCast(@alignCast(ptr));
+        const u = url_mod.Url.parse(self.base_url) catch return allocator.alloc(u8, 0);
+        return client.buildCookieHeaderValue(
+            &self.client.cookies,
+            allocator,
+            u.host,
+            u.path,
+            u.is_https,
+        );
+    }
+
+    /// CookieHost.setCookie — parse a single Set-Cookie-shaped string
+    /// (`name=value; Path=/; Expires=...`) against the page's current
+    /// origin and store in the jar. Failures are silent — matches the
+    /// browser semantics where `document.cookie = "<garbage>"` is a no-op
+    /// rather than a thrown error.
+    fn cookieSetAdapter(ptr: *anyopaque, value: []const u8) void {
+        const self: *Page = @ptrCast(@alignCast(ptr));
+        const u = url_mod.Url.parse(self.base_url) catch return;
+        self.client.cookies.parseSetCookie(value, u.host) catch {};
     }
 
     /// FetchHost adapter: runs the caller's URL through either the HTTP

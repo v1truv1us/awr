@@ -184,7 +184,7 @@ why the case was invalid.
 
 ## 8. Mapping from API areas to test files
 
-> **Current status (as of 2026-05-08):** 100 active curated WPT cases pass via
+> **Current status (as of 2026-05-08):** 101 active curated WPT cases pass via
 > `zig build test-wpt`. 46 Test262 cases pass via `zig build test-test262`.
 > All `spec/subspecs/agent-browser.md §4` closure-gate cases are active.
 > Only one form/cookie row remains deferred — see §8b.
@@ -202,6 +202,7 @@ why the case was invalid.
 | Events | `event_add_remove.js`, `event_dispatch_bubble.js`, `event_custom.js`, `event_DOMContentLoaded.js`, `event_prevent_default.js`, `event_stop_propagation.js`, `event_properties.js`, `event_target_currentTarget.js`, `event_dispatchEvent_returns.js`, `event_constructors_alias.js`, `event_listener_options.js`, `event_handler_properties.js` |
 | MutationObserver | `mutation_observer_childList.js`, `mutation_observer_attributes.js`, `mutation_observer_subtree.js`, `mutation_observer_takeRecords.js`, `mutation_observer_reflected_attributes.js`, `mutation_observer_characterData.js` |
 | Storage | `storage_localStorage.js`, `session_storage_distinct.js`, `storage_event_payload.js` |
+| Cookies (DOM) | `document_cookie.js` |
 | XHR (GET + POST) | `xhr_basic_get.js`, `xhr_post_basic.js`, `xhr_post_form_encoded.js`, `xhr_rejects_unsupported.js`, `xhr_status_codes.js` |
 | `fetch()` (GET + POST) | `fetch_basic.js`, `fetch_post_basic.js`, `fetch_post_form_encoded.js`, `fetch_rejects_unsupported.js`, `fetch_status_codes.js`, `fetch_json_response.js`, `fetch_redirect_follow.js`, `fetch_headers_get.js` |
 | Forms (DOM) | `form_input_value_type.js`, `form_textarea_value.js`, `form_document_forms.js`, `form_button_select.js`, `form_method_post.js`, `form_properties.js` |

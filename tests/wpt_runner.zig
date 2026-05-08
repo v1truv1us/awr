@@ -487,6 +487,15 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/selector_list.js"),
     },
     .{
+        .filename = "document_cookie.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/document_cookie.js"),
+        // Cookies are domain-scoped — `file://` has an opaque origin
+        // browsers refuse cookies on. Use the EchoServer origin so the
+        // jar has a real (host, path, https) tuple to match against.
+        .url = "http://127.0.0.1:18488/",
+    },
+    .{
         .filename = "promise_test_basics.js",
         .html = "<html><body></body></html>",
         .script = @embedFile("wpt/promise_test_basics.js"),

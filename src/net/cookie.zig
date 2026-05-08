@@ -72,10 +72,15 @@ pub const CookieJar = struct {
     pub fn parseSetCookie(self: *CookieJar, header_value: []const u8, request_domain: []const u8) !void {
         var it = std.mem.splitScalar(u8, header_value, ';');
 
-        // First token: name=value
+        // First token: name=value. Reject when:
+        //   - no '=' is present (RFC 6265 §5.2 step 1)
+        //   - name is empty after trimming whitespace (real browsers reject;
+        //     RFC 6265 leaves this as an "implementation may" but Chrome,
+        //     Firefox, and Safari all skip empty-name cookies)
         const name_value_raw = it.next() orelse return error.InvalidCookie;
         const eq_pos = std.mem.indexOfScalar(u8, name_value_raw, '=') orelse return error.InvalidCookie;
         const name = std.mem.trim(u8, name_value_raw[0..eq_pos], " ");
+        if (name.len == 0) return error.InvalidCookie;
         const value = std.mem.trim(u8, name_value_raw[eq_pos + 1 ..], " ");
 
         var domain = try self.allocator.dupe(u8, request_domain);
@@ -675,6 +680,17 @@ test "parse cookie with Expires (asctime) sets future expiry" {
     const c = jar.cookies.items[0];
     try std.testing.expect(c.expires != null);
     try std.testing.expect(c.expires.? > unixTimestamp());
+}
+
+test "parseSetCookie rejects empty name" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+    // '=value' has an empty name — real browsers (Chrome, Firefox, Safari)
+    // skip these silently. AWR returns InvalidCookie so the caller can
+    // log/ignore as it sees fit; the bridge's `document.cookie =` setter
+    // swallows the error per browser semantics.
+    try std.testing.expectError(error.InvalidCookie, jar.parseSetCookie("=onlyvalue", "example.com"));
+    try std.testing.expectEqual(@as(usize, 0), jar.cookies.items.len);
 }
 
 test "parse cookie with malformed Expires falls back to session" {

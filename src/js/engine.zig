@@ -81,6 +81,27 @@ pub const FetchHost = struct {
     }
 };
 
+/// Adapter the DOM bridge calls for `document.cookie` reads and writes.
+/// Page wires a concrete impl pointing at its `Client.cookies` jar.
+/// `getCookies` returns the cookies the page would send on a request to
+/// its current origin (same shape as the `Cookie:` request header value:
+/// `name=value; name2=value2`). `setCookie` parses a single cookie-pair
+/// (with optional attributes) and stores it in the jar against the
+/// page's current origin.
+pub const CookieHost = struct {
+    ptr: *anyopaque,
+    getFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8,
+    setFn: *const fn (ptr: *anyopaque, value: []const u8) void,
+
+    pub fn getCookies(self: CookieHost, allocator: std.mem.Allocator) ![]u8 {
+        return self.getFn(self.ptr, allocator);
+    }
+
+    pub fn setCookie(self: CookieHost, value: []const u8) void {
+        self.setFn(self.ptr, value);
+    }
+};
+
 // ── Public error type ─────────────────────────────────────────────────────
 
 pub const JsError = error{
@@ -137,6 +158,11 @@ const HostData = struct {
     /// Optional fetch implementation installed by Page. When null,
     /// `fetch()` returns a rejected Promise.
     fetch_host: ?FetchHost = null,
+    /// Optional cookie-jar adapter installed by Page. When null,
+    /// `document.cookie` reads return '' and writes are silently
+    /// dropped. The bridge polyfill consults this via the
+    /// `__awr_get_cookies__` / `__awr_set_cookie__` native callbacks.
+    cookie_host: ?CookieHost = null,
     /// Wall-clock millisecond deadline for the currently-executing
     /// synchronous script. 0 = unbounded. The QuickJS interrupt handler
     /// dereferences this on every poll and aborts execution when the
@@ -327,6 +353,12 @@ pub const JsEngine = struct {
     /// Called by Page after constructing its HTTP client wrapper.
     pub fn attachFetchHost(self: *JsEngine, host: FetchHost) void {
         self.host.fetch_host = host;
+    }
+
+    /// Called by Page so the DOM bridge's document.cookie polyfill can
+    /// reach the cookie jar.
+    pub fn attachCookieHost(self: *JsEngine, host: CookieHost) void {
+        self.host.cookie_host = host;
     }
 
     // ── console ─────────────────────────────────────────────────────────

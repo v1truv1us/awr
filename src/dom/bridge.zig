@@ -158,6 +158,8 @@ fn installNativeCallbacks(eng: *engine.JsEngine) !void {
         .{ "appendChild", appendChildFn },
         .{ "insertBefore", insertBeforeFn },
         .{ "removeChild", removeChildFn },
+        .{ "get_cookies", getCookiesFn },
+        .{ "set_cookie", setCookieFn },
     }) |entry| {
         const fname: [:0]const u8 = "__awr_" ++ entry[0] ++ "__";
         const fn_val = qjs.Value.initCFunction(ctx, entry[1], fname, 1);
@@ -975,6 +977,37 @@ fn removeChildFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickj
     return qjs.Value.initBool(detachChild(parent, child));
 }
 
+// ── Cookie host bindings for document.cookie ─────────────────────────────
+
+/// __awr_get_cookies__() — returns the request-side Cookie header value
+/// for the page's current origin. Empty string when no cookies match
+/// (or no cookie host is wired, e.g. unit-test contexts).
+fn getCookiesFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
+    const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(ctx orelse return qjs.Value.undefined, "");
+    const c = ctx orelse return qjs.Value.initStringLen(undefined, "");
+    const host = c.getOpaque(engine.EngineHostData) orelse return qjs.Value.initStringLen(c, "");
+    const cookie_host = host.cookie_host orelse return qjs.Value.initStringLen(c, "");
+    const value = cookie_host.getCookies(bridge.allocator) catch return qjs.Value.initStringLen(c, "");
+    defer bridge.allocator.free(value);
+    return qjs.Value.initStringLen(c, value);
+}
+
+/// __awr_set_cookie__(value) — parse a single Set-Cookie-style string
+/// into the jar against the page's current origin. Returns undefined.
+/// Per browser semantics, malformed input is a silent no-op.
+fn setCookieFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.undefined;
+    if (args.len == 0) return qjs.Value.undefined;
+    const v: qjs.Value = @bitCast(args[0]);
+    const cstr = v.toCString(c) orelse return qjs.Value.undefined;
+    defer c.freeCString(cstr);
+    const value = std.mem.span(cstr);
+    const host = c.getOpaque(engine.EngineHostData) orelse return qjs.Value.undefined;
+    const cookie_host = host.cookie_host orelse return qjs.Value.undefined;
+    cookie_host.setCookie(value);
+    return qjs.Value.undefined;
+}
+
 // ── JS polyfill ───────────────────────────────────────────────────────────
 
 const BRIDGE_POLYFILL =
@@ -1546,6 +1579,20 @@ const BRIDGE_POLYFILL =
     \\    get defaultView() { return globalThis; },
     \\    get URL() { return globalThis.location && globalThis.location.href ? globalThis.location.href : ''; },
     \\    get documentURI() { return this.URL; },
+    \\    get cookie() {
+    \\      // Returns the same shape as the Cookie: request header — a
+    \\      // semicolon-separated list of name=value pairs the page would
+    \\      // send for its current origin. HttpOnly cookies are excluded
+    \\      // by the underlying jar's cookie-send policy. Returns '' when
+    \\      // no cookies match or the cookie host is not wired.
+    \\      try { return __awr_get_cookies__(); } catch (e) { return ''; }
+    \\    },
+    \\    set cookie(value) {
+    \\      // Per spec: a single Set-Cookie-style string per assignment.
+    \\      // Multiple cookies require multiple assignments.
+    \\      // Malformed input is a silent no-op (matches browser semantics).
+    \\      try { __awr_set_cookie__(String(value == null ? '' : value)); } catch (e) {}
+    \\    },
     \\    get forms() { return document.getElementsByTagName('form'); },
     \\  };
     \\
