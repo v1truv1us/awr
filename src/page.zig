@@ -1095,6 +1095,11 @@ pub const Page = struct {
         const buf = self.allocator.allocSentinel(u8, trimmed.len, 0) catch return;
         defer self.allocator.free(buf);
         @memcpy(buf, trimmed);
+        // Bound the synchronous evaluation by the per-script budget. Without
+        // this, a pathological inline script (e.g. gtag.js feature-probe
+        // hitting an unsupported polyfill) hangs the whole page load.
+        self.js.setEvalDeadlineMs(scriptBudgetMs());
+        defer self.js.clearEvalDeadline();
         self.js.eval(buf, "<inline-script>") catch {};
     }
 
@@ -1166,6 +1171,10 @@ pub const Page = struct {
         @memcpy(name, resolved);
 
         const t_run_start = if (timing_on) time_util.wallClockMillis() else 0;
+        // External scripts bounded by the same per-script budget. gtag.js
+        // is the canonical regression case (B2 in docs/research).
+        self.js.setEvalDeadlineMs(scriptBudgetMs());
+        defer self.js.clearEvalDeadline();
         self.js.eval(buf, name) catch {};
         if (timing_on) {
             const t_run_end = time_util.wallClockMillis();
@@ -1263,6 +1272,20 @@ fn resolveUrlAlloc(
 fn networkTestsEnabled() bool {
     if (!@hasDecl(std.c, "getenv")) return false;
     return std.c.getenv("AWR_RUN_NETWORK_TESTS") != null;
+}
+
+/// Per-script wall-clock budget in milliseconds. Defaults to
+/// `JsEngine.DEFAULT_EVAL_BUDGET_MS` (2_000); override via `AWR_JS_BUDGET_MS`
+/// for stress testing or gtag.js-style debugging. Values <100ms aren't
+/// useful — QuickJS polls the interrupt handler every ~10k bytecodes,
+/// which on a tight loop is a few hundred microseconds, but for low-throughput
+/// or native-call-heavy code the cadence stretches.
+fn scriptBudgetMs() u64 {
+    if (!@hasDecl(std.c, "getenv")) return engine.JsEngine.DEFAULT_EVAL_BUDGET_MS;
+    const env = std.c.getenv("AWR_JS_BUDGET_MS") orelse return engine.JsEngine.DEFAULT_EVAL_BUDGET_MS;
+    const span = std.mem.span(env);
+    const parsed = std.fmt.parseInt(u64, span, 10) catch return engine.JsEngine.DEFAULT_EVAL_BUDGET_MS;
+    return parsed;
 }
 
 /// Normalise the `.`/`..` segments of an absolute path and prefix it with

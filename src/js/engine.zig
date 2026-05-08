@@ -22,6 +22,17 @@ const std = @import("std");
 const qjs = @import("quickjs");
 const event_loop_mod = @import("event_loop.zig");
 
+/// Local copy of the wallClockMillis helper. Inlined here (rather than
+/// importing src/util/time.zig) because the JS engine is a Zig module
+/// rooted at src/js/engine.zig and can't reach sibling directories.
+/// Mirrors src/util/time.zig:wallClockMillis exactly — keep in sync.
+fn wallClockMillis() i64 {
+    var ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.REALTIME, &ts);
+    return @as(i64, @intCast(ts.sec)) * std.time.ms_per_s +
+        @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+}
+
 pub const EventLoop = event_loop_mod.EventLoop;
 
 /// Adapter interface the JS `fetch()` binding calls to perform the HTTP
@@ -126,6 +137,12 @@ const HostData = struct {
     /// Optional fetch implementation installed by Page. When null,
     /// `fetch()` returns a rejected Promise.
     fetch_host: ?FetchHost = null,
+    /// Wall-clock millisecond deadline for the currently-executing
+    /// synchronous script. 0 = unbounded. The QuickJS interrupt handler
+    /// dereferences this on every poll and aborts execution when the
+    /// deadline is exceeded. Set via `JsEngine.setEvalDeadlineMs`,
+    /// cleared via `JsEngine.clearEvalDeadline`.
+    eval_deadline_ms: i64 = 0,
 };
 
 /// Expose HostData so bridge.zig can retrieve it via ctx.getOpaque().
@@ -141,6 +158,16 @@ pub const JsEngine = struct {
     host: *HostData,
     allocator: std.mem.Allocator,
 
+    /// Default per-script wall-clock budget. Same order of magnitude as
+    /// Page.drainAll's load-phase budget. Override via AWR_JS_BUDGET_MS
+    /// env var when wrapping individual eval sites.
+    pub const DEFAULT_EVAL_BUDGET_MS: u64 = 2_000;
+
+    /// Conservative memory cap per Runtime — gtag.js-class scripts sit
+    /// well under this, and any page using more is almost certainly
+    /// pathological. Defense in depth alongside the deadline handler.
+    pub const DEFAULT_MEMORY_LIMIT: usize = 128 * 1024 * 1024; // 128 MB
+
     /// Create a new JsEngine.
     /// `sink` defaults to stderr if null.
     pub fn init(allocator: std.mem.Allocator, sink: ?ConsoleSink) JsError!JsEngine {
@@ -148,11 +175,15 @@ pub const JsEngine = struct {
         errdefer rt.deinit();
 
         rt.setMaxStackSize(4 * 1024 * 1024); // 4 MB
+        rt.setMemoryLimit(DEFAULT_MEMORY_LIMIT);
 
         const ctx = qjs.Context.init(rt) catch return JsError.ContextInitFailed;
         errdefer ctx.deinit();
 
-        // Allocate host data and store in context opaque so callbacks can reach it.
+        // Allocate host data and store in context opaque so callbacks can
+        // reach it. eval_deadline_ms lives on HostData so the QuickJS
+        // interrupt handler has a stable pointer that survives both context
+        // resets and JsEngine being moved by-value.
         const host = allocator.create(HostData) catch return JsError.OutOfMemory;
         errdefer allocator.destroy(host);
         host.* = .{
@@ -160,6 +191,11 @@ pub const JsEngine = struct {
             .allocator = allocator,
         };
         ctx.setOpaque(HostData, host);
+
+        // Install the deadline-aware interrupt handler. The handler reads
+        // `host.eval_deadline_ms`; while it's 0, every poll is a no-op
+        // (~10k-bytecode cadence × ~ns per check = negligible overhead).
+        rt.setInterruptHandler(i64, &host.eval_deadline_ms, evalDeadlineHandler);
 
         var engine = JsEngine{
             .rt = rt,
@@ -169,6 +205,20 @@ pub const JsEngine = struct {
         };
         try engine.installWebApis();
         return engine;
+    }
+
+    /// Bound the next js.eval call to `ms_from_now` wall-clock milliseconds.
+    /// The QuickJS interrupt handler aborts execution with InternalError
+    /// when the deadline is exceeded. Pair with `clearEvalDeadline()` —
+    /// idiomatic usage is `defer self.clearEvalDeadline()`.
+    pub fn setEvalDeadlineMs(self: *JsEngine, ms_from_now: u64) void {
+        const now = wallClockMillis();
+        self.host.eval_deadline_ms = now +| @as(i64, @intCast(@min(ms_from_now, std.math.maxInt(i64))));
+    }
+
+    /// Clear the eval deadline. After this, scripts run unbounded again.
+    pub fn clearEvalDeadline(self: *JsEngine) void {
+        self.host.eval_deadline_ms = 0;
     }
 
     pub fn deinit(self: *JsEngine) void {
@@ -650,6 +700,26 @@ pub const JsEngine = struct {
     ;
 };
 
+// ── QuickJS interrupt handler ────────────────────────────────────────────
+//
+// QuickJS calls this handler periodically (~every 10k bytecode ops) during
+// JS execution. Returning true aborts execution with InternalError, which
+// propagates back through `JS_Eval` / `JS_Call` as a normal JS exception.
+// AWR's runInlineScript / runExternalScript catch this exception silently
+// (via `js.eval(...) catch {}`), so a deadline-killed script behaves like
+// any other parse-or-throw script: subsequent navigation continues.
+//
+// Cadence is bytecode-counter based, NOT wall-clock. Sufficient for the
+// gtag.js infinite-loop class of hang (handler fires every few microseconds
+// inside a tight loop). A stuck native callback is NOT caught — but AWR's
+// host functions (console, fetch shim, setTimeout) are non-blocking on
+// the synchronous path.
+fn evalDeadlineHandler(deadline_ptr: ?*i64, _: *qjs.Runtime) bool {
+    const deadline = deadline_ptr orelse return false;
+    if (deadline.* == 0) return false; // unbounded mode
+    return wallClockMillis() >= deadline.*;
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 test "JsEngine.init and deinit" {
@@ -909,4 +979,37 @@ test "JsEngine.evalString — exception returns error" {
     var eng = try JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
     try std.testing.expectError(error.EvalException, eng.evalString("throw new Error('x')"));
+}
+
+test "JsEngine — eval deadline aborts infinite loop" {
+    // B2 regression test: without the interrupt handler, QuickJS would
+    // run the while(true) loop forever. With the deadline-aware handler
+    // installed at JsEngine.init, eval must throw an exception and return
+    // within ~2x the budget on a tight loop.
+    var engine = try JsEngine.init(std.testing.allocator, null);
+    defer engine.deinit();
+
+    engine.setEvalDeadlineMs(50);
+    defer engine.clearEvalDeadline();
+
+    const start_ms = wallClockMillis();
+    // The catch swallows the exception (matches runInlineScript pattern).
+    engine.eval("while(true){}", "<deadline-test>") catch {};
+    const elapsed_ms = wallClockMillis() - start_ms;
+
+    // Must NOT have run forever. CI-tolerant upper bound: 1s for a 50ms
+    // budget is generous (QuickJS poll cadence on slow runners can stretch
+    // a few hundred ms). MUST be much less than 60s (the gtag.js repro time).
+    try std.testing.expect(elapsed_ms < 1_000);
+}
+
+test "JsEngine — clearEvalDeadline restores unbounded mode" {
+    var engine = try JsEngine.init(std.testing.allocator, null);
+    defer engine.deinit();
+
+    engine.setEvalDeadlineMs(50);
+    engine.clearEvalDeadline();
+    // Now eval should NOT be interrupted by the prior deadline. A
+    // short script must complete normally.
+    try engine.eval("var x = 1 + 1;", "<post-clear>");
 }
