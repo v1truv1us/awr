@@ -1311,6 +1311,79 @@ const BRIDGE_POLYFILL =
     \\      get placeholder() { return this._attrs.placeholder || ''; },
     \\      get required() { return this._attrs.required != null && this._attrs.required !== 'false'; },
     \\      get readOnly() { return this._attrs.readonly != null && this._attrs.readonly !== 'false'; },
+    \\      // ── HTMLFormElement.method ──────────────────────────────────
+    \\      // Per HTML spec: reflects with normalization. Returns one of
+    \\      // 'get' / 'post' / 'dialog' (case-folded); any other value
+    \\      // (or missing attribute) falls back to 'get'. The setter
+    \\      // accepts any string but writes it verbatim to the attribute.
+    \\      get method() {
+    \\        if (this.tagName !== 'FORM') return undefined;
+    \\        const raw = (this._attrs.method || '').toLowerCase();
+    \\        if (raw === 'post' || raw === 'dialog') return raw;
+    \\        return 'get';
+    \\      },
+    \\      set method(v) {
+    \\        if (this.tagName !== 'FORM') return;
+    \\        const s = String(v == null ? '' : v);
+    \\        this._attrs.method = s;
+    \\        __awr_setAttribute__(this._h, 'method', s);
+    \\      },
+    \\      // ── HTMLFormElement.action ──────────────────────────────────
+    \\      // Per HTML spec: returns the action attribute resolved against
+    \\      // the document URL. Empty/missing action returns document.URL.
+    \\      // AWR keeps it simple: returns the literal attribute value if
+    \\      // present, falling back to document.URL — full URL resolution
+    \\      // is a future-work item flagged in spec/subspecs/agent-browser.md.
+    \\      get action() {
+    \\        if (this.tagName !== 'FORM') return undefined;
+    \\        const a = this._attrs.action;
+    \\        if (a == null || a === '') {
+    \\          return (typeof document !== 'undefined' && document && document.URL) ? document.URL : '';
+    \\        }
+    \\        return a;
+    \\      },
+    \\      set action(v) {
+    \\        if (this.tagName !== 'FORM') return;
+    \\        const s = String(v == null ? '' : v);
+    \\        this._attrs.action = s;
+    \\        __awr_setAttribute__(this._h, 'action', s);
+    \\      },
+    \\      // ── HTMLFormElement.elements ────────────────────────────────
+    \\      // Per HTML spec: returns a live HTMLFormControlsCollection of
+    \\      // all listed form-control descendants. AWR returns a NodeList-
+    \\      // like array (non-live) which covers length / [i] / iteration.
+    \\      // Excludes <input type=image> per spec.
+    \\      //
+    \\      // Implementation: we cannot use a comma-separated selector
+    \\      // list because AWR's selector parser today only honors the
+    \\      // last token (filed as a selector-parser gap). Instead walk
+    \\      // the descendant tree depth-first, matching each element by
+    \\      // tagName. This preserves document order without needing
+    \\      // compareDocumentPosition.
+    \\      get elements() {
+    \\        if (this.tagName !== 'FORM') return undefined;
+    \\        const FORM_CONTROL_TAGS = { INPUT: 1, BUTTON: 1, SELECT: 1, TEXTAREA: 1, FIELDSET: 1, OUTPUT: 1 };
+    \\        const out = [];
+    \\        function walk(el) {
+    \\          // .children walks the authoritative C-side DOM tree, so
+    \\          // descendants present in the parsed initial HTML are seen
+    \\          // here even if the JS mirror's _children mutator-state is
+    \\          // empty.
+    \\          const kids = el.children || [];
+    \\          for (let i = 0; i < kids.length; i++) {
+    \\            const child = kids[i];
+    \\            if (!child || !child.tagName) continue;
+    \\            if (FORM_CONTROL_TAGS[child.tagName]) {
+    \\              if (!(child.tagName === 'INPUT' && (child.getAttribute && (child.getAttribute('type') || '').toLowerCase() === 'image'))) {
+    \\                out.push(child);
+    \\              }
+    \\            }
+    \\            walk(child);
+    \\          }
+    \\        }
+    \\        walk(this);
+    \\        return out;
+    \\      },
     \\      _dirtyValue: false,
     \\      _value: null,
     \\      get dataset() {
@@ -1478,6 +1551,8 @@ const BRIDGE_POLYFILL =
     \\    get hidden() { return false; },
     \\    get location() { return globalThis.location; },
     \\    get defaultView() { return globalThis; },
+    \\    get URL() { return globalThis.location && globalThis.location.href ? globalThis.location.href : ''; },
+    \\    get documentURI() { return this.URL; },
     \\    get forms() { return document.getElementsByTagName('form'); },
     \\  };
     \\

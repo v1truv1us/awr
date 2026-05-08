@@ -352,6 +352,27 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/match_media.js"),
     },
     .{
+        .filename = "form_properties.js",
+        .html =
+        \\<html><body>
+        \\<form id="f1" method="POST" action="/submit">
+        \\  <input type="text" name="user">
+        \\  <input type="hidden" name="csrf" value="abc">
+        \\  <select name="role"><option>a</option></select>
+        \\  <textarea name="bio"></textarea>
+        \\</form>
+        \\<form id="f-default"></form>
+        \\<form id="f-bogus" method="PATCH"></form>
+        \\<form id="f-with-image">
+        \\  <input type="text" name="t">
+        \\  <input type="image" name="img" src="x.png">
+        \\</form>
+        \\<div id="not-a-form"></div>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/form_properties.js"),
+    },
+    .{
         .filename = "promise_test_basics.js",
         .html = "<html><body></body></html>",
         .script = @embedFile("wpt/promise_test_basics.js"),
