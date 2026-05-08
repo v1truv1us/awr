@@ -99,7 +99,8 @@ Required cases:
 | XHR POST with string body | `tests/wpt/xhr_post_basic.js` | Replaces the prior `xhr_rejects_unsupported.js` |
 | XHR POST with `URLSearchParams` body | `tests/wpt/xhr_post_form_encoded.js` | New |
 | `<form method="post">` parse + submit | `tests/wpt/form_method_post.js` | DOM-level: parsed `form.method === "POST"` |
-| Cookie jar serialize/deserialize | inline tests in `src/net/cookie.zig` | A WPT case requires either `document.cookie` (not in MVP) or a harness-only binding; deferred until one of those lands. The Zig-side round-trip + expiry-drop + malformed-row tolerance + HttpOnly_ prefix tests are the current contract. |
+| Cookie jar serialize/deserialize | inline tests in `src/net/cookie.zig` | Zig-side round-trip + expiry-drop + RFC 6265 §5.1.1 Expires-date parser + malformed-row tolerance + HttpOnly_ prefix tests. |
+| `document.cookie` getter/setter | `tests/wpt/document_cookie.js` | Wired to the page's cookie jar via `engine.CookieHost`. Setter parses a single cookie-pair (with optional attributes) into the jar against the page's current origin; getter returns the request-side `Cookie:` header value. |
 
 The previously curated cases `tests/wpt/xhr_rejects_unsupported.js` and
 `tests/wpt/fetch_rejects_unsupported.js` are amended (not removed): the
