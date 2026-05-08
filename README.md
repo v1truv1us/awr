@@ -55,12 +55,39 @@ Build + test + MVP-readiness runbook: [`docs/BUILD_MVP_READINESS.md`](docs/BUILD
 |---|---|
 | `awr --version` \| `-v` | Print `0.0.<git-hash>` |
 | `awr <url>` | Load page, run scripts, print full envelope `{url,status,title,body_text,window_data,tools}` |
+| `awr render <url> [--width N]` | Load page, print the rendered terminal text (human-readable, ANSI-friendly) |
+| `awr extract <url>` | Load page, print Markdown for LLM agents (chrome-filtered, headings + inline `[text](url)` preserved) |
+| `awr post <url> [k=v ...]` | POST URL-encoded form fields, follow redirects, absorb cookies |
+| `awr submit <url> [--form=SEL] [k=v ...]` | Load page, find `<form>`, merge user fields with hidden inputs (CSRF), POST to the form's action |
 | `awr tools <url>` | Print the WebMCP tool array registered by the page |
 | `awr call <url> <tool> <json-args>` | Invoke `<tool>`; print `{ok:true,value:...}` or `{ok:false,error:...,message:...}` |
+| `awr browse <url>` | Open URL in interactive terminal browser (vim keys, scroll, link nav, form fill) |
 | `awr mock` | Serve the local mock fixture for CLI/WebMCP smoke tests |
 
-`<url>` accepts `file://…`, bare filesystem paths, and (once the HTTP
-rewrite lands) `http(s)://…`.
+`<url>` accepts `file://…`, bare filesystem paths, and `http(s)://…`.
+
+#### Sign-in flow
+
+Set `AWR_COOKIE_JAR` to persist cookies across invocations (Netscape
+`cookies.txt` format, curl/wget compatible). Then chain `submit` →
+`extract`:
+
+```bash
+export AWR_COOKIE_JAR=$HOME/.local/state/awr/cookies.txt
+
+# Load login page, parse the form (CSRF auto-pulled from hidden input),
+# POST credentials, follow the 302 to dashboard.
+awr submit https://site/login user=alice password=hunter2
+
+# Subsequent fetches carry the session cookie.
+awr extract https://site/dashboard > dashboard.md
+```
+
+Per `spec/subspecs/agent-browser.md §2`, supported cookie attributes
+include `Max-Age=`, `Expires=` (RFC 6265 §5.1.1 dates), `Path`,
+`Domain`, `Secure`, `HttpOnly`, `SameSite`. `<form method="post">` and
+`<form method="get">` are both submitted by `awr submit` with hidden-
+input round-trip for CSRF tokens.
 
 ### HTML parsing
 

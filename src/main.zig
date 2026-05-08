@@ -64,7 +64,9 @@ const USAGE =
     \\  awr render <url> [--width N] [--images=MODE]
     \\                               Load URL, print the rendered terminal text non-interactively
     \\                               --images=auto|kitty|iterm|sixel|braille|none (default: auto)
-    \\  awr <url>                    Load URL/path, print JSON {url, status, title, body_text, window_data, tools}
+    \\  awr <url> [--format=md]      Load URL/path, print JSON envelope. Default body_text is plain text;
+    \\                                 `--format=markdown` (or `=md`) swaps it for the Markdown extraction
+    \\                                 (chrome-filtered, headings + inline links preserved) under `body_md`.
     \\  awr post <url> [k=v ...]     POST URL-encoded form fields, follow redirects, absorb cookies
     \\                                 Set $AWR_COOKIE_JAR to persist cookies across invocations
     \\  awr submit <url> [--form=SEL] [k=v ...]
@@ -72,6 +74,7 @@ const USAGE =
     \\                                 POST to the form's action. --form selects by #id (default: first form)
     \\  awr extract <url>            Load page, emit Markdown (token-friendly for LLM agents).
     \\                                 Drops nav/footer chrome, preserves headings/lists/inline links.
+    \\  awr cookies [show|clear]     Show or clear the persistent cookie jar (uses $AWR_COOKIE_JAR).
     \\  awr tools <url>              Load URL/path, print the JSON array of registered WebMCP tools
     \\  awr call <url> <name> <json> Load URL/path, invoke tool <name> with <json> args, print result envelope
     \\  awr mock [--port N]          Serve experiments/ over HTTP (default: 127.0.0.1:7777)
@@ -505,6 +508,67 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         return;
     }
 
+    // Subcommand: awr cookies [show|clear]
+    //
+    // Inspect or wipe the persistent cookie jar at `$AWR_COOKIE_JAR`.
+    // Useful for debugging sign-in flows ("did the session cookie get
+    // absorbed?") and for forced logouts ("clear and start fresh").
+    //
+    // No subcommand or `show`: print one cookie per line in the format
+    //   <domain><TAB><path><TAB><name>=<value><TAB>expires=<unix|session>
+    // with HttpOnly_ prefix on the domain when the cookie is HttpOnly.
+    //
+    // `clear`: empties the in-memory jar and writes an empty jar file.
+    if (std.mem.eql(u8, args[1], "cookies")) {
+        const sub = if (args.len >= 3) args[2] else "show";
+        if (!std.mem.eql(u8, sub, "show") and !std.mem.eql(u8, sub, "clear")) {
+            try stdoutWrite(io, "usage: awr cookies [show|clear]\n");
+            std.process.exit(1);
+        }
+
+        var p = try page_mod.Page.init(alloc, io);
+        defer p.deinit(); // saveCookiesToDisk runs here for clear path
+
+        if (std.mem.eql(u8, sub, "clear")) {
+            // Empty the jar in memory; deinit will persist the empty
+            // file to disk if AWR_COOKIE_JAR is set.
+            for (p.client.cookies.cookies.items) |*c| c.deinit(p.client.cookies.allocator);
+            p.client.cookies.cookies.clearAndFree(p.client.cookies.allocator);
+            try stdoutWrite(io, "cleared.\n");
+            return;
+        }
+
+        // show: emit a tab-separated table.
+        if (p.client.cookies.cookies.items.len == 0) {
+            try stdoutWrite(io, "(empty)\n");
+            return;
+        }
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(alloc);
+        for (p.client.cookies.cookies.items) |c| {
+            line.clearRetainingCapacity();
+            if (c.http_only) try line.appendSlice(alloc, "HttpOnly_");
+            try line.appendSlice(alloc, c.domain);
+            try line.append(alloc, '\t');
+            try line.appendSlice(alloc, c.path);
+            try line.append(alloc, '\t');
+            try line.appendSlice(alloc, c.name);
+            try line.append(alloc, '=');
+            try line.appendSlice(alloc, c.value);
+            try line.append(alloc, '\t');
+            if (c.expires) |exp| {
+                const exp_str = try std.fmt.allocPrint(alloc, "expires={d}", .{exp});
+                defer alloc.free(exp_str);
+                try line.appendSlice(alloc, exp_str);
+            } else {
+                try line.appendSlice(alloc, "expires=session");
+            }
+            try line.append(alloc, '\n');
+            try stdoutWrite(io, line.items);
+        }
+        return;
+    }
+
     // Subcommand: awr extract <url>
     //
     // Token-friendly Markdown output for LLM/agent consumption. Drops
@@ -661,7 +725,37 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     }
 
     // Default: treat arg as a URL/path and print the full JSON envelope.
-    const url = args[1];
+    //
+    // Optional `--format=markdown` flag swaps the `body_text` field for
+    // the Markdown extraction (chrome-filtered, headings/lists/inline
+    // links preserved — same shape as `awr extract` but inside the
+    // existing JSON envelope so JSON-aware callers don't have to switch
+    // subcommands). Default `--format=json` keeps prior behavior.
+    var format_md = false;
+    var url_arg: ?[]const u8 = null;
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--format=markdown") or std.mem.eql(u8, arg, "--format=md")) {
+            format_md = true;
+        } else if (std.mem.eql(u8, arg, "--format=json")) {
+            format_md = false;
+        } else if (std.mem.startsWith(u8, arg, "--")) {
+            try stdoutWrite(io, "awr: unknown flag: ");
+            try stdoutWrite(io, arg);
+            try stdoutWrite(io, "\n");
+            std.process.exit(1);
+        } else if (url_arg == null) {
+            url_arg = arg;
+        } else {
+            try stdoutWrite(io, "awr: unexpected positional arg: ");
+            try stdoutWrite(io, arg);
+            try stdoutWrite(io, "\n");
+            std.process.exit(1);
+        }
+    }
+    const url = url_arg orelse {
+        try stdoutWrite(io, "awr: missing URL\n");
+        std.process.exit(1);
+    };
     const timing_on = std.c.getenv("AWR_TIMING") != null;
 
     // Telemetry sink — populated through the fetch pipeline whenever
@@ -703,8 +797,17 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     try buf.appendSlice(alloc, status_str);
     try buf.appendSlice(alloc, ",\"title\":");
     if (result.title) |t| try writeJsonStr(&buf, alloc, t) else try buf.appendSlice(alloc, "null");
-    try buf.appendSlice(alloc, ",\"body_text\":");
-    try writeJsonStr(&buf, alloc, result.body_text);
+    if (format_md) {
+        // Swap the `body_text` field for the Markdown extraction. Caller
+        // can still tell the format from the field name.
+        const md = try p.extractMarkdown(alloc);
+        defer alloc.free(md);
+        try buf.appendSlice(alloc, ",\"body_md\":");
+        try writeJsonStr(&buf, alloc, md);
+    } else {
+        try buf.appendSlice(alloc, ",\"body_text\":");
+        try writeJsonStr(&buf, alloc, result.body_text);
+    }
     try buf.appendSlice(alloc, ",\"window_data\":");
     if (result.window_data) |wd| try buf.appendSlice(alloc, wd) else try buf.appendSlice(alloc, "null");
     try buf.appendSlice(alloc, ",\"tools\":");
