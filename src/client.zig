@@ -659,6 +659,40 @@ pub const Client = struct {
         });
         errdefer self.allocator.free(effective_url);
 
+        // RFC 9112 §6.3 rule (1): bodiless statuses (1xx incl. 101, 204, 205,
+        // 304) and HEAD responses MUST NOT have a body. Zig's std.http does
+        // not implement this short-circuit (as of 0.16) — for a 204 without
+        // Content-Length / Transfer-Encoding, the body reader's state goes
+        // to `.body_none` (read until close) and `streamRemaining` plus the
+        // matching `req.deinit` body-drain both hang on a kept-alive socket.
+        //
+        // Workaround: detect bodiless here, mark the connection as closing
+        // so `req.deinit` skips its drain-then-pool path and just closes
+        // the socket, then return an empty body.
+        // client.Method is GET/POST today; HEAD short-circuit lives in the
+        // http1.readBody helper (used by the BoringSSL fallback). When HEAD
+        // is added to client.Method, mirror the same check here.
+        const status_code = @intFromEnum(result.head.status);
+        const bodiless =
+            (status_code >= 100 and status_code < 200) or
+            status_code == 204 or status_code == 205 or status_code == 304;
+        if (bodiless) {
+            // Force the connection to close so req.deinit doesn't try to
+            // drain a body that doesn't exist. Loses keep-alive for this
+            // exchange; correctness > pooling for bodiless responses.
+            if (req.connection) |conn| conn.closing = true;
+            const empty = try self.allocator.alloc(u8, 0);
+            errdefer self.allocator.free(empty);
+            return Response{
+                .status = status_code,
+                .url = effective_url,
+                .headers = headers,
+                .body = empty,
+                .allocator = self.allocator,
+                .protocol = .std_lib,
+            };
+        }
+
         const decompress_buffer: []u8 = switch (result.head.content_encoding) {
             .identity => &.{},
             .zstd => try self.allocator.alloc(u8, std.compress.zstd.default_window_len),
