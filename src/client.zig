@@ -927,7 +927,14 @@ pub const Client = struct {
         }
         try writeAllTls(&entry.tls, req_buf.written());
 
-        var parsed = try http1.readResponse(&entry.reader, self.allocator);
+        // client.Method is a narrow GET/POST enum; map to http1.Method for
+        // body-framing rules (RFC 9112 §6.3 rule 1 needs to recognize HEAD,
+        // which AWR doesn't issue today but the helper must still type-match).
+        const http1_method: http1.Method = switch (method) {
+            .GET => .GET,
+            .POST => .POST,
+        };
+        var parsed = try http1.readResponse(&entry.reader, self.allocator, http1_method);
         errdefer parsed.deinit();
 
         const effective_url = try self.allocator.dupe(u8, url_str);
