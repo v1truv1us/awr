@@ -315,6 +315,7 @@ pub const JsEngine = struct {
         try self.installFetch();
         try self.installStructuredClone();
         try self.installUrlSearchParams();
+        try self.installMatchMedia();
     }
 
     /// Called by Page after constructing its EventLoop.
@@ -672,6 +673,43 @@ pub const JsEngine = struct {
 
     const URLSEARCHPARAMS_POLYFILL = @embedFile("url_search_params.js");
 
+    /// `window.matchMedia(query)` — agent-runtime stub.
+    ///
+    /// Returns a `MediaQueryList` shape with `matches: false`, the original
+    /// query string, and no-op `addEventListener` / `removeEventListener` /
+    /// `addListener` / `removeListener` / `dispatchEvent` / `onchange`.
+    /// This is enough to satisfy the feature-detection paths in scripts
+    /// like react.dev's `(prefers-color-scheme: dark)` probe — they call
+    /// `.matches` and ignore the result if false, then `.addEventListener`
+    /// for runtime updates that AWR will never emit.
+    ///
+    /// Deliberately does NOT attempt real CSS Media Query evaluation: AWR
+    /// has no viewport, no display medium, no reduced-motion preference.
+    /// Returning `matches: false` is the conservative answer.
+    fn installMatchMedia(self: *JsEngine) JsError!void {
+        try self.eval(MATCH_MEDIA_POLYFILL, "<match-media>");
+    }
+
+    const MATCH_MEDIA_POLYFILL =
+        \\(function () {
+        \\  if (typeof globalThis.matchMedia === 'function') return;
+        \\  function MediaQueryList(query) {
+        \\    this.media = String(query == null ? '' : query);
+        \\    this.matches = false;
+        \\    this.onchange = null;
+        \\  }
+        \\  MediaQueryList.prototype.addListener = function () {};
+        \\  MediaQueryList.prototype.removeListener = function () {};
+        \\  MediaQueryList.prototype.addEventListener = function () {};
+        \\  MediaQueryList.prototype.removeEventListener = function () {};
+        \\  MediaQueryList.prototype.dispatchEvent = function () { return false; };
+        \\  globalThis.matchMedia = function matchMedia(query) {
+        \\    return new MediaQueryList(query);
+        \\  };
+        \\})();
+    ;
+
+
     const STRUCTURED_CLONE_POLYFILL =
         \\(function () {
         \\  if (typeof globalThis.structuredClone === 'function') return;
@@ -1012,4 +1050,20 @@ test "JsEngine — clearEvalDeadline restores unbounded mode" {
     // Now eval should NOT be interrupted by the prior deadline. A
     // short script must complete normally.
     try engine.eval("var x = 1 + 1;", "<post-clear>");
+}
+
+test "JsEngine — matchMedia returns MediaQueryList stub" {
+    var engine = try JsEngine.init(std.testing.allocator, null);
+    defer engine.deinit();
+    // matchMedia must be callable as a function returning an object whose
+    // shape matches feature-detection expectations.
+    try std.testing.expect(try engine.evalBool("typeof matchMedia === 'function'"));
+    try std.testing.expect(try engine.evalBool("typeof matchMedia('(prefers-color-scheme: dark)') === 'object'"));
+    try std.testing.expect(try engine.evalBool("matchMedia('(prefers-color-scheme: dark)').matches === false"));
+    try std.testing.expect(try engine.evalBool("matchMedia('').media === ''"));
+    try std.testing.expect(try engine.evalBool("matchMedia('(min-width: 600px)').media === '(min-width: 600px)'"));
+    // addEventListener / addListener / dispatchEvent must be callable
+    // without throwing — typical theme-detection pattern.
+    try std.testing.expect(try engine.evalBool(
+        "var q = matchMedia('(min-width: 1px)'); q.addEventListener('change', function(){}); q.removeEventListener('change', function(){}); q.addListener(function(){}); q.dispatchEvent(new Object()) === false"));
 }

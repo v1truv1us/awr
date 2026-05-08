@@ -347,6 +347,11 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/console_namespace.js"),
     },
     .{
+        .filename = "match_media.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/match_media.js"),
+    },
+    .{
         .filename = "promise_test_basics.js",
         .html = "<html><body></body></html>",
         .script = @embedFile("wpt/promise_test_basics.js"),

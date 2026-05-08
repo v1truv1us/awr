@@ -184,7 +184,7 @@ why the case was invalid.
 
 ## 8. Mapping from API areas to test files
 
-> **Current status (as of 2026-05-01):** 91 active curated WPT cases pass via
+> **Current status (as of 2026-05-08):** 92 active curated WPT cases pass via
 > `zig build test-wpt`. 46 Test262 cases pass via `zig build test-test262`.
 > All `spec/subspecs/agent-browser.md §4` closure-gate cases are active.
 > Only one form/cookie row remains deferred — see §8b.
@@ -208,7 +208,7 @@ why the case was invalid.
 | History | `history_push_replace_state.js`, `history_relative_url.js`, `history_state_length.js` |
 | Viewport / observers | `viewport_dimensions.js`, `requestAnimationFrame.js`, `request_idle_callback.js`, `request_idle_callback_cancel.js`, `intersection_observer.js`, `resize_observer.js`, `window_basics.js` |
 | Window / navigator | `navigator_basics.js`, `url_search_params_basics.js` |
-| Harness / misc | `promise_test_basics.js`, `console_namespace.js` |
+| Harness / misc | `promise_test_basics.js`, `console_namespace.js`, `match_media.js` |
 | JS runtime | 46 curated Test262 cases in `tests/test262_runner.zig` |
 
 POST round-trip cases (`fetch_post_basic.js`, `fetch_post_form_encoded.js`,
