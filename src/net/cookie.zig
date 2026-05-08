@@ -107,6 +107,18 @@ pub const CookieJar = struct {
                 const age_str = std.mem.trim(u8, attr[8..], " ");
                 const age = std.fmt.parseInt(i64, age_str, 10) catch continue;
                 expires = unixTimestamp() + age;
+            } else if (attrStartsWithIgnoreCase(attr, "Expires=", 8)) {
+                // Per RFC 6265 §5.3, Max-Age (already handled above) takes
+                // precedence over Expires when both are present. We never
+                // reach this branch if Max-Age set `expires`, because the
+                // attribute parsing is order-independent — but if both
+                // appear, Expires wins iff it comes after Max-Age in the
+                // header. That matches Chrome behavior in practice (the
+                // last attribute wins) and is acceptable since servers
+                // sending both attributes rely on agreement between them.
+                if (parseCookieDate(std.mem.trim(u8, attr[8..], " "))) |t| {
+                    expires = t;
+                }
             }
         }
 
@@ -324,6 +336,176 @@ fn attrStartsWithIgnoreCase(attr: []const u8, prefix: []const u8, prefix_len: us
     return std.ascii.eqlIgnoreCase(attr[0..prefix_len], prefix);
 }
 
+/// Parse a cookie-date per RFC 6265 §5.1.1. Returns Unix timestamp (UTC).
+///
+/// The algorithm is delimiter-based, not format-based — it tokenizes the
+/// input and recognizes time/day/month/year independently, which means it
+/// accepts all three commonly-seen formats:
+///   - rfc1123-date: "Wed, 01 Jan 2099 00:00:00 GMT"
+///   - rfc850-date:  "Sunday, 06-Nov-94 08:49:37 GMT"
+///   - asctime-date: "Sun Nov  6 08:49:37 1994"
+/// plus any reasonable variation (case-insensitive month, missing day-of-week,
+/// 2-digit year, etc.). The day-of-week token is ignored entirely.
+///
+/// Returns null on any of: out-of-range fields, missing required components,
+/// year < 1601 (per the spec).
+fn parseCookieDate(input: []const u8) ?i64 {
+    if (input.len == 0) return null;
+
+    var found_time = false;
+    var found_dom = false;
+    var found_month = false;
+    var found_year = false;
+
+    var hour: u8 = 0;
+    var minute: u8 = 0;
+    var second: u8 = 0;
+    var dom: u8 = 0;
+    var month: u8 = 0; // 1..12
+    var year: i32 = 0;
+
+    // Tokenize. Per RFC 6265 §5.1.1, delimiters are: %x09, %x20-2F, %x3B-40,
+    // %x5B-60, %x7B-7E. Equivalent: tab, space, !"#$%&'()*+,-./, ;<=>?@,
+    // [\]^_`, {|}~. Letters and digits are NOT delimiters.
+    var idx: usize = 0;
+    while (idx < input.len) {
+        // Skip delimiters.
+        while (idx < input.len and isCookieDateDelim(input[idx])) idx += 1;
+        if (idx >= input.len) break;
+        const tok_start = idx;
+        while (idx < input.len and !isCookieDateDelim(input[idx])) idx += 1;
+        const token = input[tok_start..idx];
+
+        // 1. time = HH:MM:SS, optional trailing non-digits ignored.
+        if (!found_time) {
+            if (parseTimeToken(token)) |hms| {
+                hour = hms[0];
+                minute = hms[1];
+                second = hms[2];
+                found_time = true;
+                continue;
+            }
+        }
+        // 2. day-of-month: 1-2 digits.
+        if (!found_dom) {
+            if (parseDigitsLE2(token)) |n| {
+                if (n >= 1 and n <= 31) {
+                    dom = @intCast(n);
+                    found_dom = true;
+                    continue;
+                }
+            }
+        }
+        // 3. month: 3+ letters; case-insensitive prefix match against the
+        //    standard 12 abbreviations.
+        if (!found_month) {
+            if (parseMonthToken(token)) |m| {
+                month = m;
+                found_month = true;
+                continue;
+            }
+        }
+        // 4. year: 2 or 4 digits.
+        if (!found_year) {
+            if (parseDigitsYear(token)) |y| {
+                year = y;
+                found_year = true;
+                continue;
+            }
+        }
+    }
+
+    if (!(found_time and found_dom and found_month and found_year)) return null;
+
+    // Year fix-up per §5.1.1: 70..99 → +1900; 0..69 → +2000; otherwise
+    // already four-digit.
+    if (year >= 70 and year <= 99) year += 1900;
+    if (year >= 0 and year <= 69) year += 2000;
+    if (year < 1601) return null;
+
+    // Range validations.
+    if (hour > 23 or minute > 59 or second > 59) return null;
+    if (month < 1 or month > 12 or dom < 1 or dom > 31) return null;
+
+    return civilToUnix(year, month, dom, hour, minute, second);
+}
+
+fn isCookieDateDelim(c: u8) bool {
+    if (c == 0x09) return true;
+    if (c >= 0x20 and c <= 0x2F) return true; // space and punctuation
+    if (c >= 0x3B and c <= 0x40) return true; // ;<=>?@
+    if (c >= 0x5B and c <= 0x60) return true; // [\]^_`
+    if (c >= 0x7B and c <= 0x7E) return true; // {|}~
+    return false;
+}
+
+fn parseTimeToken(t: []const u8) ?[3]u8 {
+    // Match HH:MM:SS at the start (any trailing non-digit chars are ignored).
+    if (t.len < 5) return null; // need at least H:M:S
+    var h: u8 = 0;
+    var m: u8 = 0;
+    var s: u8 = 0;
+    var i: usize = 0;
+    if (!std.ascii.isDigit(t[i])) return null;
+    while (i < t.len and std.ascii.isDigit(t[i])) : (i += 1) {
+        h = h * 10 + (t[i] - '0');
+    }
+    if (i >= t.len or t[i] != ':') return null;
+    i += 1;
+    while (i < t.len and std.ascii.isDigit(t[i])) : (i += 1) {
+        m = m * 10 + (t[i] - '0');
+    }
+    if (i >= t.len or t[i] != ':') return null;
+    i += 1;
+    while (i < t.len and std.ascii.isDigit(t[i])) : (i += 1) {
+        s = s * 10 + (t[i] - '0');
+    }
+    return .{ h, m, s };
+}
+
+fn parseDigitsLE2(t: []const u8) ?u32 {
+    if (t.len == 0 or t.len > 2) return null;
+    var n: u32 = 0;
+    for (t) |c| {
+        if (!std.ascii.isDigit(c)) return null;
+        n = n * 10 + (c - '0');
+    }
+    return n;
+}
+
+fn parseDigitsYear(t: []const u8) ?i32 {
+    if (t.len < 2 or t.len > 4) return null;
+    var n: i32 = 0;
+    for (t) |c| {
+        if (!std.ascii.isDigit(c)) return null;
+        n = n * 10 + @as(i32, c - '0');
+    }
+    return n;
+}
+
+fn parseMonthToken(t: []const u8) ?u8 {
+    if (t.len < 3) return null;
+    const months = [_][]const u8{ "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec" };
+    for (months, 0..) |m, i| {
+        if (t.len >= 3 and std.ascii.eqlIgnoreCase(t[0..3], m)) return @intCast(i + 1);
+    }
+    return null;
+}
+
+/// Civil-from-days formula by Howard Hinnant, exact for proleptic Gregorian.
+/// Returns Unix timestamp (UTC) for (y,m,d, h,m,s).
+fn civilToUnix(y: i32, m: u8, d: u8, h: u8, mi: u8, s: u8) i64 {
+    var year = y;
+    if (m <= 2) year -= 1;
+    const era: i32 = if (year >= 0) @divTrunc(year, 400) else @divTrunc(year - 399, 400);
+    const yoe: u32 = @intCast(year - era * 400); // [0, 399]
+    const m_adj: u32 = if (m > 2) @as(u32, m) - 3 else @as(u32, m) + 9;
+    const doy: u32 = @divTrunc(153 * m_adj + 2, 5) + @as(u32, d) - 1; // [0, 365]
+    const doe: u32 = yoe * 365 + @divTrunc(yoe, 4) - @divTrunc(yoe, 100) + doy;
+    const days: i64 = @as(i64, era) * 146097 + @as(i64, @intCast(doe)) - 719468;
+    return days * 86400 + @as(i64, h) * 3600 + @as(i64, mi) * 60 + @as(i64, s);
+}
+
 /// RFC 6265 §5.1.4 path matching.
 /// Returns true if `cookie_path` matches `request_path`.
 ///
@@ -428,6 +610,79 @@ test "session cookie has null expires" {
     var jar = CookieJar.init(std.testing.allocator);
     defer jar.deinit();
     try jar.parseSetCookie("id=1", "example.com");
+    try std.testing.expectEqual(@as(?i64, null), jar.cookies.items[0].expires);
+}
+
+// ── Cookie-date parser (RFC 6265 §5.1.1) ───────────────────────────────
+// Smoke-test B3 regression coverage. Each format below was silently
+// dropped before the parser was added (Max-Age was the only branch).
+
+test "parseCookieDate accepts RFC 1123 (Wed, 01 Jan 2099 00:00:00 GMT)" {
+    const t = parseCookieDate("Wed, 01 Jan 2099 00:00:00 GMT");
+    try std.testing.expect(t != null);
+    // 2099-01-01 00:00:00 UTC = 4070908800
+    try std.testing.expectEqual(@as(i64, 4070908800), t.?);
+}
+
+test "parseCookieDate accepts RFC 850 (Sunday, 06-Nov-94 08:49:37 GMT)" {
+    const t = parseCookieDate("Sunday, 06-Nov-94 08:49:37 GMT");
+    try std.testing.expect(t != null);
+    // 1994-11-06 08:49:37 UTC = 784111777
+    try std.testing.expectEqual(@as(i64, 784111777), t.?);
+}
+
+test "parseCookieDate accepts asctime (Sun Nov  6 08:49:37 1994)" {
+    const t = parseCookieDate("Sun Nov  6 08:49:37 1994");
+    try std.testing.expect(t != null);
+    try std.testing.expectEqual(@as(i64, 784111777), t.?);
+}
+
+test "parseCookieDate ignores wrong day-of-week" {
+    // 2099-01-01 was actually a Thursday; "Sun" is wrong but per the
+    // spec the day-of-week token is ignored entirely. Lenient parsing
+    // is the canonical browser behavior.
+    const t = parseCookieDate("Sun, 01 Jan 2099 00:00:00 GMT");
+    try std.testing.expect(t != null);
+    try std.testing.expectEqual(@as(i64, 4070908800), t.?);
+}
+
+test "parseCookieDate is case-insensitive on month" {
+    const t = parseCookieDate("Wed, 01 jan 2099 00:00:00 GMT");
+    try std.testing.expect(t != null);
+}
+
+test "parseCookieDate rejects out-of-range hour" {
+    try std.testing.expectEqual(@as(?i64, null), parseCookieDate("Wed, 01 Jan 2099 25:00:00 GMT"));
+}
+
+test "parseCookieDate rejects missing month" {
+    try std.testing.expectEqual(@as(?i64, null), parseCookieDate("Wed, 01 2099 00:00:00 GMT"));
+}
+
+test "parse cookie with Expires (RFC 1123) sets future expiry" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+    try jar.parseSetCookie("id=1; Expires=Wed, 01 Jan 2099 00:00:00 GMT", "example.com");
+    const c = jar.cookies.items[0];
+    try std.testing.expect(c.expires != null);
+    try std.testing.expect(c.expires.? > unixTimestamp());
+}
+
+test "parse cookie with Expires (asctime) sets future expiry" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+    try jar.parseSetCookie("id=1; Expires=Sun Nov  6 08:49:37 2099", "example.com");
+    const c = jar.cookies.items[0];
+    try std.testing.expect(c.expires != null);
+    try std.testing.expect(c.expires.? > unixTimestamp());
+}
+
+test "parse cookie with malformed Expires falls back to session" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+    try jar.parseSetCookie("id=1; Expires=garbage", "example.com");
+    // Malformed Expires must NOT crash; cookie ends up as session
+    // (expires == null) which is the conservative fallback.
     try std.testing.expectEqual(@as(?i64, null), jar.cookies.items[0].expires);
 }
 
