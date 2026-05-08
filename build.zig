@@ -37,11 +37,11 @@ pub fn build(b: *std.Build) void {
     const is_mac = host_os == .macos;
     const supports_boringssl = target.result.os.tag == .macos and target.result.cpu.arch == .aarch64;
     const lexbor_prefix_opt = b.option([]const u8, "lexbor-prefix", "Install prefix containing lexbor include/ and lib/");
-    // `-Dwith-jsonrpc` opts the in-progress daemon-mode JSON-RPC module into
-    // the default test gate. Defaults to false because the module currently
-    // tracks a stdlib drift and is not on the active critical path. Once
-    // daemon-mode lands per spec/subspecs/daemon-mode.md, flip the default.
-    const with_jsonrpc = b.option(bool, "with-jsonrpc", "Include src/jsonrpc.zig in the default test gate (daemon-mode WIP)") orelse false;
+    // `-Dwith-jsonrpc` opts the daemon-mode JSON-RPC module into the
+    // default test gate. The stdlib drift was fixed and the 18 framing
+    // + envelope tests are green; flipping the default to true lets the
+    // module ride the merge gate now and prevents future drift.
+    const with_jsonrpc = b.option(bool, "with-jsonrpc", "Include src/jsonrpc.zig in the default test gate") orelse true;
 
     const nghttp2_include_sys: std.Build.LazyPath = if (is_mac)
         .{ .cwd_relative = "/opt/homebrew/opt/libnghttp2/include" }
