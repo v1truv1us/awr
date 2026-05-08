@@ -67,6 +67,13 @@ const EchoServer = struct {
         var http_server: std.http.Server = .init(&net_reader.interface, &net_writer.interface);
         var request = http_server.receiveHead() catch return;
 
+        // `request.head.target` is a slice into the recv buffer; reading
+        // the body and emitting the response can invalidate it. Dupe up
+        // front so route matching below is safe regardless of subsequent
+        // operations on the connection.
+        const target = try allocator.dupe(u8, request.head.target);
+        defer allocator.free(target);
+
         var body_buf: [4 * 1024]u8 = undefined;
         const body_reader = request.readerExpectContinue(&body_buf) catch return;
         const body = body_reader.allocRemaining(allocator, .limited(64 * 1024)) catch
@@ -74,6 +81,66 @@ const EchoServer = struct {
         defer allocator.free(body);
 
         const method = @tagName(request.head.method);
+
+        // Route table — keep narrow. Add routes only when a curated WPT
+        // case needs them; do not extend the EchoServer into a general
+        // mock server. The default route remains `METHOD|BODY` so existing
+        // POST round-trip cases keep working.
+
+        // The EchoServer is single-shot per connection (defer stream.close
+        // closes after each response). To prevent the AWR std.http.Client
+        // pool from trying to reuse the now-closed socket on a subsequent
+        // request, every response includes Connection: close. Cases that
+        // need keep-alive between requests should be promoted to a
+        // separate harness.
+
+        // /status/{N} — respond with status N, empty body. Used by fetch
+        // and XHR cases that exercise the response.status surface.
+        if (std.mem.startsWith(u8, target, "/status/")) {
+            const code_str = target["/status/".len..];
+            const code = std.fmt.parseInt(u16, code_str, 10) catch 200;
+            const status: std.http.Status = @enumFromInt(code);
+            try request.respond("", .{
+                .status = status,
+                .extra_headers = &.{
+                    .{ .name = "connection", .value = "close" },
+                },
+            });
+            return;
+        }
+
+        // /redirect-to?url=X — 302 to X. Used by fetch/XHR redirect cases.
+        if (std.mem.startsWith(u8, target, "/redirect-to?url=")) {
+            const dest = target["/redirect-to?url=".len..];
+            try request.respond("", .{
+                .status = .found,
+                .extra_headers = &.{
+                    .{ .name = "location", .value = dest },
+                    .{ .name = "connection", .value = "close" },
+                },
+            });
+            return;
+        }
+
+        // /json — fixed JSON body so cases can exercise response.json() /
+        // response.headers.get('content-type').
+        if (std.mem.eql(u8, target, "/json")) {
+            try request.respond(
+                "{\"ok\":true,\"runner\":\"awr\"}",
+                .{
+                    .status = .ok,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "application/json" },
+                        .{ .name = "connection", .value = "close" },
+                    },
+                },
+            );
+            return;
+        }
+
+        // Default: METHOD|BODY echo. Existing POST round-trip cases rely
+        // on this exact payload format — do not change without lockstep
+        // updates to fetch_post_basic.js / xhr_post_basic.js.
         const payload = try std.fmt.allocPrint(allocator, "{s}|{s}", .{ method, body });
         defer allocator.free(payload);
 
@@ -376,6 +443,16 @@ const curated_cases = [_]WptCase{
         .filename = "event_handler_properties.js",
         .html = "<html><body><button id=\"btn\">click</button></body></html>",
         .script = @embedFile("wpt/event_handler_properties.js"),
+    },
+    .{
+        .filename = "fetch_status_codes.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/fetch_status_codes.js"),
+    },
+    .{
+        .filename = "fetch_json_response.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/fetch_json_response.js"),
     },
     .{
         .filename = "promise_test_basics.js",
