@@ -455,6 +455,11 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/fetch_json_response.js"),
     },
     .{
+        .filename = "fetch_redirect_follow.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/fetch_redirect_follow.js"),
+    },
+    .{
         .filename = "promise_test_basics.js",
         .html = "<html><body></body></html>",
         .script = @embedFile("wpt/promise_test_basics.js"),
