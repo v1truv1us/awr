@@ -18,6 +18,7 @@ const engine = @import("js/engine.zig");
 const dom = @import("dom/node.zig"); // parseDocument handles HTML+DOM internally
 const bridge = @import("dom/bridge.zig");
 const render = @import("render.zig");
+const extract = @import("extract.zig");
 const url_mod = @import("net/url.zig");
 const cookie_path = @import("util/cookie_path.zig");
 const tls_fail_cache_path = @import("util/tls_fail_cache_path.zig");
@@ -794,6 +795,17 @@ pub const Page = struct {
     pub fn freeFormSubmission(allocator: std.mem.Allocator, sub: *FormSubmission) void {
         allocator.free(sub.target_url);
         allocator.free(sub.body);
+    }
+
+    /// Extract Markdown from the current document. Caller owns the
+    /// returned slice. Returns an empty string when no current document
+    /// or the body could not be located.
+    pub fn extractMarkdown(self: *Page, allocator: std.mem.Allocator) ![]u8 {
+        const doc_ref = if (self.current_doc) |*d| d else return allocator.alloc(u8, 0);
+        return extract.markdownFromDoc(allocator, doc_ref, .{}) catch |err| switch (err) {
+            error.NoBody => allocator.alloc(u8, 0),
+            else => |e| return e,
+        };
     }
 
     /// Process an already-fetched HTML string without making a network

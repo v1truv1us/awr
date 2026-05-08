@@ -260,6 +260,26 @@ pub fn build(b: *std.Build) void {
         test_dom_step.dependOn(&run_dom.step);
     }
 
+    // ── Markdown extraction module (depends on dom + browse_heuristics) ───
+    {
+        const extract_mod = b.createModule(.{
+            .root_source_file = b.path("src/extract.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        extract_mod.addIncludePath(lexbor_include);
+        extract_mod.addLibraryPath(lexbor_lib);
+        extract_mod.linkSystemLibrary("lexbor", .{});
+
+        const extract_test = b.addTest(.{
+            .name = "extract",
+            .root_module = extract_mod,
+        });
+        const run_extract = b.addRunArtifact(extract_test);
+        test_step.dependOn(&run_extract.step);
+    }
+
     // ── Page module (Phase 2 — wires fetch+HTML+JS) ───────────────────────
     {
         const page_mod = b.createModule(.{
