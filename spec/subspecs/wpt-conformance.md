@@ -184,7 +184,7 @@ why the case was invalid.
 
 ## 8. Mapping from API areas to test files
 
-> **Current status (as of 2026-05-08):** 99 active curated WPT cases pass via
+> **Current status (as of 2026-05-08):** 100 active curated WPT cases pass via
 > `zig build test-wpt`. 46 Test262 cases pass via `zig build test-test262`.
 > All `spec/subspecs/agent-browser.md §4` closure-gate cases are active.
 > Only one form/cookie row remains deferred — see §8b.
@@ -194,7 +194,7 @@ why the case was invalid.
 | Area | Active curated cases |
 |---|---|
 | DOM queries | `document_title.js`, `document_title_location.js`, `document_title_create_missing.js`, `document_getElementById.js`, `document_dynamic_getElementById.js`, `document_querySelector.js`, `document_querySelectorAll.js`, `document_getElementsBy.js`, `document_body_head.js`, `document_readyState.js`, `document_createElement.js`, `document_documentElement.js`, `document_visibility.js` |
-| Selector semantics | `descendant_selectors.js`, `element_scoped_selectors.js`, `element_matches_attribute_selectors.js`, `element_querySelectorAll_array.js`, `selector_combinators.js` |
+| Selector semantics | `descendant_selectors.js`, `element_scoped_selectors.js`, `element_matches_attribute_selectors.js`, `element_querySelectorAll_array.js`, `selector_combinators.js`, `selector_list.js` |
 | DOM mutation | `element_innerHTML_setter.js`, `element_cloneNode.js`, `element_appendChild_dynamic.js`, `element_insertBefore.js`, `element_removeChild.js`, `element_createElement_chain.js`, `element_createElement_case.js` |
 | Element attributes | `element_getAttribute_textContent.js`, `element_hasAttribute.js`, `element_id_className.js`, `element_classList.js`, `element_outerHTML.js`, `element_dom_getters_authoritative.js`, `element_setAttribute_basic.js`, `element_dataset.js`, `element_textContent_setter.js`, `element_classList_toggle_returns.js` |
 | DOM relationships | `element_parentNode.js`, `element_siblings.js`, `element_contains.js`, `element_matches_closest.js`, `element_contains_relations.js`, `element_wrapper_identity.js` |

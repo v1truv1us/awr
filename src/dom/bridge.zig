@@ -1366,35 +1366,15 @@ const BRIDGE_POLYFILL =
     \\      // all listed form-control descendants. AWR returns a NodeList-
     \\      // like array (non-live) which covers length / [i] / iteration.
     \\      // Excludes <input type=image> per spec.
-    \\      //
-    \\      // Implementation: we cannot use a comma-separated selector
-    \\      // list because AWR's selector parser today only honors the
-    \\      // last token (filed as a selector-parser gap). Instead walk
-    \\      // the descendant tree depth-first, matching each element by
-    \\      // tagName. This preserves document order without needing
-    \\      // compareDocumentPosition.
     \\      get elements() {
     \\        if (this.tagName !== 'FORM') return undefined;
-    \\        const FORM_CONTROL_TAGS = { INPUT: 1, BUTTON: 1, SELECT: 1, TEXTAREA: 1, FIELDSET: 1, OUTPUT: 1 };
+    \\        const all = this.querySelectorAll('input,button,select,textarea,fieldset,output');
     \\        const out = [];
-    \\        function walk(el) {
-    \\          // .children walks the authoritative C-side DOM tree, so
-    \\          // descendants present in the parsed initial HTML are seen
-    \\          // here even if the JS mirror's _children mutator-state is
-    \\          // empty.
-    \\          const kids = el.children || [];
-    \\          for (let i = 0; i < kids.length; i++) {
-    \\            const child = kids[i];
-    \\            if (!child || !child.tagName) continue;
-    \\            if (FORM_CONTROL_TAGS[child.tagName]) {
-    \\              if (!(child.tagName === 'INPUT' && (child.getAttribute && (child.getAttribute('type') || '').toLowerCase() === 'image'))) {
-    \\                out.push(child);
-    \\              }
-    \\            }
-    \\            walk(child);
-    \\          }
+    \\        for (let i = 0; i < all.length; i++) {
+    \\          const el = all[i];
+    \\          if (el.tagName === 'INPUT' && (el.getAttribute('type') || '').toLowerCase() === 'image') continue;
+    \\          out.push(el);
     \\        }
-    \\        walk(this);
     \\        return out;
     \\      },
     \\      _dirtyValue: false,

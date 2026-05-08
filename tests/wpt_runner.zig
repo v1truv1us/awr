@@ -470,6 +470,23 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/fetch_headers_get.js"),
     },
     .{
+        .filename = "selector_list.js",
+        .html =
+        \\<html><body>
+        \\<h1>title</h1>
+        \\<section><p>inside section</p></section>
+        \\<p class="alert">alert</p>
+        \\<input name="i">
+        \\<button>b</button>
+        \\<select name="s"><option>x</option></select>
+        \\<textarea name="t"></textarea>
+        \\<a id="cta" href="#">cta</a>
+        \\<p data-key="a,b">comma in attr</p>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/selector_list.js"),
+    },
+    .{
         .filename = "promise_test_basics.js",
         .html = "<html><body></body></html>",
         .script = @embedFile("wpt/promise_test_basics.js"),

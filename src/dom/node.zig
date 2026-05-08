@@ -70,6 +70,20 @@ const ComplexSelector = struct {
     }
 };
 
+/// CSS Selectors §5: a comma-separated list of complex selectors. The
+/// list is the *union* — an element matches if any of its complexes
+/// match. AWR's public querySelector / querySelectorAll / matches /
+/// closest surface always parses through SelectorList so callers can
+/// pass a comma list (e.g. `'input,button,select,textarea'`).
+const SelectorList = struct {
+    parts: std.ArrayListUnmanaged(ComplexSelector) = .empty,
+
+    fn deinit(self: *SelectorList, alloc: std.mem.Allocator) void {
+        for (self.parts.items) |*p| p.deinit(alloc);
+        self.parts.deinit(alloc);
+    }
+};
+
 pub const Node = union(NodeKind) {
     document: *Document,
     element: *Element,
@@ -166,12 +180,12 @@ pub const Element = struct {
 
     pub fn querySelector(self: *const Element, sel: []const u8) ?*Element {
         const trimmed = std.mem.trim(u8, sel, " \t\n\r");
-        var parsed = Document.parseComplexSelector(std.heap.page_allocator, trimmed) catch return null;
+        var parsed = Document.parseSelectorList(std.heap.page_allocator, trimmed) catch return null;
         defer parsed.deinit(std.heap.page_allocator);
 
         for (self.children.items) |child| {
             if (child == .element) {
-                if (Document.findByComplexSelector(child.element, &parsed)) |found| return found;
+                if (Document.findBySelectorList(child.element, &parsed)) |found| return found;
             }
         }
         return null;
@@ -184,12 +198,12 @@ pub const Element = struct {
     ) ![]*Element {
         var out: std.ArrayList(*Element) = .empty;
         const trimmed = std.mem.trim(u8, sel, " \t\n\r");
-        var parsed = try Document.parseComplexSelector(allocator, trimmed);
+        var parsed = try Document.parseSelectorList(allocator, trimmed);
         defer parsed.deinit(allocator);
 
         for (self.children.items) |child| {
             if (child == .element) {
-                Document.collectByComplexSelector(allocator, child.element, &parsed, &out);
+                Document.collectBySelectorList(allocator, child.element, &parsed, &out);
             }
         }
 
@@ -198,19 +212,19 @@ pub const Element = struct {
 
     pub fn matches(self: *const Element, sel: []const u8) bool {
         const trimmed = std.mem.trim(u8, sel, " \t\n\r");
-        var parsed = Document.parseComplexSelector(std.heap.page_allocator, trimmed) catch return false;
+        var parsed = Document.parseSelectorList(std.heap.page_allocator, trimmed) catch return false;
         defer parsed.deinit(std.heap.page_allocator);
-        return Document.matchesComplexSelector(self, &parsed);
+        return Document.matchesSelectorList(self, &parsed);
     }
 
     pub fn closest(self: *const Element, sel: []const u8) ?*Element {
         const trimmed = std.mem.trim(u8, sel, " \t\n\r");
-        var parsed = Document.parseComplexSelector(std.heap.page_allocator, trimmed) catch return null;
+        var parsed = Document.parseSelectorList(std.heap.page_allocator, trimmed) catch return null;
         defer parsed.deinit(std.heap.page_allocator);
 
         var cur: ?*const Element = self;
         while (cur) |elem| : (cur = elem.parent) {
-            if (Document.matchesComplexSelector(elem, &parsed)) return @constCast(elem);
+            if (Document.matchesSelectorList(elem, &parsed)) return @constCast(elem);
         }
         return null;
     }
@@ -261,9 +275,9 @@ pub const Document = struct {
     pub fn querySelector(self: *const Document, sel: []const u8) ?*Element {
         const root = self.root orelse return null;
         const trimmed = std.mem.trim(u8, sel, " \t\n\r");
-        var parsed = parseComplexSelector(std.heap.page_allocator, trimmed) catch return null;
+        var parsed = parseSelectorList(std.heap.page_allocator, trimmed) catch return null;
         defer parsed.deinit(std.heap.page_allocator);
-        return findByComplexSelector(root, &parsed);
+        return findBySelectorList(root, &parsed);
     }
 
     pub fn querySelectorAll(
@@ -274,9 +288,9 @@ pub const Document = struct {
         var out: std.ArrayList(*Element) = .empty;
         const trimmed = std.mem.trim(u8, sel, " \t\n\r");
         if (self.root) |root| {
-            var parsed = try parseComplexSelector(allocator, trimmed);
+            var parsed = try parseSelectorList(allocator, trimmed);
             defer parsed.deinit(allocator);
-            collectByComplexSelector(allocator, root, &parsed, &out);
+            collectBySelectorList(allocator, root, &parsed, &out);
         }
         return out.toOwnedSlice(allocator);
     }
@@ -309,6 +323,37 @@ pub const Document = struct {
         if (matchesComplexSelector(elem, sel)) out.append(alloc, elem) catch {};
         for (elem.children.items) |child| {
             if (child == .element) collectByComplexSelector(alloc, child.element, sel, out);
+        }
+    }
+
+    /// Element matches the list iff it matches at least one part.
+    fn matchesSelectorList(elem: *const Element, list: *const SelectorList) bool {
+        for (list.parts.items) |*part| {
+            if (matchesComplexSelector(elem, part)) return true;
+        }
+        return false;
+    }
+
+    /// Tree-walk: first element matching any part wins. Document order
+    /// (depth-first pre-order) — same as findByComplexSelector.
+    fn findBySelectorList(elem: *Element, list: *const SelectorList) ?*Element {
+        if (matchesSelectorList(elem, list)) return elem;
+        for (elem.children.items) |child| {
+            if (child == .element) {
+                if (findBySelectorList(child.element, list)) |found| return found;
+            }
+        }
+        return null;
+    }
+
+    /// Tree-walk: collect every element that matches any part. Each
+    /// element is added at most once (matches simply stop checking
+    /// further parts — we do not run a separate pass per part, so
+    /// document order is preserved).
+    fn collectBySelectorList(alloc: std.mem.Allocator, elem: *Element, list: *const SelectorList, out: *std.ArrayList(*Element)) void {
+        if (matchesSelectorList(elem, list)) out.append(alloc, elem) catch {};
+        for (elem.children.items) |child| {
+            if (child == .element) collectBySelectorList(alloc, child.element, list, out);
         }
     }
 
@@ -382,6 +427,41 @@ pub const Document = struct {
             if (matchesSimpleSelector(elem, n)) return false;
         }
         return true;
+    }
+
+    /// Split `sel` on top-level commas (respecting `[...]` attribute
+    /// brackets and `:func(...)` parens) and parse each piece as a
+    /// ComplexSelector. The pieces are unioned at match time per CSS
+    /// Selectors §5. Empty pieces are skipped — `'a,,b'` is treated
+    /// as `'a, b'` and trailing/leading commas are ignored, matching
+    /// the lenient real-browser tokenizer.
+    fn parseSelectorList(alloc: std.mem.Allocator, sel: []const u8) !SelectorList {
+        var out: SelectorList = .{};
+        errdefer out.deinit(alloc);
+
+        var part_start: usize = 0;
+        var i: usize = 0;
+        var bracket_depth: i32 = 0;
+        var paren_depth: i32 = 0;
+        while (i < sel.len) : (i += 1) {
+            const ch = sel[i];
+            if (ch == '[') bracket_depth += 1;
+            if (ch == ']') bracket_depth -= 1;
+            if (ch == '(') paren_depth += 1;
+            if (ch == ')') paren_depth -= 1;
+            if (ch == ',' and bracket_depth == 0 and paren_depth == 0) {
+                const part = std.mem.trim(u8, sel[part_start..i], " \t\n\r");
+                if (part.len > 0) {
+                    try out.parts.append(alloc, try parseComplexSelector(alloc, part));
+                }
+                part_start = i + 1;
+            }
+        }
+        const last_part = std.mem.trim(u8, sel[part_start..], " \t\n\r");
+        if (last_part.len > 0) {
+            try out.parts.append(alloc, try parseComplexSelector(alloc, last_part));
+        }
+        return out;
     }
 
     fn parseComplexSelector(alloc: std.mem.Allocator, sel: []const u8) !ComplexSelector {
