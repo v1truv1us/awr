@@ -46,6 +46,15 @@ pub const EventLoop = struct {
     orphaned: std.ArrayListUnmanaged(*PendingTimer) = .empty,
     next_id: u32 = 1,
 
+    /// Deadline-timer state used by `tickOnceWithTimeout`. Living on the
+    /// EventLoop (not the stack) keeps completion lifetime tied to the loop
+    /// — libxev may still hold references to these completions after the
+    /// caller frame returns (e.g. when cancellation is in flight).
+    deadline_completion: xev.Completion = .{},
+    deadline_cancel_completion: xev.Completion = .{},
+    deadline_in_flight: bool = false,
+    deadline_fired: bool = false,
+
     pub fn init(allocator: std.mem.Allocator, ctx: *qjs.Context) !EventLoop {
         const loop = try xev.Loop.init(.{});
         return EventLoop{
@@ -161,7 +170,74 @@ pub const EventLoop = struct {
         if (!self.hasPending()) return;
         try self.loop.run(.once);
     }
+
+    /// Block until at least one event fires OR `remaining_ms` wall-clock
+    /// milliseconds elapse, whichever comes first. Returns immediately if
+    /// nothing is pending or the deadline has already elapsed.
+    ///
+    /// Implementation: arm a one-shot deadline timer before `run(.once)`.
+    /// libxev wakes on the first of (real event, deadline). If real work
+    /// woke us first, cancel the deadline timer and drain its `.Canceled`
+    /// callback non-blockingly so the completion is finalized before the
+    /// next tick. This matches the canonical libxev / libuv timeout idiom
+    /// (Node arms a uv_timer_t + UV_RUN_ONCE for the same purpose).
+    pub fn tickOnceWithTimeout(self: *EventLoop, remaining_ms: u64) !void {
+        if (!self.hasPending()) return;
+        if (remaining_ms == 0) return;
+
+        const timer = try xev.Timer.init();
+        self.deadline_fired = false;
+        self.deadline_in_flight = true;
+        timer.run(
+            &self.loop,
+            &self.deadline_completion,
+            remaining_ms,
+            EventLoop,
+            self,
+            deadlineCallback,
+        );
+
+        try self.loop.run(.once);
+
+        if (!self.deadline_fired) {
+            // Real work woke us; cancel the deadline timer. The original
+            // timer's callback will fire one more time with error.Canceled
+            // (handled in deadlineCallback as a no-op + flag flip), and the
+            // cancel completion's own callback also fires. We drain both
+            // non-blockingly so they don't linger into the next tick.
+            timer.cancel(
+                &self.loop,
+                &self.deadline_completion,
+                &self.deadline_cancel_completion,
+                EventLoop,
+                self,
+                deadlineCancelCallback,
+            );
+            try self.loop.run(.no_wait);
+        }
+        self.deadline_in_flight = false;
+    }
 };
+
+fn deadlineCallback(
+    ud: ?*EventLoop,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    _ = r catch {}; // .Canceled is fine — see tickOnceWithTimeout cleanup
+    if (ud) |el| el.deadline_fired = true;
+    return .disarm;
+}
+
+fn deadlineCancelCallback(
+    _: ?*EventLoop,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    _: xev.Timer.CancelError!void,
+) xev.CallbackAction {
+    return .disarm;
+}
 
 fn timerCallback(
     ud: ?*PendingTimer,
@@ -271,4 +347,80 @@ test "EventLoop — cancel prevents callback" {
     const n = ctx.eval("__n", "<t>", .{});
     defer n.deinit(ctx);
     try std.testing.expectEqual(@as(i32, 0), n.toInt32(ctx) catch -1);
+}
+
+test "EventLoop — tickOnceWithTimeout returns within budget for long-delay timer" {
+    // Regression test for B3: a setTimeout(cb, 60_000)-class timer would
+    // pin loop.run(.once) for the full delay before. tickOnceWithTimeout
+    // arms a deadline xev.Timer and must return within ~budget_ms even
+    // though the user's timer has 60s left to run.
+    const qjs_local = @import("quickjs");
+    const rt = try qjs_local.Runtime.init();
+    defer rt.deinit();
+    const ctx = try qjs_local.Context.init(rt);
+    defer ctx.deinit();
+
+    var el = try EventLoop.init(std.testing.allocator, ctx);
+    defer el.deinit();
+
+    _ = ctx.eval("var __long_fired = false;", "<t>", .{});
+    const fn_val = ctx.eval("(function(){ __long_fired = true; })", "<t>", .{});
+    defer fn_val.deinit(ctx);
+
+    // Schedule a setTimeout 60s in the future. Without the deadline timer,
+    // tickOnceWithTimeout would block 60s.
+    _ = try el.schedule(fn_val.dup(ctx), 60_000, false);
+
+    el.loop.update_now();
+    const start_ms = el.loop.now();
+    try el.tickOnceWithTimeout(50);
+    el.loop.update_now();
+    const elapsed_ms = el.loop.now() - start_ms;
+
+    // The user's timer must NOT have fired (60s in the future).
+    const fired_val = ctx.eval("__long_fired", "<t>", .{});
+    defer fired_val.deinit(ctx);
+    try std.testing.expect(!(fired_val.toBool(ctx) catch true));
+
+    // Wall-clock elapsed should be close to the 50ms budget. Allow generous
+    // headroom for CI variance: anywhere from 30ms to 1s is acceptable, but
+    // we MUST NOT have blocked 60s.
+    try std.testing.expect(elapsed_ms >= 30);
+    try std.testing.expect(elapsed_ms < 1_000);
+
+    // Also: re-entering tickOnceWithTimeout must still work (deadline state
+    // is reset between calls).
+    try el.tickOnceWithTimeout(20);
+}
+
+test "EventLoop — tickOnceWithTimeout returns when fast timer fires first" {
+    // The deadline timer must NOT bias against fast real timers — if a
+    // user-scheduled callback is ready in 1ms and the budget is 1s, the
+    // tick should return in ~1ms, not waste the rest.
+    const qjs_local = @import("quickjs");
+    const rt = try qjs_local.Runtime.init();
+    defer rt.deinit();
+    const ctx = try qjs_local.Context.init(rt);
+    defer ctx.deinit();
+
+    var el = try EventLoop.init(std.testing.allocator, ctx);
+    defer el.deinit();
+
+    _ = ctx.eval("var __fast_fired = false;", "<t>", .{});
+    const fn_val = ctx.eval("(function(){ __fast_fired = true; })", "<t>", .{});
+    defer fn_val.deinit(ctx);
+
+    _ = try el.schedule(fn_val.dup(ctx), 1, false);
+
+    el.loop.update_now();
+    const start_ms = el.loop.now();
+    try el.tickOnceWithTimeout(1_000);
+    el.loop.update_now();
+    const elapsed_ms = el.loop.now() - start_ms;
+
+    const fired_val = ctx.eval("__fast_fired", "<t>", .{});
+    defer fired_val.deinit(ctx);
+    try std.testing.expect(fired_val.toBool(ctx) catch false);
+    // Must have returned long before the 1s budget — give CI plenty of slack.
+    try std.testing.expect(elapsed_ms < 500);
 }

@@ -508,7 +508,11 @@ pub const Page = struct {
     /// `STORM_NO_PROGRESS_TICKS` consecutive ticks with the timer count
     /// neither dropping nor showing net new progress, we exit early.
     /// Pages that genuinely converge (timer count drops to 0) hit the
-    /// `hasPending() == false` exit before this kicks in.
+    /// `hasPending() == false` exit before this kicks in. Storm detection
+    /// is retained as a defense in depth alongside the deadline timer:
+    /// for a setInterval poller with delay << max_ms (e.g. 16ms RAF-style),
+    /// we'd otherwise burn the entire budget on no-op ticks even though
+    /// each individual tick is fast.
     pub fn drainAll(self: *Page, max_ms: u64) void {
         self.event_loop.loop.update_now();
         const start = self.event_loop.loop.now();
@@ -522,10 +526,17 @@ pub const Page = struct {
             self.js.drainMicrotasks();
             if (!self.event_loop.hasPending()) return;
             self.event_loop.loop.update_now();
-            if (self.event_loop.loop.now() >= deadline) return;
+            const now = self.event_loop.loop.now();
+            if (now >= deadline) return;
+            const remaining_ms: u64 = @intCast(deadline - now);
 
             const before_count = self.event_loop.timers.count();
-            self.event_loop.tickOnce() catch return;
+            // Bound the blocking wait by the deadline — a long-delay timer
+            // (e.g. setTimeout(cb, 60_000) on a page like react.dev) would
+            // otherwise pin loop.run(.once) for the full delay regardless of
+            // max_ms. tickOnceWithTimeout arms a deadline xev.Timer that
+            // wakes the loop at `remaining_ms` even if no real timer fires.
+            self.event_loop.tickOnceWithTimeout(remaining_ms) catch return;
             const after_count = self.event_loop.timers.count();
 
             // "No progress" = timer count didn't shrink AND didn't drop below
