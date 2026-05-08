@@ -460,6 +460,11 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/fetch_redirect_follow.js"),
     },
     .{
+        .filename = "xhr_status_codes.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/xhr_status_codes.js"),
+    },
+    .{
         .filename = "promise_test_basics.js",
         .html = "<html><body></body></html>",
         .script = @embedFile("wpt/promise_test_basics.js"),
