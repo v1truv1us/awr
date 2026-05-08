@@ -453,6 +453,155 @@ const curated_cases = [_]Case{
         .probe = "String(globalThis.__test_result__)",
         .expected = "5",
     },
+    .{
+        .name = "Object.hasOwn (ES2022)",
+        .source =
+            \\globalThis.__test_result__ = [
+            \\  Object.hasOwn({a:1}, 'a'),
+            \\  Object.hasOwn({a:1}, 'b'),
+            \\  Object.hasOwn(Object.create({inherited: 1}), 'inherited'),
+            \\].join(',');
+        ,
+        .probe = "globalThis.__test_result__",
+        .expected = "true,false,false",
+    },
+    .{
+        .name = "Array.prototype.at handles negative indexes (ES2022)",
+        .source =
+            \\globalThis.__test_result__ = [10,20,30,40,50].at(-1) + ',' +
+            \\  [10,20,30,40,50].at(-2) + ',' +
+            \\  [10,20,30,40,50].at(0) + ',' +
+            \\  [10,20,30,40,50].at(99);
+        ,
+        .probe = "globalThis.__test_result__",
+        .expected = "50,40,10,undefined",
+    },
+    .{
+        .name = "Array.prototype.findLast and findLastIndex (ES2023)",
+        .source =
+            \\const arr = [1, 2, 3, 4, 5];
+            \\globalThis.__test_result__ =
+            \\  arr.findLast(n => n < 4) + ',' +
+            \\  arr.findLastIndex(n => n < 4) + ',' +
+            \\  arr.findLast(n => n > 99) + ',' +
+            \\  arr.findLastIndex(n => n > 99);
+        ,
+        .probe = "globalThis.__test_result__",
+        .expected = "3,2,undefined,-1",
+    },
+    .{
+        .name = "Promise.allSettled returns all outcomes",
+        .source =
+            \\Promise.allSettled([
+            \\  Promise.resolve(1),
+            \\  Promise.reject('boom'),
+            \\  Promise.resolve(3),
+            \\]).then(rs => {
+            \\  globalThis.__test_result__ =
+            \\    rs[0].status + ':' + rs[0].value + '|' +
+            \\    rs[1].status + ':' + rs[1].reason + '|' +
+            \\    rs[2].status + ':' + rs[2].value;
+            \\});
+        ,
+        .drain_microtasks = true,
+        .probe = "globalThis.__test_result__",
+        .expected = "fulfilled:1|rejected:boom|fulfilled:3",
+    },
+    .{
+        .name = "Promise.any resolves with first fulfilled",
+        .source =
+            \\Promise.any([
+            \\  Promise.reject('a'),
+            \\  Promise.resolve('b'),
+            \\  Promise.reject('c'),
+            \\]).then(v => { globalThis.__test_result__ = String(v); });
+        ,
+        .drain_microtasks = true,
+        .probe = "globalThis.__test_result__",
+        .expected = "b",
+    },
+    .{
+        .name = "optional chaining (?.) short-circuits on null",
+        .source =
+            \\const obj = { a: { b: 42 } };
+            \\globalThis.__test_result__ =
+            \\  String(obj?.a?.b) + ',' +
+            \\  String(obj?.x?.y) + ',' +
+            \\  String(obj?.a?.b?.toString()) + ',' +
+            \\  String(null?.anything);
+        ,
+        .probe = "globalThis.__test_result__",
+        .expected = "42,undefined,42,undefined",
+    },
+    .{
+        .name = "nullish coalescing (??) treats null/undefined only",
+        .source =
+            \\globalThis.__test_result__ = [
+            \\  (null ?? 'A'),
+            \\  (undefined ?? 'B'),
+            \\  ('' ?? 'C'),
+            \\  (0 ?? 'D'),
+            \\  (false ?? 'E'),
+            \\].join(',');
+        ,
+        .probe = "globalThis.__test_result__",
+        .expected = "A,B,,0,false",
+    },
+    .{
+        .name = "logical assignment operators (||= ??= &&=)",
+        .source =
+            \\let a = null; a ??= 'a';
+            \\let b = 0;    b ||= 'b';
+            \\let c = 1;    c &&= 'c';
+            \\globalThis.__test_result__ = a + ',' + b + ',' + c;
+        ,
+        .probe = "globalThis.__test_result__",
+        .expected = "a,b,c",
+    },
+    .{
+        .name = "String.prototype.matchAll yields named groups",
+        .source =
+            \\const matches = [...'abc abd abe'.matchAll(/ab(?<x>\w)/g)];
+            \\globalThis.__test_result__ =
+            \\  matches.map(m => m.groups.x).join(',') + '|len=' + matches.length;
+        ,
+        .probe = "globalThis.__test_result__",
+        .expected = "c,d,e|len=3",
+    },
+    .{
+        .name = "Object.fromEntries inverts Object.entries",
+        .source =
+            \\const original = { x: 1, y: 2, z: 3 };
+            \\const round = Object.fromEntries(Object.entries(original));
+            \\globalThis.__test_result__ =
+            \\  round.x + ',' + round.y + ',' + round.z + '|keys=' + Object.keys(round).length;
+        ,
+        .probe = "globalThis.__test_result__",
+        .expected = "1,2,3|keys=3",
+    },
+    .{
+        .name = "BigInt arithmetic and comparison",
+        .source =
+            \\const big = 9007199254740993n;
+            \\globalThis.__test_result__ =
+            \\  String(big) + ',' +
+            \\  String(big + 1n) + ',' +
+            \\  String(big > 9007199254740992n);
+        ,
+        .probe = "globalThis.__test_result__",
+        .expected = "9007199254740993,9007199254740994,true",
+    },
+    .{
+        .name = "for-of iterates a Map's [key,value] entries",
+        .source =
+            \\const m = new Map([['a', 1], ['b', 2], ['c', 3]]);
+            \\const out = [];
+            \\for (const [k, v] of m) out.push(k + ':' + v);
+            \\globalThis.__test_result__ = out.join(',');
+        ,
+        .probe = "globalThis.__test_result__",
+        .expected = "a:1,b:2,c:3",
+    },
 };
 
 fn runCase(allocator: std.mem.Allocator, case: Case) !void {
