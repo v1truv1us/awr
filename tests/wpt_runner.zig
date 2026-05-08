@@ -496,6 +496,24 @@ const curated_cases = [_]WptCase{
         .url = "http://127.0.0.1:18488/",
     },
     .{
+        .filename = "element_interaction_events.js",
+        .html =
+        \\<html><body>
+        \\<form id="f">
+        \\  <input id="t" type="text">
+        \\  <select id="s"><option value="a">a</option><option value="b">b</option></select>
+        \\  <input id="cb" type="checkbox">
+        \\</form>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/element_interaction_events.js"),
+    },
+    .{
+        .filename = "window_navigator_surface.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/window_navigator_surface.js"),
+    },
+    .{
         .filename = "promise_test_basics.js",
         .html = "<html><body></body></html>",
         .script = @embedFile("wpt/promise_test_basics.js"),

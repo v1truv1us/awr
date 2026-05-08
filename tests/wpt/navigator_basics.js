@@ -4,7 +4,9 @@ test(() => {
   assert_true(navigator.userAgent.length > 0);
   assert_equals(typeof navigator.language, 'string');
   assert_equals(navigator.onLine, true);
-  assert_equals(navigator.cookieEnabled, false);
+  // Phase C.9 wired document.cookie to the page's cookie jar, so
+  // navigator.cookieEnabled now reflects that state and is true.
+  assert_equals(navigator.cookieEnabled, true);
 }, 'navigator exposes the basic platform identity surface');
 
 test(() => {

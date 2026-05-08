@@ -184,7 +184,7 @@ why the case was invalid.
 
 ## 8. Mapping from API areas to test files
 
-> **Current status (as of 2026-05-08):** 101 active curated WPT cases pass via
+> **Current status (as of 2026-05-08):** 103 active curated WPT cases pass via
 > `zig build test-wpt`. 46 Test262 cases pass via `zig build test-test262`.
 > All `spec/subspecs/agent-browser.md §4` closure-gate cases are active.
 > Only one form/cookie row remains deferred — see §8b.
@@ -198,7 +198,7 @@ why the case was invalid.
 | DOM mutation | `element_innerHTML_setter.js`, `element_cloneNode.js`, `element_appendChild_dynamic.js`, `element_insertBefore.js`, `element_removeChild.js`, `element_createElement_chain.js`, `element_createElement_case.js` |
 | Element attributes | `element_getAttribute_textContent.js`, `element_hasAttribute.js`, `element_id_className.js`, `element_classList.js`, `element_outerHTML.js`, `element_dom_getters_authoritative.js`, `element_setAttribute_basic.js`, `element_dataset.js`, `element_textContent_setter.js`, `element_classList_toggle_returns.js` |
 | DOM relationships | `element_parentNode.js`, `element_siblings.js`, `element_contains.js`, `element_matches_closest.js`, `element_contains_relations.js`, `element_wrapper_identity.js` |
-| Element interaction | `element_click_focus_blur.js`, `element_bounding_client_rect.js`, `element_click_listener.js` |
+| Element interaction | `element_click_focus_blur.js`, `element_bounding_client_rect.js`, `element_click_listener.js`, `element_interaction_events.js` |
 | Events | `event_add_remove.js`, `event_dispatch_bubble.js`, `event_custom.js`, `event_DOMContentLoaded.js`, `event_prevent_default.js`, `event_stop_propagation.js`, `event_properties.js`, `event_target_currentTarget.js`, `event_dispatchEvent_returns.js`, `event_constructors_alias.js`, `event_listener_options.js`, `event_handler_properties.js` |
 | MutationObserver | `mutation_observer_childList.js`, `mutation_observer_attributes.js`, `mutation_observer_subtree.js`, `mutation_observer_takeRecords.js`, `mutation_observer_reflected_attributes.js`, `mutation_observer_characterData.js` |
 | Storage | `storage_localStorage.js`, `session_storage_distinct.js`, `storage_event_payload.js` |
@@ -208,7 +208,7 @@ why the case was invalid.
 | Forms (DOM) | `form_input_value_type.js`, `form_textarea_value.js`, `form_document_forms.js`, `form_button_select.js`, `form_method_post.js`, `form_properties.js` |
 | History | `history_push_replace_state.js`, `history_relative_url.js`, `history_state_length.js` |
 | Viewport / observers | `viewport_dimensions.js`, `requestAnimationFrame.js`, `request_idle_callback.js`, `request_idle_callback_cancel.js`, `intersection_observer.js`, `resize_observer.js`, `window_basics.js` |
-| Window / navigator | `navigator_basics.js`, `url_search_params_basics.js` |
+| Window / navigator | `navigator_basics.js`, `url_search_params_basics.js`, `window_navigator_surface.js` |
 | Harness / misc | `promise_test_basics.js`, `console_namespace.js`, `match_media.js` |
 | JS runtime | 46 curated Test262 cases in `tests/test262_runner.zig` |
 

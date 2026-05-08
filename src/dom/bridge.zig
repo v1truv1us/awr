@@ -1607,7 +1607,7 @@ const BRIDGE_POLYFILL =
     \\    globalThis.navigator = {
     \\      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
     \\      language: 'en-US', languages: ['en-US', 'en'],
-    \\      cookieEnabled: false, onLine: true, hardwareConcurrency: 8,
+    \\      cookieEnabled: true, onLine: true, hardwareConcurrency: 8,
     \\      platform: 'MacIntel', vendor: 'Google Inc.', maxTouchPoints: 0,
     \\    };
     \\  }
@@ -1679,6 +1679,16 @@ const BRIDGE_POLYFILL =
     \\  globalThis.innerHeight = 24;
     \\  globalThis.outerWidth  = 80;
     \\  globalThis.outerHeight = 24;
+    \\  // Scroll offsets — AWR has no real scrolling, so always 0. These
+    \\  // appear in feature-detection paths (scrollY for sticky headers,
+    \\  // pageYOffset for legacy code).
+    \\  globalThis.scrollX     = 0;
+    \\  globalThis.scrollY     = 0;
+    \\  globalThis.pageXOffset = 0;
+    \\  globalThis.pageYOffset = 0;
+    \\  // scrollTo / scrollBy — accept any args, no-op (we have no viewport).
+    \\  globalThis.scrollTo = function() {};
+    \\  globalThis.scrollBy = function() {};
     \\
     \\  globalThis.requestAnimationFrame  = function(cb) { return setTimeout(function() { cb(Date.now()); }, 16); };
     \\  globalThis.cancelAnimationFrame   = function(id) { clearTimeout(id); };
