@@ -49,6 +49,10 @@ The agent-browser surface ships:
   - **File mode:** `0600`.
   - **Lifecycle:** loaded on `Client.init`, written on `Client.deinit`. Errors
     are non-fatal (offline-first).
+  - **Expiry sources:** `Max-Age=` (seconds delta from receipt) AND
+    `Expires=` (RFC 6265 §5.1.1 cookie-date — tolerates rfc1123, rfc850,
+    asctime variants and ignores the day-of-week token). When both are
+    present, last-attribute-wins per Chrome semantics.
   - **Skipped on save:** session cookies (`expires == null`) and expired
     cookies.
 
