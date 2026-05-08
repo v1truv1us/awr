@@ -184,7 +184,7 @@ why the case was invalid.
 
 ## 8. Mapping from API areas to test files
 
-> **Current status (as of 2026-05-08):** 93 active curated WPT cases pass via
+> **Current status (as of 2026-05-08):** 94 active curated WPT cases pass via
 > `zig build test-wpt`. 46 Test262 cases pass via `zig build test-test262`.
 > All `spec/subspecs/agent-browser.md §4` closure-gate cases are active.
 > Only one form/cookie row remains deferred — see §8b.
@@ -199,7 +199,7 @@ why the case was invalid.
 | Element attributes | `element_getAttribute_textContent.js`, `element_hasAttribute.js`, `element_id_className.js`, `element_classList.js`, `element_outerHTML.js`, `element_dom_getters_authoritative.js`, `element_setAttribute_basic.js`, `element_dataset.js`, `element_textContent_setter.js`, `element_classList_toggle_returns.js` |
 | DOM relationships | `element_parentNode.js`, `element_siblings.js`, `element_contains.js`, `element_matches_closest.js`, `element_contains_relations.js`, `element_wrapper_identity.js` |
 | Element interaction | `element_click_focus_blur.js`, `element_bounding_client_rect.js`, `element_click_listener.js` |
-| Events | `event_add_remove.js`, `event_dispatch_bubble.js`, `event_custom.js`, `event_DOMContentLoaded.js`, `event_prevent_default.js`, `event_stop_propagation.js`, `event_properties.js`, `event_target_currentTarget.js`, `event_dispatchEvent_returns.js`, `event_constructors_alias.js`, `event_listener_options.js` |
+| Events | `event_add_remove.js`, `event_dispatch_bubble.js`, `event_custom.js`, `event_DOMContentLoaded.js`, `event_prevent_default.js`, `event_stop_propagation.js`, `event_properties.js`, `event_target_currentTarget.js`, `event_dispatchEvent_returns.js`, `event_constructors_alias.js`, `event_listener_options.js`, `event_handler_properties.js` |
 | MutationObserver | `mutation_observer_childList.js`, `mutation_observer_attributes.js`, `mutation_observer_subtree.js`, `mutation_observer_takeRecords.js`, `mutation_observer_reflected_attributes.js`, `mutation_observer_characterData.js` |
 | Storage | `storage_localStorage.js`, `session_storage_distinct.js`, `storage_event_payload.js` |
 | XHR (GET + POST) | `xhr_basic_get.js`, `xhr_post_basic.js`, `xhr_post_form_encoded.js`, `xhr_rejects_unsupported.js` |

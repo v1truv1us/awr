@@ -1103,6 +1103,19 @@ const BRIDGE_POLYFILL =
     \\    __awr_invoke_listeners__(target, event, true);
     \\    if (!event.__stopImmediate) __awr_invoke_listeners__(target, event, false);
     \\
+    \\    // DOM Level-0 event handler properties: when an event of type T
+    \\    // dispatches at-target, invoke target['on'+T] if it is a function.
+    \\    // Per WHATWG DOM §2.6 these are "internal event handlers" — a
+    \\    // dedicated slot, set/cleared by the IDL attribute. AWR runs them
+    \\    // alongside addEventListener-registered listeners. Errors thrown
+    \\    // by the handler are swallowed so dispatch continues to bubble.
+    \\    if (!event.__stopImmediate) {
+    \\      const handler = target['on' + event.type];
+    \\      if (typeof handler === 'function') {
+    \\        try { handler.call(target, event); } catch (e) {}
+    \\      }
+    \\    }
+    \\
     \\    if (event.bubbles && !event.__stop) {
     \\      for (let i = 1; i < path.length; i += 1) {
     \\        event.eventPhase = 3;

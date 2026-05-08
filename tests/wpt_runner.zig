@@ -373,6 +373,11 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/form_properties.js"),
     },
     .{
+        .filename = "event_handler_properties.js",
+        .html = "<html><body><button id=\"btn\">click</button></body></html>",
+        .script = @embedFile("wpt/event_handler_properties.js"),
+    },
+    .{
         .filename = "promise_test_basics.js",
         .html = "<html><body></body></html>",
         .script = @embedFile("wpt/promise_test_basics.js"),
