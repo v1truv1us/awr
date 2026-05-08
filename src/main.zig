@@ -67,6 +67,9 @@ const USAGE =
     \\  awr <url>                    Load URL/path, print JSON {url, status, title, body_text, window_data, tools}
     \\  awr post <url> [k=v ...]     POST URL-encoded form fields, follow redirects, absorb cookies
     \\                                 Set $AWR_COOKIE_JAR to persist cookies across invocations
+    \\  awr submit <url> [--form=SEL] [k=v ...]
+    \\                               Load page, find <form>, merge user fields with hidden inputs (CSRF),
+    \\                                 POST to the form's action. --form selects by #id (default: first form)
     \\  awr tools <url>              Load URL/path, print the JSON array of registered WebMCP tools
     \\  awr call <url> <name> <json> Load URL/path, invoke tool <name> with <json> args, print result envelope
     \\  awr mock [--port N]          Serve experiments/ over HTTP (default: 127.0.0.1:7777)
@@ -478,6 +481,119 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
 
         // Same JSON envelope as the default path. Reuses the writeJsonStr
         // helper at the top of this file.
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(alloc);
+        try out.append(alloc, '{');
+        try out.appendSlice(alloc, "\"url\":");
+        try writeJsonStr(&out, alloc, result.url);
+        const status_str = try std.fmt.allocPrint(alloc, ",\"status\":{d}", .{result.status});
+        defer alloc.free(status_str);
+        try out.appendSlice(alloc, status_str);
+        try out.appendSlice(alloc, ",\"title\":");
+        if (result.title) |t| try writeJsonStr(&out, alloc, t) else try out.appendSlice(alloc, "null");
+        try out.appendSlice(alloc, ",\"body_text\":");
+        try writeJsonStr(&out, alloc, result.body_text);
+        try out.appendSlice(alloc, ",\"window_data\":");
+        if (result.window_data) |wd| try out.appendSlice(alloc, wd) else try out.appendSlice(alloc, "null");
+        try out.appendSlice(alloc, ",\"tools\":");
+        if (result.tools_json) |tj| try out.appendSlice(alloc, tj) else try out.appendSlice(alloc, "[]");
+        try out.appendSlice(alloc, "}\n");
+        try stdoutWrite(io, out.items);
+        metrics.envelope_bytes = out.items.len;
+        return;
+    }
+
+    // Subcommand: awr submit <page-url> [--form=SELECTOR] [field=value ...]
+    //
+    // Single-shot form submit: load the page, find the form (default:
+    // first <form>; --form=#id picks by selector), merge user-provided
+    // field=value overrides with the form's own attribute values
+    // (hidden inputs, CSRF tokens, pre-populated text), POST to the
+    // form's resolved action.
+    //
+    // Replaces the awkward two-step pattern of `awr <login-url>` →
+    // grep CSRF token → `awr post <action> csrf=... user=... password=...`.
+    //
+    //   export AWR_COOKIE_JAR=$HOME/.local/state/awr/cookies.txt
+    //   awr submit https://site/login user=alice password=hunter2
+    //
+    // Output is the same JSON envelope as the default fetch path, with
+    // status / url / title / body_text reflecting the post-redirect
+    // final response.
+    if (std.mem.eql(u8, args[1], "submit")) {
+        if (args.len < 3) {
+            try stdoutWrite(io, "usage: awr submit <url> [--form=SELECTOR] [field=value ...]\n");
+            std.process.exit(1);
+        }
+        const url = args[2];
+
+        // Parse remaining args: --form=SEL is a flag; everything else is field=value.
+        var form_selector: ?[]const u8 = null;
+        var overrides: std.ArrayList(page_mod.Page.FieldOverride) = .empty;
+        defer overrides.deinit(alloc);
+        for (args[3..]) |arg| {
+            if (std.mem.startsWith(u8, arg, "--form=")) {
+                form_selector = arg["--form=".len..];
+                continue;
+            }
+            const eq = std.mem.indexOfScalar(u8, arg, '=') orelse {
+                try stdoutWrite(io, "awr submit: each field arg must be `name=value` (or --form=SEL)\n");
+                std.process.exit(1);
+            };
+            try overrides.append(alloc, .{ .name = arg[0..eq], .value = arg[eq + 1 ..] });
+        }
+
+        var metrics = telemetry.SessionMetrics.init();
+        metrics.url = url;
+        defer telemetry.emit(&metrics, alloc, io);
+
+        var p = try page_mod.Page.init(alloc, io);
+        defer p.deinit();
+        p.metrics_sink = &metrics;
+
+        // Step 1: load the page so the DOM is populated and any cookies
+        // set on this response (server-rotated CSRF) are absorbed.
+        var get_result = loadPage(&p, alloc, io, url) catch |err| {
+            fatalLoadErrorWithMetrics(&metrics, alloc, io, "loading", url, err);
+        };
+        defer get_result.deinit();
+
+        // Step 2: gather form fields → (target_url, body, method).
+        var sub = p.gatherFormSubmission(get_result.url, form_selector, overrides.items, alloc) catch |err| {
+            const msg = switch (err) {
+                error.NoCurrentDocument => "awr submit: page failed to parse",
+                error.FormNotFound => "awr submit: --form selector matched no form",
+                error.NoFormFound => "awr submit: page contains no <form> element",
+                else => "awr submit: failed to gather form submission",
+            };
+            try stdoutWrite(io, msg);
+            try stdoutWrite(io, "\n");
+            std.process.exit(1);
+        };
+        defer page_mod.Page.freeFormSubmission(alloc, &sub);
+
+        // Step 3: submit. POST through navigatePost; for GET, append body
+        // as query string and load normally.
+        var result: page_mod.PageResult = if (sub.method == .POST)
+            p.navigatePost(sub.target_url, sub.body) catch |err| {
+                fatalLoadErrorWithMetrics(&metrics, alloc, io, "submitting", sub.target_url, err);
+            }
+        else blk: {
+            // GET: append body as query string with `?` or `&` joiner.
+            const has_q = std.mem.indexOfScalar(u8, sub.target_url, '?') != null;
+            const sep: u8 = if (has_q) '&' else '?';
+            const full_url = if (sub.body.len == 0)
+                try alloc.dupe(u8, sub.target_url)
+            else
+                try std.fmt.allocPrint(alloc, "{s}{c}{s}", .{ sub.target_url, sep, sub.body });
+            defer alloc.free(full_url);
+            break :blk loadPage(&p, alloc, io, full_url) catch |err| {
+                fatalLoadErrorWithMetrics(&metrics, alloc, io, "submitting", full_url, err);
+            };
+        };
+        defer result.deinit();
+
+        // Same JSON envelope as the default + post paths.
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(alloc);
         try out.append(alloc, '{');

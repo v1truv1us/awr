@@ -663,6 +663,139 @@ pub const Page = struct {
         return elem.getAttribute("value");
     }
 
+    /// User-supplied field override for `gatherFormSubmission`.
+    pub const FieldOverride = struct { name: []const u8, value: []const u8 };
+
+    /// Result of inspecting a `<form>` and merging user-provided overrides
+    /// with the form's own attribute values. `target_url` is the resolved
+    /// action URL (against the page base); `body` is the URL-encoded
+    /// payload. Both are allocator-owned — caller frees both.
+    pub const FormSubmission = struct {
+        target_url: []u8,
+        body: []u8,
+        method: enum { GET, POST },
+    };
+
+    /// Walk the current document for a `<form>`, gather its named
+    /// `<input>` / `<select>` / `<textarea>` descendants, merge with the
+    /// caller-supplied overrides, and return a (target_url, body, method)
+    /// tuple suitable for `navigatePost`.
+    ///
+    /// Hidden inputs and any pre-populated `value` attribute are included
+    /// verbatim — required for CSRF-token round-trip per
+    /// `spec/subspecs/agent-browser.md §2`. User overrides win over both.
+    /// Submit/button/image/reset inputs and unnamed fields are skipped.
+    ///
+    /// `form_selector` is `null` for "first <form> in the document", or a
+    /// CSS selector (e.g. `"#login"`, `"form.signin"`) for an explicit
+    /// match. When null AND no form is found, returns `error.NoFormFound`.
+    pub fn gatherFormSubmission(
+        self: *Page,
+        page_url: []const u8,
+        form_selector: ?[]const u8,
+        overrides: []const FieldOverride,
+        allocator: std.mem.Allocator,
+    ) !FormSubmission {
+        const doc_ref = if (self.current_doc) |*d| d else return error.NoCurrentDocument;
+
+        const form_elem: *dom.Element = blk: {
+            if (form_selector) |sel| {
+                break :blk doc_ref.querySelector(sel) orelse return error.FormNotFound;
+            }
+            break :blk doc_ref.querySelector("form") orelse return error.NoFormFound;
+        };
+
+        // Resolve method + action. Default GET per HTML spec when missing.
+        const method_raw = form_elem.getAttribute("method") orelse "GET";
+        const method_trimmed = std.mem.trim(u8, method_raw, " \t\r\n");
+        const method: @TypeOf(@as(FormSubmission, undefined).method) =
+            if (std.ascii.eqlIgnoreCase(method_trimmed, "POST")) .POST else .GET;
+
+        const action_raw = form_elem.getAttribute("action") orelse "";
+        const action_trimmed = std.mem.trim(u8, action_raw, " \t\r\n");
+        const target_url = try resolveUrlAlloc(
+            allocator,
+            page_url,
+            if (action_trimmed.len == 0) page_url else action_trimmed,
+        );
+        errdefer allocator.free(target_url);
+
+        // Walk descendants and emit one body pair per named control.
+        // Comma-list selector now works (Phase C.8); use it for clarity.
+        const fields = try form_elem.querySelectorAll("input,select,textarea", allocator);
+        defer allocator.free(fields);
+
+        var body: std.ArrayList(u8) = .empty;
+        errdefer body.deinit(allocator);
+
+        var first = true;
+        for (fields) |elem| {
+            const name = elem.getAttribute("name") orelse continue;
+            if (name.len == 0) continue;
+
+            // Skip non-data inputs. INPUT type defaults to text per spec.
+            if (std.ascii.eqlIgnoreCase(elem.tag, "input")) {
+                const t = elem.getAttribute("type") orelse "text";
+                const tlow = std.mem.trim(u8, t, " \t\r\n");
+                if (std.ascii.eqlIgnoreCase(tlow, "submit") or
+                    std.ascii.eqlIgnoreCase(tlow, "button") or
+                    std.ascii.eqlIgnoreCase(tlow, "image") or
+                    std.ascii.eqlIgnoreCase(tlow, "reset") or
+                    std.ascii.eqlIgnoreCase(tlow, "file"))
+                {
+                    continue;
+                }
+            }
+
+            // Resolve value: user override > value attribute > textContent
+            // (textarea) > "".
+            var value: []const u8 = "";
+            var override_match = false;
+            for (overrides) |ov| {
+                if (std.mem.eql(u8, ov.name, name)) {
+                    value = ov.value;
+                    override_match = true;
+                    break;
+                }
+            }
+            if (!override_match) {
+                if (elem.getAttribute("value")) |v| {
+                    value = v;
+                } else if (std.ascii.eqlIgnoreCase(elem.tag, "textarea")) {
+                    // textarea: default value is its text content. Borrow
+                    // from a temporary alloc; we copy into body before it
+                    // goes out of scope.
+                    const txt = elem.textContent(allocator) catch "";
+                    defer if (txt.len > 0) allocator.free(txt);
+                    if (!first) try body.append(allocator, '&');
+                    first = false;
+                    try appendUrlEncodedBytes(allocator, &body, name);
+                    try body.append(allocator, '=');
+                    try appendUrlEncodedBytes(allocator, &body, txt);
+                    continue;
+                }
+            }
+
+            if (!first) try body.append(allocator, '&');
+            first = false;
+            try appendUrlEncodedBytes(allocator, &body, name);
+            try body.append(allocator, '=');
+            try appendUrlEncodedBytes(allocator, &body, value);
+        }
+
+        return FormSubmission{
+            .target_url = target_url,
+            .body = try body.toOwnedSlice(allocator),
+            .method = method,
+        };
+    }
+
+    /// Free a FormSubmission's owned slices.
+    pub fn freeFormSubmission(allocator: std.mem.Allocator, sub: *FormSubmission) void {
+        allocator.free(sub.target_url);
+        allocator.free(sub.body);
+    }
+
     /// Process an already-fetched HTML string without making a network
     /// request.  Useful for unit tests and offline scenarios.
     /// Caller must call result.deinit().
@@ -2061,7 +2194,10 @@ test "<form method=post> end-to-end submits hidden + edited fields to wire" {
     try std.testing.expectEqualStrings("csrf=tok123&user=alice", got_body);
 }
 
-fn appendUrlEncodedTest(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
+/// URL-encode `s` per `application/x-www-form-urlencoded` and append into
+/// `buf`. Used both by `gatherFormSubmission` (for forming bodies from
+/// DOM-extracted field values) and by the test fixtures below.
+fn appendUrlEncodedBytes(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
     for (s) |c| {
         switch (c) {
             'A'...'Z', 'a'...'z', '0'...'9', '-', '_', '.', '~' => try buf.append(allocator, c),
@@ -2074,3 +2210,7 @@ fn appendUrlEncodedTest(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), s
         }
     }
 }
+
+/// Backward-compat alias for the test name; remove on next sweep of the
+/// page test fixtures.
+const appendUrlEncodedTest = appendUrlEncodedBytes;
