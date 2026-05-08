@@ -37,6 +37,11 @@ pub fn build(b: *std.Build) void {
     const is_mac = host_os == .macos;
     const supports_boringssl = target.result.os.tag == .macos and target.result.cpu.arch == .aarch64;
     const lexbor_prefix_opt = b.option([]const u8, "lexbor-prefix", "Install prefix containing lexbor include/ and lib/");
+    // `-Dwith-jsonrpc` opts the in-progress daemon-mode JSON-RPC module into
+    // the default test gate. Defaults to false because the module currently
+    // tracks a stdlib drift and is not on the active critical path. Once
+    // daemon-mode lands per spec/subspecs/daemon-mode.md, flip the default.
+    const with_jsonrpc = b.option(bool, "with-jsonrpc", "Include src/jsonrpc.zig in the default test gate (daemon-mode WIP)") orelse false;
 
     const nghttp2_include_sys: std.Build.LazyPath = if (is_mac)
         .{ .cwd_relative = "/opt/homebrew/opt/libnghttp2/include" }
@@ -128,6 +133,25 @@ pub fn build(b: *std.Build) void {
         });
         const run_telemetry = b.addRunArtifact(telemetry_test);
         test_step.dependOn(&run_telemetry.step);
+    }
+
+    // ── jsonrpc module (pure-Zig, no deps) ────────────────────────────────
+    // JSON-RPC 2.0 framing + envelope helpers per
+    // spec/subspecs/daemon-mode.md §2.3. Foundation for the daemon
+    // accept loop (B3.2) and CLI client (B3.4); standalone-testable.
+    // Gated behind -Dwith-jsonrpc=true; see top-of-file rationale.
+    if (with_jsonrpc) {
+        const jsonrpc_mod = b.createModule(.{
+            .root_source_file = b.path("src/jsonrpc.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const jsonrpc_test = b.addTest(.{
+            .name = "jsonrpc",
+            .root_module = jsonrpc_mod,
+        });
+        const run_jsonrpc = b.addRunArtifact(jsonrpc_test);
+        test_step.dependOn(&run_jsonrpc.step);
     }
 
     // ── tcp module (depends on libxev) ────────────────────────────────────
