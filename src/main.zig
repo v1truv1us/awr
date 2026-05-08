@@ -18,6 +18,24 @@ fn nowMs() i64 {
         @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
 }
 
+/// Append `s` URL-encoded into `buf` per `application/x-www-form-urlencoded`.
+/// Mirrors browser.zig:appendUrlEncoded — kept duplicated here rather than
+/// exported because main and browser are different module roots.
+fn appendUrlEncoded(alloc: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            'A'...'Z', 'a'...'z', '0'...'9', '-', '_', '.', '~' => try buf.append(alloc, c),
+            ' ' => try buf.append(alloc, '+'),
+            else => {
+                try buf.append(alloc, '%');
+                const hex = try std.fmt.allocPrint(alloc, "{X:0>2}", .{c});
+                defer alloc.free(hex);
+                try buf.appendSlice(alloc, hex);
+            },
+        }
+    }
+}
+
 fn writeJsonStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
     try list.append(alloc, '"');
     for (s) |c| {
@@ -47,6 +65,8 @@ const USAGE =
     \\                               Load URL, print the rendered terminal text non-interactively
     \\                               --images=auto|kitty|iterm|sixel|braille|none (default: auto)
     \\  awr <url>                    Load URL/path, print JSON {url, status, title, body_text, window_data, tools}
+    \\  awr post <url> [k=v ...]     POST URL-encoded form fields, follow redirects, absorb cookies
+    \\                                 Set $AWR_COOKIE_JAR to persist cookies across invocations
     \\  awr tools <url>              Load URL/path, print the JSON array of registered WebMCP tools
     \\  awr call <url> <name> <json> Load URL/path, invoke tool <name> with <json> args, print result envelope
     \\  awr mock [--port N]          Serve experiments/ over HTTP (default: 127.0.0.1:7777)
@@ -402,6 +422,81 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
             telemetry.emit(&metrics, alloc, io);
             std.process.exit(1);
         }
+        return;
+    }
+
+    // Subcommand: awr post <url> [field=value ...]
+    //
+    // Programmatic POST with cookie support — the scriptable counterpart
+    // to the TUI form-submit path. Each field=value arg is URL-encoded
+    // and joined into an `application/x-www-form-urlencoded` body.
+    // Cookies absorbed from the response (and any redirect chain) round-
+    // trip through the page's cookie jar; combined with `AWR_COOKIE_JAR`
+    // this enables cross-process sign-in flows:
+    //
+    //   export AWR_COOKIE_JAR=$HOME/.local/state/awr/cookies.txt
+    //   awr post   https://site/login user=alice password=hunter2
+    //   awr        https://site/dashboard   # carries the session cookie
+    //
+    // Output is the same JSON envelope as the default fetch path; the
+    // status / url / body_text reflect the post-redirect final response.
+    if (std.mem.eql(u8, args[1], "post")) {
+        if (args.len < 3) {
+            try stdoutWrite(io, "usage: awr post <url> [field=value ...]\n");
+            std.process.exit(1);
+        }
+        const url = args[2];
+
+        // Build the URL-encoded body from arg pairs.
+        var body: std.ArrayList(u8) = .empty;
+        defer body.deinit(alloc);
+        var first = true;
+        for (args[3..]) |pair| {
+            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse {
+                try stdoutWrite(io, "awr post: each field arg must be `name=value`\n");
+                std.process.exit(1);
+            };
+            if (!first) try body.append(alloc, '&');
+            first = false;
+            try appendUrlEncoded(alloc, &body, pair[0..eq]);
+            try body.append(alloc, '=');
+            try appendUrlEncoded(alloc, &body, pair[eq + 1 ..]);
+        }
+
+        var metrics = telemetry.SessionMetrics.init();
+        metrics.url = url;
+        defer telemetry.emit(&metrics, alloc, io);
+
+        var p = try page_mod.Page.init(alloc, io);
+        defer p.deinit();
+        p.metrics_sink = &metrics;
+
+        var result = p.navigatePost(url, body.items) catch |err| {
+            fatalLoadErrorWithMetrics(&metrics, alloc, io, "posting", url, err);
+        };
+        defer result.deinit();
+
+        // Same JSON envelope as the default path. Reuses the writeJsonStr
+        // helper at the top of this file.
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(alloc);
+        try out.append(alloc, '{');
+        try out.appendSlice(alloc, "\"url\":");
+        try writeJsonStr(&out, alloc, result.url);
+        const status_str = try std.fmt.allocPrint(alloc, ",\"status\":{d}", .{result.status});
+        defer alloc.free(status_str);
+        try out.appendSlice(alloc, status_str);
+        try out.appendSlice(alloc, ",\"title\":");
+        if (result.title) |t| try writeJsonStr(&out, alloc, t) else try out.appendSlice(alloc, "null");
+        try out.appendSlice(alloc, ",\"body_text\":");
+        try writeJsonStr(&out, alloc, result.body_text);
+        try out.appendSlice(alloc, ",\"window_data\":");
+        if (result.window_data) |wd| try out.appendSlice(alloc, wd) else try out.appendSlice(alloc, "null");
+        try out.appendSlice(alloc, ",\"tools\":");
+        if (result.tools_json) |tj| try out.appendSlice(alloc, tj) else try out.appendSlice(alloc, "[]");
+        try out.appendSlice(alloc, "}\n");
+        try stdoutWrite(io, out.items);
+        metrics.envelope_bytes = out.items.len;
         return;
     }
 
