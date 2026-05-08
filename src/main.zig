@@ -328,6 +328,11 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
             .max_width = width,
             .ansi_colors = false,
             .show_links = true,
+            // Non-interactive output: emit the References footer so the
+            // inline [N] link markers have a URL list to resolve against.
+            // The browse profile defaults to suppressing the footer for
+            // interactive use; here we override to true.
+            .show_references = true,
             .show_images = true,
             .image_protocol = resolved_protocol,
             .image_lookup = image_lookup_opt,

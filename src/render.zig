@@ -55,6 +55,14 @@ pub const RenderOptions = struct {
     ansi_colors: bool = true,
     show_links: bool = true,
     show_images: bool = true,
+    /// Whether to emit a "References:" footer listing each [N] marker's
+    /// URL. When `null`, the default tracks the profile: the `.default`
+    /// profile emits the footer (matches the original render path), the
+    /// `.browse` profile suppresses it (interactive mode treats links
+    /// as hover/click targets, not footnotes). Set explicitly to `true`
+    /// for non-interactive `awr render` output piped to a file or LLM,
+    /// where orphan `[N]` markers without URLs are dead weight.
+    show_references: ?bool = null,
     profile: RenderProfile = .default,
     /// Resolved terminal-image protocol. Default `.none` means no
     /// inline image emit; the renderer falls through to the text alt-ref
@@ -438,7 +446,8 @@ fn renderModelFromRoot(
             try renderElement(&state, &writer, elem);
         }
 
-        if (opts.profile == .default and opts.show_links and state.links.items.len > 0) {
+        const emit_refs = opts.show_references orelse (opts.profile == .default);
+        if (emit_refs and opts.show_links and state.links.items.len > 0) {
             try state.ensureNewline(&writer);
             try state.newline(&writer);
             try state.ansi(&writer, BOLD);
