@@ -459,11 +459,18 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .link_libcpp = supports_boringssl,
         });
         daemon_mod.addImport("build_opts", opts_mod);
+        // Slice 2: daemon depends on page so the fetch method handler
+        // can call Page.navigate / Page.navigatePost. Reuses
+        // exe_page_mod to share the (already built) module rather
+        // than duplicating its lexbor/boringssl/libxev/QuickJS setup.
+        daemon_mod.addImport("page", exe_page_mod);
         const awrd_exe = b.addExecutable(.{
             .name = "awrd",
             .root_module = daemon_mod,
+            .use_llvm = true, // page transitively pulls in QuickJS-NG
         });
         b.installArtifact(awrd_exe);
 

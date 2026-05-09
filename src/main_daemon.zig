@@ -17,6 +17,7 @@
 const std = @import("std");
 const jsonrpc = @import("jsonrpc.zig");
 const build_opts = @import("build_opts");
+const page_mod = @import("page");
 
 /// Maximum body bytes per request frame. 1 MiB is generous for v1
 /// (typical fetch param JSON is well under 1 KB; even multi-redirect
@@ -112,10 +113,119 @@ fn handleConnection(
     } else if (std.mem.eql(u8, method, "shutdown")) {
         try jsonrpc.writeSuccess(&wshim, allocator, id_json, "\"shutting down\"");
         should_exit.* = true;
+    } else if (std.mem.eql(u8, method, "fetch")) {
+        // Slice-2 minimal: per-request fresh Page (no cookie-scope
+        // cache, no shared Client yet — those land in slice 3+ per
+        // spec/subspecs/daemon-mode.md §6).
+        handleFetch(allocator, io, &req, id_json, &wshim) catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "{t}", .{err});
+            defer allocator.free(msg);
+            try jsonrpc.writeError(&wshim, allocator, id_json, .internal_error, msg);
+        };
     } else {
         try jsonrpc.writeError(&wshim, allocator, id_json, .method_not_found, method);
     }
     try net_writer.interface.flush();
+}
+
+/// Handle the `fetch` method: parse params (url, optional method,
+/// optional body), create a fresh Page, navigate, build the spec
+/// §2.3 result envelope. Caller has already serialized the request
+/// id; we own the response body.
+fn handleFetch(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    req: *const jsonrpc.Request,
+    id_json: []const u8,
+    wshim: *WriterShim,
+) !void {
+    const params_val = req.params() orelse return error.MissingParams;
+    const params_obj = switch (params_val) {
+        .object => |o| o,
+        else => return error.InvalidParams,
+    };
+
+    const url_val = params_obj.get("url") orelse return error.MissingUrl;
+    const url = switch (url_val) {
+        .string => |s| s,
+        else => return error.InvalidUrl,
+    };
+
+    // Optional method param. Default GET. Only GET / POST are
+    // supported per agent-browser.md §2.
+    var is_post = false;
+    if (params_obj.get("method")) |mv| switch (mv) {
+        .string => |s| {
+            if (std.ascii.eqlIgnoreCase(s, "POST")) {
+                is_post = true;
+            } else if (!std.ascii.eqlIgnoreCase(s, "GET")) {
+                return error.UnsupportedMethod;
+            }
+        },
+        else => return error.InvalidMethod,
+    };
+
+    var body_opt: ?[]const u8 = null;
+    if (params_obj.get("body")) |bv| switch (bv) {
+        .string => |s| body_opt = s,
+        .null => {},
+        else => return error.InvalidBody,
+    };
+
+    var p = try page_mod.Page.init(allocator, io);
+    defer p.deinit();
+
+    var result = if (is_post)
+        try p.navigatePost(url, body_opt orelse "")
+    else
+        try p.navigate(url);
+    defer result.deinit();
+
+    // Build the result envelope per spec §2.3. Mirrors the shape
+    // emitted by main.zig's default JSON path so daemon callers and
+    // direct CLI users see identical fields.
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.append(allocator, '{');
+    try out.appendSlice(allocator, "\"url\":");
+    try writeJsonStr(&out, allocator, result.url);
+    const status_str = try std.fmt.allocPrint(allocator, ",\"status\":{d}", .{result.status});
+    defer allocator.free(status_str);
+    try out.appendSlice(allocator, status_str);
+    try out.appendSlice(allocator, ",\"title\":");
+    if (result.title) |t| try writeJsonStr(&out, allocator, t) else try out.appendSlice(allocator, "null");
+    try out.appendSlice(allocator, ",\"body_text\":");
+    try writeJsonStr(&out, allocator, result.body_text);
+    try out.appendSlice(allocator, ",\"window_data\":");
+    if (result.window_data) |wd| try out.appendSlice(allocator, wd) else try out.appendSlice(allocator, "null");
+    try out.appendSlice(allocator, ",\"tools\":");
+    if (result.tools_json) |tj| try out.appendSlice(allocator, tj) else try out.appendSlice(allocator, "[]");
+    try out.append(allocator, '}');
+
+    try jsonrpc.writeSuccess(wshim, allocator, id_json, out.items);
+}
+
+/// Append `s` as a JSON-quoted string into `list`. Mirrors the
+/// minimal escaper in main.zig:writeJsonStr — kept duplicated so
+/// the daemon stays free of a `main` dependency.
+fn writeJsonStr(list: *std.ArrayList(u8), allocator: std.mem.Allocator, s: []const u8) !void {
+    try list.append(allocator, '"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try list.appendSlice(allocator, "\\\""),
+            '\\' => try list.appendSlice(allocator, "\\\\"),
+            '\n' => try list.appendSlice(allocator, "\\n"),
+            '\r' => try list.appendSlice(allocator, "\\r"),
+            '\t' => try list.appendSlice(allocator, "\\t"),
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
+                const esc = try std.fmt.allocPrint(allocator, "\\u{x:0>4}", .{c});
+                defer allocator.free(esc);
+                try list.appendSlice(allocator, esc);
+            },
+            else => try list.append(allocator, c),
+        }
+    }
+    try list.append(allocator, '"');
 }
 
 // ── Reader/Writer shims for jsonrpc's anytype helpers ─────────────
