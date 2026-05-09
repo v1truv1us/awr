@@ -920,6 +920,79 @@ test "awrd singleton: second daemon sees flock held, exits 0 with friendly messa
     );
 }
 
+test "AWR_DAEMON=1 auto-spawns awrd when no daemon is running" {
+    // T-53 / spec §2.5: when AWR_DAEMON=1 and the socket is
+    // missing/refused, the CLI must double-fork+exec awrd, wait
+    // for it to bind, then proceed transparently. The user does
+    // NOT have to manually start awrd.
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+    const pid = std.posix.system.getpid();
+
+    var mock = try MockHandle.start(allocator, 18607);
+    defer mock.deinit();
+
+    const tmp_dir = try std.fmt.allocPrint(
+        allocator,
+        "/tmp/awr-autospawn-{d}",
+        .{pid},
+    );
+    defer allocator.free(tmp_dir);
+    std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, tmp_dir);
+
+    // No daemon running. Spawn `awr <url>` with AWR_DAEMON=1 +
+    // a short idle timeout so the auto-spawned daemon dies on
+    // its own once we're done (avoids leaving a stray process).
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("AWR_DAEMON", "1");
+    try env.put("AWR_DAEMON_IDLE_SEC", "2");
+    try env.put("XDG_RUNTIME_DIR", tmp_dir);
+
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ AWR_BIN, "http://127.0.0.1:18607/webmcp_mock.html" },
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .environ_map = &env,
+    });
+
+    const stdout = try drainPipe(io, allocator, &child.stdout.?);
+    defer allocator.free(stdout);
+    const stderr = try drainPipe(io, allocator, &child.stderr.?);
+    defer allocator.free(stderr);
+    const term = try child.wait(io);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+
+    // The CLI received the result envelope.
+    try testing.expect(std.mem.indexOf(u8, stdout, "\"status\":200") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout, "search_products") != null);
+    // The daemon's startup banner reached stderr — proves we
+    // auto-spawned (vs. the test runner already having one).
+    try testing.expect(std.mem.indexOf(u8, stderr, "awrd: listening") != null);
+
+    // Wait for the auto-spawned daemon to idle out so the test
+    // doesn't leak a process. With idle=2s and our connection
+    // gone, ~2-3s suffices.
+    var waited: u64 = 0;
+    while (waited < 5000) : (waited += 100) {
+        const sock = try std.fmt.allocPrint(
+            allocator,
+            "{s}/awrd-{d}.sock",
+            .{ tmp_dir, std.posix.system.geteuid() },
+        );
+        defer allocator.free(sock);
+        const stat = std.Io.Dir.cwd().readFileAlloc(io, sock, allocator, .limited(1)) catch |err| switch (err) {
+            error.FileNotFound => break,
+            else => continue,
+        };
+        allocator.free(stat);
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch {};
+    }
+}
+
 test "awrd idle shutdown: daemon exits after AWR_DAEMON_IDLE_SEC of no activity" {
     // T-51 / spec §2.5: daemon tracks last-request timestamp;
     // after the configured idle window with no traffic, exits 0.

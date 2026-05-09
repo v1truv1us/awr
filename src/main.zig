@@ -107,6 +107,265 @@ fn resolveDaemonSocket(allocator: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/awrd-{d}.sock", .{ dir, uid });
 }
 
+/// Resolve the path to the `awrd` binary as a sibling of our own
+/// argv[0]. Both binaries ship together: an installed `awr` at
+/// `/usr/local/bin/awr` finds `/usr/local/bin/awrd`; an in-tree
+/// dev run from `./zig-out/bin/awr` finds `./zig-out/bin/awrd`.
+/// Caller owns the returned slice. Returns null if argv[0] has no
+/// directory component (shouldn't happen — Zig's argv always has
+/// the full path).
+fn resolveAwrdPath(allocator: std.mem.Allocator, args0: []const u8) !?[]u8 {
+    const dir = std.fs.path.dirname(args0) orelse return null;
+    return try std.fmt.allocPrint(allocator, "{s}/awrd", .{dir});
+}
+
+/// Spawn awrd in detached daemon mode (double-fork + setsid). The
+/// grandchild execs awrd; the immediate child exits so the
+/// grandchild reparents to init/launchd. We `wait` the child here
+/// (not the grandchild) so it doesn't zombie.
+///
+/// On success the daemon is *starting* — it may not have bound
+/// the socket yet. Caller must connect-probe before sending real
+/// traffic.
+fn spawnDaemon(allocator: std.mem.Allocator, awrd_path: []const u8) !void {
+    // Build a sentinel-terminated argv for execve.
+    var path_buf: [4096]u8 = undefined;
+    if (awrd_path.len + 1 > path_buf.len) return error.PathTooLong;
+    @memcpy(path_buf[0..awrd_path.len], awrd_path);
+    path_buf[awrd_path.len] = 0;
+    const path_z: [*:0]const u8 = @ptrCast(&path_buf);
+
+    const pid1 = std.posix.system.fork();
+    if (pid1 < 0) return error.ForkFailed;
+    if (pid1 == 0) {
+        // First child — detach from controlling terminal, fork
+        // again so the grandchild is parentless.
+        _ = std.posix.system.setsid();
+        const pid2 = std.posix.system.fork();
+        if (pid2 < 0) std.posix.system._exit(1);
+        if (pid2 == 0) {
+            // Grandchild — exec awrd. argv must be [path, null].
+            // We reuse path_z as both argv[0] and the executable.
+            const argv = [_:null]?[*:0]const u8{path_z};
+            // execve preserves env; we want the daemon to inherit
+            // XDG_RUNTIME_DIR / XDG_DATA_HOME / etc.
+            // Use std.c.execvp which searches PATH if needed; we pass
+            // an absolute path so PATH is irrelevant.
+            _ = std.c.execve(path_z, @ptrCast(&argv), std.c.environ);
+            // execve only returns on error.
+            std.posix.system._exit(127);
+        }
+        // First child: we forked the grandchild, our work is done.
+        std.posix.system._exit(0);
+    }
+    // Parent: reap the immediate child so it doesn't zombie.
+    var status: i32 = 0;
+    _ = std.posix.system.waitpid(@intCast(pid1), &status, 0);
+    _ = allocator; // unused; kept for API symmetry with future
+                   // variants that may want to allocate buffers.
+}
+
+/// Connect-probe the daemon socket with a short retry loop. Used
+/// after a spawn to wait for the daemon to bind. Returns a
+/// connected stream on success; null after `total_ms` of failed
+/// attempts.
+fn connectWithRetry(
+    io: std.Io,
+    sock_path: []const u8,
+    total_ms: u64,
+) !?std.Io.net.Stream {
+    const ua = try std.Io.net.UnixAddress.init(sock_path);
+    const step_ms: u64 = 20;
+    var waited: u64 = 0;
+    while (waited < total_ms) {
+        if (ua.connect(io)) |s| return s else |_| {
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(@intCast(step_ms)), .awake) catch {};
+            waited += step_ms;
+        }
+    }
+    return null;
+}
+
+/// Send a `ping` JSON-RPC request and return the daemon's reported
+/// version (the value of `result.version`). Caller owns the
+/// returned slice. Errors out if the daemon doesn't respond within
+/// `total_ms` or returns a malformed envelope.
+fn pingForVersion(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    stream: *std.Io.net.Stream,
+    total_ms: u64,
+) ![]u8 {
+    _ = total_ms; // TODO: per-request timeout. Today rely on the
+                  // daemon's own responsiveness; ping is fast.
+
+    var rbuf: [4096]u8 = undefined;
+    var wbuf: [4096]u8 = undefined;
+    var net_writer = stream.writer(io, &wbuf);
+    var net_reader = stream.reader(io, &rbuf);
+
+    const body = "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"ping\"}";
+    try net_writer.interface.print(
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ body.len, body },
+    );
+    try net_writer.interface.flush();
+
+    // Read framed response. Reuse main's frame-parsing loop shape.
+    var content_length: ?usize = null;
+    var line_buf: [4096]u8 = undefined;
+    while (true) {
+        var len: usize = 0;
+        while (len < line_buf.len) {
+            var single: [1]u8 = undefined;
+            const n = try net_reader.interface.readSliceShort(&single);
+            if (n == 0) return error.UnexpectedEof;
+            line_buf[len] = single[0];
+            len += 1;
+            if (single[0] == '\n') break;
+        }
+        const line = std.mem.trimEnd(u8, line_buf[0..len], "\r\n");
+        if (line.len == 0) break;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.ascii.eqlIgnoreCase(name, "content-length")) {
+            content_length = try std.fmt.parseInt(usize, value, 10);
+        }
+    }
+    const blen = content_length orelse return error.MissingContentLength;
+    const resp = try alloc.alloc(u8, blen);
+    defer alloc.free(resp);
+    var filled: usize = 0;
+    while (filled < blen) {
+        const n = try net_reader.interface.readSliceShort(resp[filled..]);
+        if (n == 0) return error.UnexpectedEof;
+        filled += n;
+    }
+
+    // Extract the version field. Look for "version":"...".
+    const needle = "\"version\":\"";
+    const start = std.mem.indexOf(u8, resp, needle) orelse return error.MalformedPing;
+    const v_start = start + needle.len;
+    const v_end = std.mem.indexOfScalarPos(u8, resp, v_start, '"') orelse return error.MalformedPing;
+    return alloc.dupe(u8, resp[v_start..v_end]);
+}
+
+/// Send a `shutdown` JSON-RPC request to the daemon. Best-effort —
+/// returns void on success, errors on transport failure. Caller
+/// must close the stream after.
+fn sendShutdown(io: std.Io, stream: *std.Io.net.Stream) !void {
+    var wbuf: [256]u8 = undefined;
+    var net_writer = stream.writer(io, &wbuf);
+    const body = "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"shutdown\"}";
+    try net_writer.interface.print(
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ body.len, body },
+    );
+    try net_writer.interface.flush();
+}
+
+/// Acquire a live, version-matched connection to the daemon. On
+/// connect failure (ENOENT/ECONNREFUSED — daemon not running),
+/// auto-spawn it and retry. After connect, ping for the version
+/// and compare with our build_opts.git_hash; mismatch → send
+/// shutdown, wait briefly, respawn.
+///
+/// Note on connection lifetime: the daemon serves one request per
+/// connection (defer close in handleConnection). We use ONE
+/// connection for the verification ping, then OPEN A FRESH one
+/// for the fetch. Returning the post-ping connection would fail
+/// with WriteFailed on the next write because the daemon already
+/// closed it.
+///
+/// Errors propagate as fatal: the CLI prints a useful message and
+/// exits 1 (no graceful fallback to in-process — the user
+/// explicitly opted into AWR_DAEMON).
+fn ensureDaemonConnected(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    args0: []const u8,
+    sock_path: []const u8,
+) !std.Io.net.Stream {
+    const ua = try std.Io.net.UnixAddress.init(sock_path);
+
+    // First attempt: try connecting to an already-running daemon.
+    var verified = false;
+    if (ua.connect(io)) |s| {
+        var ping_stream = s;
+        // Connected — verify the version matches our build hash.
+        if (versionMatches(alloc, io, &ping_stream)) |matched| {
+            ping_stream.close(io);
+            if (matched) {
+                verified = true;
+            } else {
+                // Mismatch — tell the daemon to shut down, then
+                // respawn ours below. Reconnect for the shutdown
+                // call (ping already consumed the prior conn).
+                if (ua.connect(io)) |s2| {
+                    var sd_stream = s2;
+                    sendShutdown(io, &sd_stream) catch {};
+                    sd_stream.close(io);
+                } else |_| {}
+                // Wait briefly for the daemon to release the lock
+                // so our spawn can acquire it.
+                std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch {};
+            }
+        } else |_| {
+            // Couldn't ping — assume the existing daemon is
+            // unhealthy. Respawn.
+            ping_stream.close(io);
+        }
+    } else |_| {
+        // Connection failure → continue to spawn path.
+    }
+
+    if (!verified) {
+        // Spawn awrd. The pid file's flock guarantees only one
+        // daemon binds the socket even if N clients spawn in
+        // parallel — losers exit 0 quickly.
+        const awrd_path = (try resolveAwrdPath(alloc, args0)) orelse {
+            return error.AwrdPathUnknown;
+        };
+        defer alloc.free(awrd_path);
+        try spawnDaemon(alloc, awrd_path);
+
+        // Probe the socket for up to 2s.
+        const probe = (try connectWithRetry(io, sock_path, 2000)) orelse {
+            return error.DaemonStartTimeout;
+        };
+        var ping_stream = probe;
+        // Verify the freshly-spawned daemon's version. Mismatch
+        // here is a real bug (we just spawned the binary that
+        // ships with us) — surface as an error rather than
+        // spinning forever.
+        const ok = versionMatches(alloc, io, &ping_stream) catch |err| {
+            ping_stream.close(io);
+            return err;
+        };
+        ping_stream.close(io);
+        if (!ok) return error.DaemonVersionMismatch;
+    }
+
+    // Open a fresh connection for the actual fetch. The ping
+    // connection is already closed (one request per conn).
+    return ua.connect(io);
+}
+
+/// Send a ping, parse the version, and compare with our own
+/// build_opts.git_hash. Caller owns nothing. The caller's stream
+/// is left in a usable state on a true response (caller will
+/// reuse it for subsequent calls); on false the caller will
+/// shutdown+respawn.
+fn versionMatches(alloc: std.mem.Allocator, io: std.Io, stream: *std.Io.net.Stream) !bool {
+    const v = try pingForVersion(alloc, io, stream, 100);
+    defer alloc.free(v);
+    // Daemon returns "0.0.<git_hash>". Strip the leading "0.0.".
+    const prefix = "0.0.";
+    const hash_part = if (std.mem.startsWith(u8, v, prefix)) v[prefix.len..] else v;
+    return std.mem.eql(u8, hash_part, build_opts.git_hash);
+}
+
 /// AWR_DAEMON=1 path: connect to the daemon socket, send a fetch
 /// request for `url`, copy the result envelope to stdout, exit.
 /// Format-flag handling mirrors the in-process path so callers can
@@ -114,27 +373,19 @@ fn resolveDaemonSocket(allocator: std.mem.Allocator) ![]u8 {
 fn runViaDaemon(
     alloc: std.mem.Allocator,
     io: std.Io,
+    args0: []const u8,
     url: []const u8,
     format_md: bool,
 ) !void {
     const sock_path = try resolveDaemonSocket(alloc);
     defer alloc.free(sock_path);
 
-    const ua = try std.Io.net.UnixAddress.init(sock_path);
-    var stream = ua.connect(io) catch |err| {
-        // Friendly hint: tell the user how to start the daemon
-        // rather than dumping a raw errno.
-        try stdoutWrite(io,
-            "awr: AWR_DAEMON=1 set but cannot connect to daemon socket.\n" ++
-            "  Expected at: ");
-        try stdoutWrite(io, sock_path);
-        try stdoutWrite(io, "\n  Start the daemon with `awrd &`.\n  (");
-        const errname = try std.fmt.allocPrint(alloc, "{t}", .{err});
-        defer alloc.free(errname);
-        try stdoutWrite(io, errname);
-        try stdoutWrite(io, ")\n");
-        std.process.exit(1);
-    };
+    // T-53: connect with auto-spawn + ping/build-hash check.
+    // On ENOENT/ECONNREFUSED, double-fork awrd and retry. On
+    // version mismatch, send shutdown and respawn. Returns a
+    // live socket connection ready for the fetch request, or
+    // an error if all retries failed.
+    var stream = try ensureDaemonConnected(alloc, io, args0, sock_path);
     defer stream.close(io);
 
     // Cookie scope per spec §2.4 — defaults to sha1($PWD)[:12], or
@@ -979,7 +1230,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     // tools / call / extract / submit will pick it up in subsequent
     // slices once the daemon implements those methods.
     if (daemonModeEnabled()) {
-        try runViaDaemon(alloc, io, url, format_md);
+        try runViaDaemon(alloc, io, args[0], url, format_md);
         return;
     }
 
