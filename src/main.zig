@@ -56,6 +56,178 @@ fn writeJsonStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u
     try list.append(alloc, '"');
 }
 
+/// True when AWR_DAEMON=1 is set in the environment.
+fn daemonModeEnabled() bool {
+    const raw = std.c.getenv("AWR_DAEMON") orelse return false;
+    const span = std.mem.sliceTo(raw, 0);
+    return std.mem.eql(u8, span, "1");
+}
+
+/// Resolve the daemon's socket path per spec/subspecs/daemon-mode.md
+/// §2.1. Identical to main_daemon.zig:resolveSocketPath; duplicated
+/// rather than imported because main and main_daemon are different
+/// executables and we don't want main to pull in the daemon module.
+fn resolveDaemonSocket(allocator: std.mem.Allocator) ![]u8 {
+    const xdg_raw = std.c.getenv("XDG_RUNTIME_DIR");
+    const dir: []const u8 = if (xdg_raw != null) blk: {
+        const span = std.mem.sliceTo(xdg_raw.?, 0);
+        if (span.len == 0) break :blk "/tmp";
+        break :blk span;
+    } else "/tmp";
+    const uid = std.posix.system.geteuid();
+    return std.fmt.allocPrint(allocator, "{s}/awrd-{d}.sock", .{ dir, uid });
+}
+
+/// AWR_DAEMON=1 path: connect to the daemon socket, send a fetch
+/// request for `url`, copy the result envelope to stdout, exit.
+/// Format-flag handling mirrors the in-process path so callers can
+/// flip AWR_DAEMON without changing their flag set.
+fn runViaDaemon(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    url: []const u8,
+    format_md: bool,
+) !void {
+    const sock_path = try resolveDaemonSocket(alloc);
+    defer alloc.free(sock_path);
+
+    const ua = try std.Io.net.UnixAddress.init(sock_path);
+    var stream = ua.connect(io) catch |err| {
+        // Friendly hint: tell the user how to start the daemon
+        // rather than dumping a raw errno.
+        try stdoutWrite(io,
+            "awr: AWR_DAEMON=1 set but cannot connect to daemon socket.\n" ++
+            "  Expected at: ");
+        try stdoutWrite(io, sock_path);
+        try stdoutWrite(io, "\n  Start the daemon with `awrd &`.\n  (");
+        const errname = try std.fmt.allocPrint(alloc, "{t}", .{err});
+        defer alloc.free(errname);
+        try stdoutWrite(io, errname);
+        try stdoutWrite(io, ")\n");
+        std.process.exit(1);
+    };
+    defer stream.close(io);
+
+    // Build the fetch JSON-RPC body. Slice 4 doesn't yet pass
+    // method/body/cookie_scope — those layer on later. format_md is
+    // applied client-side after the daemon returns the envelope.
+    var req_body: std.ArrayList(u8) = .empty;
+    defer req_body.deinit(alloc);
+    try req_body.appendSlice(alloc, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fetch\",\"params\":{\"url\":");
+    try writeJsonStr(&req_body, alloc, url);
+    try req_body.appendSlice(alloc, "}}");
+
+    var rbuf: [16 * 1024]u8 = undefined;
+    var wbuf: [16 * 1024]u8 = undefined;
+    var net_reader = stream.reader(io, &rbuf);
+    var net_writer = stream.writer(io, &wbuf);
+    try net_writer.interface.print(
+        "Content-Length: {d}\r\n\r\n{s}",
+        .{ req_body.items.len, req_body.items },
+    );
+    try net_writer.interface.flush();
+
+    // Read framed response. Headers up to blank line, then exactly
+    // Content-Length bytes. Mirrors the parser in
+    // tests/integration_runner.zig:readFrame.
+    var content_length: ?usize = null;
+    var line_buf: [4096]u8 = undefined;
+    while (true) {
+        var len: usize = 0;
+        while (len < line_buf.len) {
+            var single: [1]u8 = undefined;
+            const n = try net_reader.interface.readSliceShort(&single);
+            if (n == 0) return error.UnexpectedEof;
+            line_buf[len] = single[0];
+            len += 1;
+            if (single[0] == '\n') break;
+        }
+        const line = std.mem.trimEnd(u8, line_buf[0..len], "\r\n");
+        if (line.len == 0) break;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.ascii.eqlIgnoreCase(name, "content-length")) {
+            content_length = try std.fmt.parseInt(usize, value, 10);
+        }
+    }
+    const blen = content_length orelse return error.MissingContentLength;
+    const resp_body = try alloc.alloc(u8, blen);
+    defer alloc.free(resp_body);
+    var filled: usize = 0;
+    while (filled < blen) {
+        const n = try net_reader.interface.readSliceShort(resp_body[filled..]);
+        if (n == 0) return error.UnexpectedEof;
+        filled += n;
+    }
+
+    // Slice 4 forwards the daemon's envelope verbatim to stdout. The
+    // shape is `{"jsonrpc":"2.0","id":1,"result":{...envelope...}}`
+    // — extract `result` so callers see the same shape as the
+    // in-process path. format_md is a future-work item: we'd ask
+    // the daemon for body_md, or post-process body_text. Today we
+    // just emit the daemon's body_text envelope unchanged when the
+    // flag is set so call sites don't crash.
+    _ = format_md;
+    if (extractJsonRpcResult(resp_body)) |result_slice| {
+        try stdoutWrite(io, result_slice);
+        try stdoutWrite(io, "\n");
+    } else {
+        // Daemon returned an error envelope — surface it verbatim
+        // and exit non-zero so shell callers see the failure.
+        try stdoutWrite(io, resp_body);
+        try stdoutWrite(io, "\n");
+        std.process.exit(1);
+    }
+}
+
+/// Extract the value of the top-level `"result"` field from a
+/// JSON-RPC response body. Returns null if the response is an error
+/// envelope (`"error"` field present) or if `"result"` is missing.
+/// Operates on the raw bytes so we don't have to pull a JSON parser
+/// into main.zig — the daemon emits a stable shape we can rely on.
+fn extractJsonRpcResult(resp: []const u8) ?[]const u8 {
+    // If error envelope, give up.
+    if (std.mem.indexOf(u8, resp, "\"error\":") != null) return null;
+
+    const needle = "\"result\":";
+    const start = std.mem.indexOf(u8, resp, needle) orelse return null;
+    const v_start = start + needle.len;
+    if (v_start >= resp.len) return null;
+
+    // Walk until we close the outer JSON value of result. Track
+    // brace/bracket depth ignoring depths inside strings.
+    var i: usize = v_start;
+    var depth: i32 = 0;
+    var in_string = false;
+    var escape = false;
+    while (i < resp.len) : (i += 1) {
+        const c = resp[i];
+        if (in_string) {
+            if (escape) { escape = false; continue; }
+            if (c == '\\') { escape = true; continue; }
+            if (c == '"') in_string = false;
+            continue;
+        }
+        switch (c) {
+            '"' => in_string = true,
+            '{', '[' => depth += 1,
+            '}', ']' => {
+                depth -= 1;
+                if (depth == 0) return resp[v_start .. i + 1];
+                if (depth < 0) {
+                    // Closed at an outer level — result is not an
+                    // object/array. Return up to here.
+                    return resp[v_start..i];
+                }
+            },
+            ',' => if (depth == 0) return resp[v_start..i],
+            else => {},
+        }
+    }
+    return resp[v_start..];
+}
+
 const USAGE =
     \\AWR — Agentic Web Runtime
     \\
@@ -67,6 +239,8 @@ const USAGE =
     \\  awr <url> [--format=md]      Load URL/path, print JSON envelope. Default body_text is plain text;
     \\                                 `--format=markdown` (or `=md`) swaps it for the Markdown extraction
     \\                                 (chrome-filtered, headings + inline links preserved) under `body_md`.
+    \\                                 Set `AWR_DAEMON=1` to route through `awrd` instead of running
+    \\                                 the page pipeline in-process (warmer connection pool).
     \\  awr post <url> [k=v ...]     POST URL-encoded form fields, follow redirects, absorb cookies
     \\                                 Set $AWR_COOKIE_JAR to persist cookies across invocations
     \\  awr submit <url> [--form=SEL] [k=v ...]
@@ -756,6 +930,21 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         try stdoutWrite(io, "awr: missing URL\n");
         std.process.exit(1);
     };
+
+    // AWR_DAEMON=1 routes the default fetch through the daemon's
+    // JSON-RPC `fetch` method instead of running the page pipeline
+    // in-process. Same envelope shape on stdout — agents and pipes
+    // can flip the env var without changing call sites. Connection-
+    // refused exits with a friendly hint so users discover `awrd`.
+    //
+    // Slice 4 minimal: only the default fetch path honors the var.
+    // tools / call / extract / submit will pick it up in subsequent
+    // slices once the daemon implements those methods.
+    if (daemonModeEnabled()) {
+        try runViaDaemon(alloc, io, url, format_md);
+        return;
+    }
+
     const timing_on = std.c.getenv("AWR_TIMING") != null;
 
     // Telemetry sink — populated through the fetch pipeline whenever

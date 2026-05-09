@@ -515,6 +515,52 @@ test "awrd fetch with missing url returns invalid_params error" {
     try d.shutdown();
 }
 
+test "AWR_DAEMON=1 routes awr <url> through daemon, prints result envelope" {
+    const allocator = testing.allocator;
+    var mock = try MockHandle.start(allocator, 18603);
+    defer mock.deinit();
+    var d = try DaemonHandle.start(allocator, "client", 2000);
+    defer d.deinit();
+
+    // Spawn `awr <url>` with AWR_DAEMON=1 + the same XDG_RUNTIME_DIR
+    // the daemon is using so resolveDaemonSocket finds the right path.
+    const io = std.testing.io;
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("AWR_DAEMON", "1");
+    try env.put("XDG_RUNTIME_DIR", d.tmp_dir);
+
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ AWR_BIN, "http://127.0.0.1:18603/webmcp_mock.html" },
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .environ_map = &env,
+    });
+
+    const stdout = try drainPipe(io, allocator, &child.stdout.?);
+    defer allocator.free(stdout);
+    const stderr = try drainPipe(io, allocator, &child.stderr.?);
+    defer allocator.free(stderr);
+    const term = try child.wait(io);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+
+    // The CLI client unwraps the JSON-RPC envelope so callers see
+    // the same shape as the in-process default path: a top-level
+    // object with url/status/title/body_text/window_data/tools.
+    try testing.expect(std.mem.indexOf(u8, stdout, "\"status\":200") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout, "\"url\":\"http://127.0.0.1:18603/webmcp_mock.html\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout, "\"tools\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout, "search_products") != null);
+    // Negative: the JSON-RPC wrapper fields must NOT leak through.
+    // Callers shouldn't see jsonrpc/id/result keys unless they
+    // explicitly opted in to the daemon protocol.
+    try testing.expect(std.mem.indexOf(u8, stdout, "\"jsonrpc\"") == null);
+    try testing.expect(std.mem.indexOf(u8, stdout, "\"result\":") == null);
+
+    try d.shutdown();
+}
+
 test "awrd parse_error envelope on malformed JSON" {
     const allocator = testing.allocator;
     var d = try DaemonHandle.start(allocator, "parse-err", 2000);
