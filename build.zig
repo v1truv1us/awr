@@ -84,6 +84,7 @@ pub fn build(b: *std.Build) void {
     const test_corpus_step = b.step("test-corpus", "Run real-page render-quality corpus harness");
     const test_image_step = b.step("test-image", "Run image decoder + protocol + cache tests");
     const test_doc_step = b.step("test-doc", "Run \xc2\xa78 \xe2\x86\x94 curated_cases doc-alignment check");
+    const test_integration_step = b.step("test-integration", "Run binary-spawning Zig integration tests (requires built awr/awrd binaries)");
     const smoke_step = b.step("smoke", "Run mvp + regression smoke suites against the built binary");
 
     // ── stb_image vendored paths ──────────────────────────────────────────
@@ -474,6 +475,32 @@ pub fn build(b: *std.Build) void {
         });
         const run_daemon = b.addRunArtifact(daemon_test);
         test_step.dependOn(&run_daemon.step);
+
+        // ── Binary-spawning Zig integration tests ───────────────────
+        // tests/integration_runner.zig spawns awr/awrd via
+        // std.process.Child to verify CLI argv parsing, env handling,
+        // and Unix-socket round-trips end-to-end. Replaces the .sh
+        // smoke suite for hermetic checks; the .sh suite still owns
+        // network-dependent regressions.
+        //
+        // Not wired into the default `test` step because the tests
+        // assume the binaries are already installed at ./zig-out/bin/.
+        // Run via `zig build test-integration`; depends on the install
+        // step so the binaries are fresh.
+        const integration_mod = b.createModule(.{
+            .root_source_file = b.path("tests/integration_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        const integration_test = b.addTest(.{
+            .name = "integration",
+            .root_module = integration_mod,
+        });
+        const run_integration = b.addRunArtifact(integration_test);
+        run_integration.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+        run_integration.step.dependOn(&b.addInstallArtifact(awrd_exe, .{}).step);
+        test_integration_step.dependOn(&run_integration.step);
 
         // `zig build smoke` — runs the two shell suites against the
         // freshly-built binary. mvp_smoke.sh covers the original
