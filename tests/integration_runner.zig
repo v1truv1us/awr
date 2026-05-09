@@ -676,6 +676,90 @@ test "awrd per-scope cookie jars land at distinct on-disk paths" {
     try d.shutdown();
 }
 
+test "awrd absorbs Set-Cookie into per-scope jar and replays it on next fetch" {
+    // Three-fetch end-to-end behavior test (closes spec §5.3 at the
+    // disk-persistence layer):
+    //   1. /set-cookie/sid/abc with cookie_scope=alpha →
+    //      response carries Set-Cookie; daemon writes sid=abc to
+    //      $XDG_DATA_HOME/awr/cookies/alpha.txt.
+    //   2. /show-cookie/sid with cookie_scope=alpha →
+    //      daemon's freshly-loaded alpha jar replays Cookie: sid=abc;
+    //      mock echoes it back in the body so we can grep.
+    //   3. /show-cookie/sid with cookie_scope=beta →
+    //      different scope → different jar (empty) → mock body shows
+    //      sid=  (no value).
+    //
+    // The "across-fetch" assertion (#2) is what proves slice 3 actually
+    // persists cookies, not just creates empty files.
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+    const pid = std.posix.system.getpid();
+
+    const data_home = try std.fmt.allocPrint(
+        allocator,
+        "/tmp/awrd-persist-{d}",
+        .{pid},
+    );
+    defer allocator.free(data_home);
+    std.Io.Dir.cwd().deleteTree(io, data_home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, data_home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, data_home);
+
+    var mock = try MockHandle.start(allocator, 18605);
+    defer mock.deinit();
+    var d = try DaemonHandle.startWith(allocator, "persist", 2000, data_home);
+    defer d.deinit();
+
+    // Fetch 1 — set the cookie under scope=alpha.
+    const req_set = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fetch\"," ++
+        "\"params\":{\"url\":\"http://127.0.0.1:18605/set-cookie/sid/abc\"," ++
+        "\"cookie_scope\":\"alpha\"}}";
+    const resp_set = try d.rpc(req_set);
+    defer allocator.free(resp_set);
+    try testing.expect(std.mem.indexOf(u8, resp_set, "\"status\":200") != null);
+
+    // Disk side-effect check: alpha.txt exists and contains sid=abc.
+    const path_alpha = try std.fmt.allocPrint(
+        allocator,
+        "{s}/awr/cookies/alpha.txt",
+        .{data_home},
+    );
+    defer allocator.free(path_alpha);
+    const alpha_bytes = try std.Io.Dir.cwd().readFileAlloc(io, path_alpha, allocator, .limited(4096));
+    defer allocator.free(alpha_bytes);
+    try testing.expect(std.mem.indexOf(u8, alpha_bytes, "sid") != null);
+    try testing.expect(std.mem.indexOf(u8, alpha_bytes, "abc") != null);
+
+    // Fetch 2 — same scope, different URL. The daemon must load
+    // alpha's jar from disk and replay sid=abc as a Cookie: header.
+    // /show-cookie echoes the request's Cookie value into the
+    // response body so we can grep for it.
+    const req_show_alpha = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"fetch\"," ++
+        "\"params\":{\"url\":\"http://127.0.0.1:18605/show-cookie/sid\"," ++
+        "\"cookie_scope\":\"alpha\"}}";
+    const resp_show_alpha = try d.rpc(req_show_alpha);
+    defer allocator.free(resp_show_alpha);
+    try testing.expect(std.mem.indexOf(u8, resp_show_alpha, "\"status\":200") != null);
+    // body_text contains "sid=abc" — the cookie was sent back to the server.
+    try testing.expect(std.mem.indexOf(u8, resp_show_alpha, "sid=abc") != null);
+
+    // Fetch 3 — DIFFERENT scope. beta has never seen sid; the
+    // daemon's beta jar is empty, so the request goes out without
+    // a Cookie header, and the mock body shows the empty value.
+    const req_show_beta = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"fetch\"," ++
+        "\"params\":{\"url\":\"http://127.0.0.1:18605/show-cookie/sid\"," ++
+        "\"cookie_scope\":\"beta\"}}";
+    const resp_show_beta = try d.rpc(req_show_beta);
+    defer allocator.free(resp_show_beta);
+    try testing.expect(std.mem.indexOf(u8, resp_show_beta, "\"status\":200") != null);
+    // The mock returns "sid=\n" when no sid cookie was sent —
+    // proving scope isolation. Negative assertion: must NOT see
+    // "sid=abc" anywhere in the response (the value alpha set).
+    try testing.expect(std.mem.indexOf(u8, resp_show_beta, "sid=abc") == null);
+
+    try d.shutdown();
+}
+
 test "awrd rejects path-traversal cookie_scope values" {
     // Spec §2.4 doesn't enumerate validation, but a daemon that
     // blindly slots scope into a filename is open to writes
