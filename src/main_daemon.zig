@@ -37,6 +37,17 @@ const MAX_BODY_BYTES: usize = 1 * 1024 * 1024;
 const READ_BUFFER_BYTES: usize = 16 * 1024;
 const WRITE_BUFFER_BYTES: usize = 16 * 1024;
 
+/// Default idle shutdown timeout per spec §2.5. Override via
+/// `AWR_DAEMON_IDLE_SEC` for tests (any positive integer; 0 disables
+/// idle shutdown — useful for "stay up forever" debug runs).
+const DEFAULT_IDLE_SEC: u64 = 300; // 5 minutes per spec
+
+/// How often the accept-poll wakes up to check the idle clock.
+/// Smaller = quicker shutdown after the deadline; larger = lower
+/// idle CPU. 1s strikes a reasonable balance for a daemon that
+/// already wakes on every real request.
+const IDLE_POLL_INTERVAL_MS: i32 = 1000;
+
 pub fn run(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8) !void {
     // Pre-flight: remove any leftover socket file from a previous
     // crashed run. Spec §2.5's "double-fork + flock pid file" path
@@ -58,10 +69,50 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8) !v
     var jar_cache: JarCache = .empty;
     defer jar_cache.deinit(allocator, io);
 
-    log("awrd: listening on {s} version=0.0.{s}", .{ socket_path, build_opts.git_hash });
+    const idle_sec = readIdleSec();
+    log("awrd: listening on {s} version=0.0.{s} idle={d}s", .{ socket_path, build_opts.git_hash, idle_sec });
+
+    // Idle shutdown bookkeeping. `last_active_ms` tracks the wall
+    // clock at the start of run() (so a daemon that gets no traffic
+    // shuts down after `idle_sec` seconds). Updated after every
+    // serviced connection.
+    const idle_ms: i64 = @as(i64, @intCast(idle_sec)) * std.time.ms_per_s;
+    var last_active_ms: i64 = nowMs();
 
     var should_exit = false;
     while (!should_exit) {
+        // poll(2) with a short timeout — wakes up regularly to
+        // re-check the idle clock without busy-waiting. When
+        // POLLIN fires, accept the pending connection; when the
+        // poll times out, check whether the daemon has been idle
+        // long enough to exit.
+        var pfds = [_]std.posix.system.pollfd{.{
+            .fd = server.socket.handle,
+            .events = std.posix.system.POLL.IN,
+            .revents = 0,
+        }};
+        const rc = std.posix.system.poll(&pfds, 1, IDLE_POLL_INTERVAL_MS);
+
+        if (rc < 0) {
+            // EINTR or similar — recheck idle and loop.
+            if (idle_sec != 0 and nowMs() - last_active_ms >= idle_ms) {
+                log("awrd: idle {d}s exceeded, shutting down", .{idle_sec});
+                break;
+            }
+            continue;
+        }
+
+        if (rc == 0) {
+            // Poll timed out — no incoming connection. Check the
+            // idle clock (skipped when idle_sec == 0 for tests
+            // that want to keep the daemon up indefinitely).
+            if (idle_sec != 0 and nowMs() - last_active_ms >= idle_ms) {
+                log("awrd: idle {d}s exceeded, shutting down", .{idle_sec});
+                break;
+            }
+            continue;
+        }
+
         var stream = server.accept(io) catch |err| {
             log("awrd: accept failed: {t}", .{err});
             continue;
@@ -71,8 +122,29 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8) !v
         handleConnection(allocator, io, &stream, &should_exit, &jar_cache) catch |err| {
             log("awrd: connection error: {t}", .{err});
         };
+        last_active_ms = nowMs();
     }
     log("awrd: shutdown complete", .{});
+}
+
+/// Wall-clock millis via clock_gettime(REALTIME). Matches the helper
+/// in client.zig — duplicated to keep main_daemon.zig free of a
+/// client.zig dependency for this trivial primitive.
+fn nowMs() i64 {
+    var ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.REALTIME, &ts);
+    return @as(i64, @intCast(ts.sec)) * std.time.ms_per_s +
+        @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+}
+
+/// Read `AWR_DAEMON_IDLE_SEC` from env, fall back to default (300s).
+/// `0` is a sentinel meaning "never idle-shut-down" — used by debug
+/// runs and any test that expects the daemon to stay up regardless.
+fn readIdleSec() u64 {
+    const raw = std.c.getenv("AWR_DAEMON_IDLE_SEC") orelse return DEFAULT_IDLE_SEC;
+    const span = std.mem.sliceTo(raw, 0);
+    if (span.len == 0) return DEFAULT_IDLE_SEC;
+    return std.fmt.parseInt(u64, span, 10) catch DEFAULT_IDLE_SEC;
 }
 
 /// Per-scope cookie-jar cache for the daemon. One entry per scope
@@ -471,6 +543,17 @@ pub fn isValidScopeName(scope: []const u8) bool {
 /// `${XDG_RUNTIME_DIR:-/tmp}/awrd-${UID}.sock`.
 /// Caller owns the returned slice.
 pub fn resolveSocketPath(allocator: std.mem.Allocator) ![]u8 {
+    return resolveRuntimePath(allocator, "sock");
+}
+
+/// Resolve the daemon's pid-file path per spec §2.5.
+/// `${XDG_RUNTIME_DIR:-/tmp}/awrd-${UID}.pid`.
+/// Caller owns the returned slice.
+pub fn resolvePidPath(allocator: std.mem.Allocator) ![]u8 {
+    return resolveRuntimePath(allocator, "pid");
+}
+
+fn resolveRuntimePath(allocator: std.mem.Allocator, suffix: []const u8) ![]u8 {
     const xdg_raw = std.c.getenv("XDG_RUNTIME_DIR");
     const dir: []const u8 = if (xdg_raw != null) blk: {
         const span = std.mem.sliceTo(xdg_raw.?, 0);
@@ -478,8 +561,100 @@ pub fn resolveSocketPath(allocator: std.mem.Allocator) ![]u8 {
         break :blk span;
     } else "/tmp";
     const uid = std.posix.system.geteuid();
-    return std.fmt.allocPrint(allocator, "{s}/awrd-{d}.sock", .{ dir, uid });
+    return std.fmt.allocPrint(allocator, "{s}/awrd-{d}.{s}", .{ dir, uid, suffix });
 }
+
+/// Singleton-enforcing pid file. Construction acquires an exclusive
+/// flock on the pid file; if another daemon already holds it, returns
+/// `error.AlreadyRunning` and the caller should exit cleanly. The
+/// kernel auto-releases the lock when the fd is closed, so even a
+/// hard kill of the prior daemon doesn't leave a stale lock —
+/// matches the resilient-to-crash semantics spec §2.5 calls for.
+///
+/// On success the file's contents are overwritten with the current
+/// pid (decimal ASCII, newline-terminated). On `release()` the fd is
+/// closed and the file unlinked.
+const PidLock = struct {
+    fd: std.posix.fd_t,
+    path: []u8, // owned by caller — we just borrow for the unlink
+
+    pub const AcquireError = error{
+        /// Another awrd is already running for this UID.
+        AlreadyRunning,
+        /// Filesystem error opening the pid file (e.g. parent dir
+        /// missing, permission denied). Surfaced verbatim so the
+        /// caller can log a useful message.
+        OpenFailed,
+        /// flock() returned an unexpected error. Should never happen
+        /// in practice; bubbled up so we can see it in the wild.
+        LockFailed,
+    };
+
+    pub fn acquire(path: []u8) AcquireError!PidLock {
+        // open() needs a null-terminated C string; copy the path
+        // into a small stack buffer + sentinel. PATH_MAX on macOS is
+        // 1024 (4096 on Linux); 4096 covers both.
+        var path_z_buf: [4096]u8 = undefined;
+        if (path.len + 1 > path_z_buf.len) return error.OpenFailed;
+        @memcpy(path_z_buf[0..path.len], path);
+        path_z_buf[path.len] = 0;
+        const path_z: [*:0]const u8 = @ptrCast(&path_z_buf);
+
+        // O_CREAT | O_RDWR | 0600 — owner-only readable+writable.
+        // We keep the fd to hold the lock; close on release.
+        // open()'s mode_t arg is variadic in C; pass a fixed-width
+        // mode_t literal so Zig doesn't infer comptime_int across
+        // the variadic boundary.
+        const mode: std.posix.mode_t = 0o600;
+        const fd = std.posix.system.open(
+            path_z,
+            .{ .CREAT = true, .ACCMODE = .RDWR },
+            mode,
+        );
+        if (fd < 0) return error.OpenFailed;
+        errdefer _ = std.posix.system.close(fd);
+
+        // LOCK_EX | LOCK_NB — non-blocking exclusive lock. Returns
+        // EWOULDBLOCK / EAGAIN when another process holds the lock.
+        const rc = std.posix.system.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB);
+        if (rc != 0) {
+            // EAGAIN / EWOULDBLOCK — another process holds the lock.
+            // Per POSIX they're often the same value; Darwin sets
+            // both to 35 and Zig's std.c.E only exposes `AGAIN`.
+            // Linux's std.c.E exposes both as the same numeric
+            // value too, so matching `.AGAIN` covers both platforms.
+            const errno = std.posix.errno(rc);
+            return switch (errno) {
+                .AGAIN => error.AlreadyRunning,
+                else => error.LockFailed,
+            };
+        }
+
+        // Write our pid into the file. Truncate first so a stale
+        // value from a crashed previous daemon doesn't get
+        // concatenated. Best-effort — failure here doesn't
+        // invalidate the lock.
+        _ = std.posix.system.ftruncate(fd, 0);
+        const pid = std.posix.system.getpid();
+        var buf: [16]u8 = undefined;
+        const written = std.fmt.bufPrint(&buf, "{d}\n", .{pid}) catch buf[0..0];
+        if (written.len > 0) {
+            _ = std.posix.system.pwrite(fd, written.ptr, written.len, 0);
+        }
+
+        return .{ .fd = fd, .path = path };
+    }
+
+    /// Release the lock and unlink the pid file. Idempotent on the
+    /// fd close (kernel ignores double-close as EBADF, which we
+    /// swallow). The file unlink is best-effort — if it fails, the
+    /// next daemon's `acquire` will reopen and re-lock the same path
+    /// successfully because flock state is fd-based, not path-based.
+    pub fn release(self: *PidLock, io: std.Io) void {
+        _ = std.posix.system.close(self.fd);
+        std.Io.Dir.cwd().deleteFile(io, self.path) catch {};
+    }
+};
 
 // ── Entry point ────────────────────────────────────────────────────
 
@@ -501,6 +676,26 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
 
     const socket_path = try resolveSocketPath(alloc);
     defer alloc.free(socket_path);
+
+    const pid_path = try resolvePidPath(alloc);
+    defer alloc.free(pid_path);
+
+    // Singleton enforcement (spec §2.5). When another awrd is
+    // already running for this UID, exit 0 — the existing daemon
+    // will serve the next request. This is what makes
+    // "4 concurrent CLI invocations against an empty socket
+    // produce exactly 1 daemon" (§5.4) achievable: only the
+    // first to acquire the flock binds the socket; the others
+    // exit immediately and their CLI clients connect to the
+    // first.
+    var pid_lock = PidLock.acquire(pid_path) catch |err| switch (err) {
+        error.AlreadyRunning => {
+            log("awrd: already running (pid file {s} held); exiting 0", .{pid_path});
+            return;
+        },
+        else => return err,
+    };
+    defer pid_lock.release(io);
 
     try run(alloc, io, socket_path);
 }
