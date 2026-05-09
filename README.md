@@ -35,6 +35,11 @@ zig build -Doptimize=ReleaseSafe \
 
 # MVP operational smoke checks (local fixtures + mock server):
 ./scripts/mvp_smoke.sh
+
+# Full smoke gate — MVP fixtures + bug-fix regression suite (B1/B2/B3
+# hangs, cookie persistence, end-to-end sign-in, markdown extract).
+# Honors AWR_SMOKE_OFFLINE=1 to skip network checks for CI.
+zig build smoke
 ```
 
 Requires Zig 0.16 and lexbor v2.5.0 on the system library path

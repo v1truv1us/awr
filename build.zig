@@ -84,6 +84,7 @@ pub fn build(b: *std.Build) void {
     const test_corpus_step = b.step("test-corpus", "Run real-page render-quality corpus harness");
     const test_image_step = b.step("test-image", "Run image decoder + protocol + cache tests");
     const test_doc_step = b.step("test-doc", "Run \xc2\xa78 \xe2\x86\x94 curated_cases doc-alignment check");
+    const smoke_step = b.step("smoke", "Run mvp + regression smoke suites against the built binary");
 
     // ── stb_image vendored paths ──────────────────────────────────────────
     // Header-only library at third_party/stb/stb_image.h with a single C
@@ -444,6 +445,21 @@ pub fn build(b: *std.Build) void {
             .use_llvm = true,
         });
         b.installArtifact(exe);
+
+        // `zig build smoke` — runs the two shell suites against the
+        // freshly-built binary. mvp_smoke.sh covers the original
+        // acceptance tests against the local mock server;
+        // regression_smoke.sh codifies the May 2026 bug-fix
+        // regressions (B1/B2/B3 hangs, cookie persistence, end-to-end
+        // sign-in) with timing budgets. Each script honors AWR_BIN
+        // for non-default binary locations and AWR_SMOKE_OFFLINE=1
+        // for network-skipped CI runs.
+        const mvp_smoke = b.addSystemCommand(&.{ "scripts/mvp_smoke.sh" });
+        mvp_smoke.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+        const regression_smoke = b.addSystemCommand(&.{ "scripts/regression_smoke.sh" });
+        regression_smoke.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+        smoke_step.dependOn(&mvp_smoke.step);
+        smoke_step.dependOn(&regression_smoke.step);
     }
 
     // ── BoringSSL smoke test (confirms libs link + headers resolve) ───────

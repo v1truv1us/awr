@@ -632,24 +632,54 @@ pub const Client = struct {
             .GET => .GET,
             .POST => .POST,
         };
-        var req = std_client.request(std_method, uri, .{
-            .redirect_behavior = .unhandled,
-            .extra_headers = extra_headers[0..extra_header_count],
-        }) catch |err| return mapFetchError(err);
-        defer req.deinit();
 
+        // Connection-pool staleness retry. std.http.Client.connection_pool
+        // can hand back a pooled socket the peer has already closed (very
+        // common against single-request-per-connection servers like our
+        // own `awr mock`, and any non-keep-alive HTTP/1.1 server). The
+        // first sign is `HttpConnectionClosing` from receiveHead — server
+        // closed before any response bytes. Retry once with a fresh
+        // connection. POST body is re-sent because we own the body buffer
+        // for the duration of this function. Matches Go net/http's
+        // implicit "request canceled — retry idempotent or with fresh body".
+        var req: std.http.Client.Request = undefined;
+        var result: std.http.Client.Response = undefined;
+        var attempt: u8 = 0;
+        var owned_body: ?[]u8 = null;
+        defer if (owned_body) |b| self.allocator.free(b);
         if (method == .POST) {
-            // std.http.Client.Request.sendBodyComplete takes []u8 (mutable),
-            // so dupe the const slice into a temporary owned buffer.
             const body_const = body orelse "";
-            const body_bytes = try self.allocator.dupe(u8, body_const);
-            defer self.allocator.free(body_bytes);
-            req.sendBodyComplete(body_bytes) catch |err| return mapFetchError(err);
-        } else {
-            req.sendBodiless() catch |err| return mapFetchError(err);
+            owned_body = try self.allocator.dupe(u8, body_const);
         }
+        while (true) : (attempt += 1) {
+            req = std_client.request(std_method, uri, .{
+                .redirect_behavior = .unhandled,
+                .extra_headers = extra_headers[0..extra_header_count],
+            }) catch |err| return mapFetchError(err);
+            // On retry, deinit the previous (failed) request before
+            // shadowing. On success, the outer defer at function exit
+            // handles cleanup.
+            errdefer req.deinit();
 
-        var result = req.receiveHead(&.{}) catch |err| return mapFetchError(err);
+            if (method == .POST) {
+                req.sendBodyComplete(owned_body.?) catch |err| return mapFetchError(err);
+            } else {
+                req.sendBodiless() catch |err| return mapFetchError(err);
+            }
+
+            if (req.receiveHead(&.{})) |r| {
+                result = r;
+                break;
+            } else |err| switch (err) {
+                error.HttpConnectionClosing => {
+                    if (attempt >= 1) return mapFetchError(err);
+                    req.deinit();
+                    continue; // fresh connection on next iteration
+                },
+                else => return mapFetchError(err),
+            }
+        }
+        defer req.deinit();
 
         var headers = try cloneFetchHeaders(self.allocator, result.head.iterateHeaders());
         errdefer headers.deinit(self.allocator);
