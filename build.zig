@@ -446,6 +446,35 @@ pub fn build(b: *std.Build) void {
         });
         b.installArtifact(exe);
 
+        // ── awrd daemon ─────────────────────────────────────────────
+        // Minimal v1 per spec/subspecs/daemon-mode.md §6 slice 2:
+        // socket listen + accept loop + ping + shutdown. No Page/JS
+        // dependency yet — that lands in slice 3+ when fetch/tools/call
+        // methods come online. Keeping awrd's deps narrow (jsonrpc +
+        // build_opts only) means the daemon binary is small enough to
+        // ship as a no-op probe target during incremental development.
+        const daemon_mod = b.createModule(.{
+            .root_source_file = b.path("src/main_daemon.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        daemon_mod.addImport("build_opts", opts_mod);
+        const awrd_exe = b.addExecutable(.{
+            .name = "awrd",
+            .root_module = daemon_mod,
+        });
+        b.installArtifact(awrd_exe);
+
+        // Daemon unit tests (resolveSocketPath, frame round-trip helpers).
+        // Lives in the same module so it picks up the build_opts import.
+        const daemon_test = b.addTest(.{
+            .name = "daemon",
+            .root_module = daemon_mod,
+        });
+        const run_daemon = b.addRunArtifact(daemon_test);
+        test_step.dependOn(&run_daemon.step);
+
         // `zig build smoke` — runs the two shell suites against the
         // freshly-built binary. mvp_smoke.sh covers the original
         // acceptance tests against the local mock server;
