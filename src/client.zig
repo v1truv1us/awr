@@ -183,6 +183,15 @@ pub const ClientOptions = struct {
     /// owns `cookie_jar_path`; Client borrows the slice.
     persist_cookies: bool = false,
     cookie_jar_path: ?[]const u8 = null,
+    /// When non-null, Client *borrows* this CookieJar instead of
+    /// constructing its own. The Client neither loads nor saves to
+    /// disk in this mode — the caller (typically the daemon's
+    /// scope→jar cache) owns the lifecycle. `persist_cookies` /
+    /// `cookie_jar_path` must be left at their defaults when this
+    /// is set; they're ignored otherwise. See
+    /// `spec/subspecs/daemon-mode.md §5.3` for the in-memory cache
+    /// gate that motivates this seam.
+    external_cookie_jar: ?*cookie.CookieJar = null,
     /// When non-null, Client.init reads the cached `std_tls_failed_hosts`
     /// list from disk on startup and Client.deinit writes it back. The
     /// cache lets subsequent CLI invocations skip the doomed
@@ -263,7 +272,9 @@ pub const FetchError = error{
 
 const COOKIE_JAR_MAX_BYTES: usize = 1 * 1024 * 1024;
 
-fn loadCookiesFromDisk(jar: *cookie.CookieJar, io: std.Io, path: []const u8) !void {
+/// Public so the daemon's scope→jar cache can pre-load jars from
+/// disk on cache miss without going through Client.init.
+pub fn loadCookiesFromDisk(jar: *cookie.CookieJar, io: std.Io, path: []const u8) !void {
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, jar.allocator, .limited(COOKIE_JAR_MAX_BYTES)) catch |err| switch (err) {
         error.FileNotFound => return, // first run is not an error
         else => return err,
@@ -272,7 +283,9 @@ fn loadCookiesFromDisk(jar: *cookie.CookieJar, io: std.Io, path: []const u8) !vo
     try jar.deserializeBytes(bytes);
 }
 
-fn saveCookiesToDisk(jar: *const cookie.CookieJar, io: std.Io, path: []const u8) !void {
+/// Public so the daemon can write per-scope jars to disk after each
+/// fetch (durability) without going through Client.deinit.
+pub fn saveCookiesToDisk(jar: *const cookie.CookieJar, io: std.Io, path: []const u8) !void {
     var aw: std.Io.Writer.Allocating = .init(jar.allocator);
     defer aw.deinit();
     try jar.serialize(&aw.writer);
@@ -394,7 +407,22 @@ pub const Client = struct {
     /// session visits — fine for an MVP browse session.
     std_tls_failed_hosts: std.StringHashMapUnmanaged(void) = .empty,
 
+    /// Pointer to the active cookie jar. When `options.external_cookie_jar`
+    /// is non-null, returns that borrowed pointer; otherwise the inline
+    /// `cookies` field. All cookie reads/writes inside Client should go
+    /// through this helper so the borrow vs. owned distinction stays in
+    /// one place.
+    pub fn cookieJar(self: *Client) *cookie.CookieJar {
+        if (self.options.external_cookie_jar) |ext| return ext;
+        return &self.cookies;
+    }
+
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: ClientOptions) Client {
+        // When borrowing an external jar, the inline field is initialized
+        // empty but never used — accessor `cookieJar()` returns the
+        // borrowed pointer. We still allocate the inline value (cheap; an
+        // empty ArrayList) so the field stays valid for any code that
+        // historically used `&self.cookies` we haven't migrated.
         var c = Client{
             .allocator = allocator,
             .io = io,
@@ -402,7 +430,10 @@ pub const Client = struct {
             .conns = pool.ConnectionPool.init(allocator),
             .options = options,
         };
-        if (options.persist_cookies) {
+        // Disk load only applies to the owned-jar path. Borrowed jars
+        // arrive pre-loaded from the caller (see main_daemon's scope
+        // cache).
+        if (options.external_cookie_jar == null and options.persist_cookies) {
             if (options.cookie_jar_path) |path| loadCookiesFromDisk(&c.cookies, io, path) catch |err| {
                 std.log.warn("cookie jar load from {s} failed: {s}", .{ path, @errorName(err) });
             };
@@ -416,7 +447,10 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
-        if (self.options.persist_cookies) {
+        // Disk save only applies to the owned-jar path. Borrowed jars are
+        // the caller's responsibility (the daemon writes them after each
+        // fetch and on shutdown).
+        if (self.options.external_cookie_jar == null and self.options.persist_cookies) {
             if (self.options.cookie_jar_path) |path| saveCookiesToDisk(&self.cookies, self.io, path) catch |err| {
                 std.log.warn("cookie jar save to {s} failed: {s}", .{ path, @errorName(err) });
             };
@@ -436,6 +470,10 @@ pub const Client = struct {
         while (key_it.next()) |k| self.allocator.free(k.*);
         self.std_tls_failed_hosts.deinit(self.allocator);
         self.conns.deinit();
+        // Inline cookie jar deinit is zero-cost when the jar is empty
+        // (the external-jar path never populates the inline field) and
+        // the right thing when the inline jar IS the active one. Either
+        // way the borrowed pointer's lifetime is the caller's problem.
         self.cookies.deinit();
     }
 
@@ -467,7 +505,7 @@ pub const Client = struct {
             // `302 Set-Cookie: session=…` and the next-hop request must
             // carry the new cookie — if we deferred parsing until after
             // the loop, the second fetch would go out with no session.
-            absorbSetCookies(&self.cookies, current_url, &resp.headers);
+            absorbSetCookies(self.cookieJar(), current_url, &resp.headers);
 
             if (!self.options.follow_redirects or !resp.isRedirect()) return resp;
             const location = resp.location() orelse return resp;
@@ -621,7 +659,7 @@ pub const Client = struct {
         // https. The owned slice must outlive `req.send*`; we free it
         // after the response head is parsed (defer below).
         const u_for_cookies = url_mod.Url.parse(url_str) catch return FetchError.InvalidUrl;
-        const cookie_value = try buildCookieHeaderValue(&self.cookies, self.allocator, u_for_cookies.host, u_for_cookies.path, u_for_cookies.is_https);
+        const cookie_value = try buildCookieHeaderValue(self.cookieJar(), self.allocator, u_for_cookies.host, u_for_cookies.path, u_for_cookies.is_https);
         defer self.allocator.free(cookie_value);
         if (cookie_value.len > 0) {
             extra_headers[extra_header_count] = .{ .name = "cookie", .value = cookie_value };
@@ -975,7 +1013,7 @@ pub const Client = struct {
         // Position before Content-* headers matches Chrome 132's typical
         // outbound order; doesn't affect JA4 (TLS-only) but keeps the
         // HTTP-level ordering consistent across paths.
-        const cookie_header = try buildCookieHeaderValue(&self.cookies, self.allocator, u.host, path, u.is_https);
+        const cookie_header = try buildCookieHeaderValue(self.cookieJar(), self.allocator, u.host, path, u.is_https);
         defer self.allocator.free(cookie_header);
         if (cookie_header.len > 0) {
             try req_buf.writer.print("Cookie: {s}\r\n", .{cookie_header});
@@ -1055,7 +1093,7 @@ pub const Client = struct {
         // Cookie value, optionally added to the headers array below.
         // Always allocates (possibly empty); we free unconditionally
         // via defer.
-        const cookie_value = try buildCookieHeaderValue(&self.cookies, self.allocator, u.host, path, u.is_https);
+        const cookie_value = try buildCookieHeaderValue(self.cookieJar(), self.allocator, u.host, path, u.is_https);
         defer self.allocator.free(cookie_value);
 
         // Build the header array on the stack with worst-case length.

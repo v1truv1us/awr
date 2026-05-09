@@ -128,15 +128,19 @@ fn handleCookieFixtures(
     request: *std.http.Server.Request,
 ) !bool {
     const target = request.head.target;
-    // Strip the query string for matching; we don't accept query
-    // params on these fixtures.
+    // Split path / query. The `?session=1` flag on /set-cookie
+    // suppresses Max-Age so the cookie is treated as a session
+    // cookie (skipped by the Netscape serializer) — used by the
+    // daemon's in-memory-cache test.
     const q = std.mem.indexOfScalar(u8, target, '?');
     const path = if (q) |i| target[0..i] else target;
+    const query = if (q) |i| target[i + 1 ..] else "";
+    const is_session = std.mem.indexOf(u8, query, "session=1") != null;
 
     if (std.mem.startsWith(u8, path, "/set-cookie/")) {
         const rest = path["/set-cookie/".len..];
         const slash = std.mem.indexOfScalar(u8, rest, '/') orelse {
-            try request.respond("usage: /set-cookie/<name>/<value>\n", .{
+            try request.respond("usage: /set-cookie/<name>/<value>[?session=1]\n", .{
                 .status = .bad_request,
                 .extra_headers = &.{
                     .{ .name = "content-type", .value = "text/plain; charset=utf-8" },
@@ -155,18 +159,16 @@ fn handleCookieFixtures(
             });
             return true;
         }
-        // Max-Age=3600 makes this a persistent cookie (not session) so
-        // it survives the daemon's per-request Page deinit→init cycle
-        // through the on-disk jar. Session cookies (no Max-Age/Expires)
-        // are intentionally skipped by the Netscape-format serializer
-        // — that's correct browser behavior, but it would mean this
-        // fixture can't verify disk persistence without an explicit
-        // lifetime.
-        const set_cookie = try std.fmt.allocPrint(
-            allocator,
-            "{s}={s}; Max-Age=3600; Path=/",
-            .{ name, value },
-        );
+        // Default: persistent cookie (Max-Age=3600). With `?session=1`,
+        // omit Max-Age so the cookie is a session cookie — used by the
+        // daemon T-49 test to verify the in-memory jar cache survives
+        // cross-request without disk help (the Netscape serializer
+        // intentionally skips session cookies, so the only way one
+        // round-trips through awrd is via the in-memory cache).
+        const set_cookie = if (is_session)
+            try std.fmt.allocPrint(allocator, "{s}={s}; Path=/", .{ name, value })
+        else
+            try std.fmt.allocPrint(allocator, "{s}={s}; Max-Age=3600; Path=/", .{ name, value });
         defer allocator.free(set_cookie);
         const body = try std.fmt.allocPrint(allocator, "set {s}={s}\n", .{ name, value });
         defer allocator.free(body);

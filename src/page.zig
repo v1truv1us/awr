@@ -21,9 +21,18 @@ const render = @import("render.zig");
 const extract = @import("extract.zig");
 const url_mod = @import("net/url.zig");
 const cookie_path = @import("util/cookie_path.zig");
+const cookie_mod = @import("net/cookie.zig");
 const tls_fail_cache_path = @import("util/tls_fail_cache_path.zig");
 const time_util = @import("util/time.zig");
 const telemetry = @import("telemetry");
+
+// Re-exports for downstream module consumers (main_daemon.zig in
+// particular). The daemon module's only named import is `page`, so
+// helpers it needs from cookie/client are surfaced here. Keeping
+// these as `pub const` aliases avoids adding new build-graph edges.
+pub const CookieJar = cookie_mod.CookieJar;
+pub const loadCookiesFromDisk = client.loadCookiesFromDisk;
+pub const saveCookiesToDisk = client.saveCookiesToDisk;
 
 /// Phase-timing probe.
 ///
@@ -391,6 +400,62 @@ pub const Page = struct {
         return page;
     }
 
+    /// Construct a Page that *borrows* a heap-allocated CookieJar
+    /// instead of owning one. Used by the daemon's scope→jar cache
+    /// (`spec/subspecs/daemon-mode.md §5.3`) so cookies set in fetch
+    /// N are visible in fetch N+1 without a disk round-trip — which
+    /// also lets session cookies (no Max-Age) survive across
+    /// requests, which the disk-only path cannot.
+    ///
+    /// Persistence is the *caller's* responsibility. Page does not
+    /// load or save the jar; the daemon manages disk state on a
+    /// different schedule (post-fetch + idle shutdown).
+    pub fn initWithJar(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        jar: *cookie_mod.CookieJar,
+    ) !Page {
+        var js_engine = try engine.JsEngine.init(allocator, null);
+        errdefer js_engine.deinit();
+
+        var el = try engine.EventLoop.init(allocator, js_engine.ctx);
+        errdefer el.deinit();
+
+        const base_url = try allocator.dupe(u8, "");
+        errdefer allocator.free(base_url);
+
+        // tls-fail cache stays on disk-resolved (per-process) — it's a
+        // perf optimization independent of cookie scoping.
+        const tls_cache_path = tls_fail_cache_path.resolveTlsFailCachePath(allocator, io) catch |err| blk: {
+            std.log.warn("tls-fail cache path resolution failed: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        errdefer if (tls_cache_path) |p| allocator.free(p);
+
+        var page = Page{
+            .allocator = allocator,
+            .io = io,
+            .client = client.Client.init(allocator, io, .{
+                .use_chrome_headers = false,
+                // persist_cookies / cookie_jar_path stay at defaults;
+                // external_cookie_jar takes precedence in Client.
+                .external_cookie_jar = jar,
+                .tls_fail_cache_path = tls_cache_path,
+            }),
+            .js = js_engine,
+            .event_loop = el,
+            .base_url = base_url,
+            .current_doc = null,
+            // Page does NOT own the jar path or the jar — both belong
+            // to the daemon. Leave both fields null so deinit doesn't
+            // try to free or save them.
+            .cookie_jar_path = null,
+            .tls_fail_cache_path = tls_cache_path,
+        };
+        page.attachHosts();
+        return page;
+    }
+
     pub fn deinit(self: *Page) void {
         if (self.current_doc) |*doc_ref| {
             bridge.removeDomBridge(&self.js);
@@ -429,7 +494,7 @@ pub const Page = struct {
         const self: *Page = @ptrCast(@alignCast(ptr));
         const u = url_mod.Url.parse(self.base_url) catch return allocator.alloc(u8, 0);
         return client.buildCookieHeaderValue(
-            &self.client.cookies,
+            self.client.cookieJar(),
             allocator,
             u.host,
             u.path,
@@ -445,7 +510,7 @@ pub const Page = struct {
     fn cookieSetAdapter(ptr: *anyopaque, value: []const u8) void {
         const self: *Page = @ptrCast(@alignCast(ptr));
         const u = url_mod.Url.parse(self.base_url) catch return;
-        self.client.cookies.parseSetCookie(value, u.host) catch {};
+        self.client.cookieJar().parseSetCookie(value, u.host) catch {};
     }
 
     /// FetchHost adapter: runs the caller's URL through either the HTTP

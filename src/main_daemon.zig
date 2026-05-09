@@ -19,6 +19,11 @@ const jsonrpc = @import("jsonrpc.zig");
 const build_opts = @import("build_opts");
 const page_mod = @import("page");
 
+// Re-exports surfaced through page so the daemon doesn't need its own
+// named imports for cookie/client. Keeps build.zig's daemon_mod deps
+// narrow (just `page` + `build_opts`).
+const CookieJar = page_mod.CookieJar;
+
 /// Maximum body bytes per request frame. 1 MiB is generous for v1
 /// (typical fetch param JSON is well under 1 KB; even multi-redirect
 /// responses are <100 KB). Enforced inside readFrame so the daemon
@@ -46,6 +51,13 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8) !v
     defer server.deinit(io);
     defer std.Io.Dir.cwd().deleteFile(io, socket_path) catch {};
 
+    // Per-scope cookie jar cache (spec §5.3 in-memory persistence).
+    // Lifetime: daemon process. Each fetch get-or-creates an entry
+    // for its scope; the cached jar survives across requests so
+    // session cookies (no Max-Age) round-trip correctly.
+    var jar_cache: JarCache = .empty;
+    defer jar_cache.deinit(allocator, io);
+
     log("awrd: listening on {s} version=0.0.{s}", .{ socket_path, build_opts.git_hash });
 
     var should_exit = false;
@@ -56,18 +68,106 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8) !v
         };
         defer stream.close(io);
 
-        handleConnection(allocator, io, &stream, &should_exit) catch |err| {
+        handleConnection(allocator, io, &stream, &should_exit, &jar_cache) catch |err| {
             log("awrd: connection error: {t}", .{err});
         };
     }
     log("awrd: shutdown complete", .{});
 }
 
+/// Per-scope cookie-jar cache for the daemon. One entry per scope
+/// name; the entry owns both the heap-allocated CookieJar and the
+/// resolved on-disk path. Lookup is by scope string; on miss, the
+/// entry is created fresh: the on-disk file is loaded if present,
+/// then the entry is inserted into the map. After each fetch the
+/// caller calls `persist(entry, io)` to flush durability changes
+/// back to disk; on shutdown `deinit` saves+frees everything.
+///
+/// Hash-map lifetimes:
+///   - Keys (scope strings) are duplicated on insert and freed on
+///     deinit. Map values (entries) are heap-allocated; the map
+///     stores `*Entry` so the borrowed `*CookieJar` pointer in
+///     ClientOptions remains stable across re-hashes.
+const JarCache = struct {
+    entries: std.StringHashMapUnmanaged(*Entry) = .empty,
+
+    const Entry = struct {
+        jar: CookieJar,
+        path: ?[]u8, // null when no XDG path could be resolved
+    };
+
+    pub const empty: JarCache = .{};
+
+    /// Borrow (or load-and-cache) the jar for `scope`. Returned
+    /// pointer is stable for the daemon's lifetime — the value's
+    /// in-place `jar` field is mutated in place; the entry itself
+    /// is heap-allocated so map re-hashes don't invalidate the
+    /// `*CookieJar` we hand to ClientOptions.
+    pub fn getOrLoad(
+        self: *JarCache,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        scope: []const u8,
+    ) !*Entry {
+        if (self.entries.get(scope)) |hit| return hit;
+
+        // Miss — resolve the on-disk path and try to load.
+        const path = try resolveScopePath(allocator, io, scope);
+        errdefer if (path) |p| allocator.free(p);
+
+        const entry = try allocator.create(Entry);
+        errdefer allocator.destroy(entry);
+        entry.* = .{
+            .jar = CookieJar.init(allocator),
+            .path = path,
+        };
+        if (path) |p| {
+            page_mod.loadCookiesFromDisk(&entry.jar, io, p) catch |err| {
+                std.log.warn("daemon: cookie jar load from {s} failed: {s}", .{ p, @errorName(err) });
+            };
+        }
+
+        // Dupe the scope key — map borrows the slice; deinit frees it.
+        const key_dup = try allocator.dupe(u8, scope);
+        errdefer allocator.free(key_dup);
+        try self.entries.put(allocator, key_dup, entry);
+        return entry;
+    }
+
+    /// Write `entry`'s jar to its on-disk path (no-op when path is
+    /// null). Called after each successful fetch for crash
+    /// durability — the in-memory cache is the source of truth, but
+    /// a hard kill of the daemon must not lose absorbed cookies.
+    pub fn persist(self: *const JarCache, entry: *const Entry, io: std.Io) void {
+        _ = self;
+        const path = entry.path orelse return;
+        page_mod.saveCookiesToDisk(&entry.jar, io, path) catch |err| {
+            std.log.warn("daemon: cookie jar save to {s} failed: {s}", .{ path, @errorName(err) });
+        };
+    }
+
+    /// Save+free every cached jar. Call from `run`'s defer on
+    /// graceful shutdown. After this, the JarCache is empty.
+    pub fn deinit(self: *JarCache, allocator: std.mem.Allocator, io: std.Io) void {
+        var it = self.entries.iterator();
+        while (it.next()) |kv| {
+            self.persist(kv.value_ptr.*, io);
+            const entry = kv.value_ptr.*;
+            entry.jar.deinit();
+            if (entry.path) |p| allocator.free(p);
+            allocator.destroy(entry);
+            allocator.free(kv.key_ptr.*);
+        }
+        self.entries.deinit(allocator);
+    }
+};
+
 fn handleConnection(
     allocator: std.mem.Allocator,
     io: std.Io,
     stream: *std.Io.net.Stream,
     should_exit: *bool,
+    jar_cache: *JarCache,
 ) !void {
     const read_buf = try allocator.alloc(u8, READ_BUFFER_BYTES);
     defer allocator.free(read_buf);
@@ -114,14 +214,12 @@ fn handleConnection(
         try jsonrpc.writeSuccess(&wshim, allocator, id_json, "\"shutting down\"");
         should_exit.* = true;
     } else if (std.mem.eql(u8, method, "fetch")) {
-        // Slice-3: per-request fresh Page wired to a scope-specific
-        // on-disk jar at $XDG_DATA_HOME/awr/cookies/<scope>.txt per
-        // spec/subspecs/daemon-mode.md §2.4. In-memory jar caching
-        // across requests (so a cookie set in fetch N is visible in
-        // fetch N+1 before disk writeback) is a later slice — today
-        // the disk file IS the cache, which round-trips correctly
-        // across requests but pays a load+save per fetch.
-        handleFetch(allocator, io, &req, id_json, &wshim) catch |err| {
+        // T-49: borrow the per-scope jar from the daemon's
+        // process-wide cache so cookies set in fetch N are visible
+        // in fetch N+1 without a disk round-trip. Persistence after
+        // each fetch is still done for crash durability (see
+        // handleFetch's post-fetch JarCache.persist call).
+        handleFetch(allocator, io, &req, id_json, &wshim, jar_cache) catch |err| {
             const msg = try std.fmt.allocPrint(allocator, "{t}", .{err});
             defer allocator.free(msg);
             try jsonrpc.writeError(&wshim, allocator, id_json, .internal_error, msg);
@@ -142,6 +240,7 @@ fn handleFetch(
     req: *const jsonrpc.Request,
     id_json: []const u8,
     wshim: *WriterShim,
+    jar_cache: *JarCache,
 ) !void {
     const params_val = req.params() orelse return error.MissingParams;
     const params_obj = switch (params_val) {
@@ -190,12 +289,13 @@ fn handleFetch(
         else => return error.InvalidCookieScope,
     };
 
-    // Resolve scope-specific jar path. Null when no HOME/XDG_DATA_HOME
-    // in env — Page.initWithJarPath treats null as "no persistence",
-    // matching the in-process Page.init contract. On non-null success,
-    // Page takes ownership and frees on deinit.
-    const jar_path = try resolveScopePath(allocator, io, scope);
-    var p = try page_mod.Page.initWithJarPath(allocator, io, jar_path);
+    // Borrow the scope's jar from the daemon's in-memory cache.
+    // First touch loads from disk; subsequent fetches see the
+    // already-resolved jar. The Entry pointer stays stable across
+    // map re-hashes (entries are heap-allocated), so the borrowed
+    // *CookieJar we hand to Page is safe to use through Page.deinit.
+    const entry = try jar_cache.getOrLoad(allocator, io, scope);
+    var p = try page_mod.Page.initWithJar(allocator, io, &entry.jar);
     defer p.deinit();
 
     var result = if (is_post)
@@ -226,6 +326,13 @@ fn handleFetch(
     try out.append(allocator, '}');
 
     try jsonrpc.writeSuccess(wshim, allocator, id_json, out.items);
+
+    // Crash durability: write the (possibly-mutated) jar back to disk
+    // after each successful fetch. The in-memory cache is the source
+    // of truth for cross-request reads; disk is for surviving daemon
+    // crashes. Failures are logged but non-fatal — the next request
+    // still uses the in-memory state.
+    jar_cache.persist(entry, io);
 }
 
 /// Append `s` as a JSON-quoted string into `list`. Mirrors the

@@ -760,6 +760,82 @@ test "awrd absorbs Set-Cookie into per-scope jar and replays it on next fetch" {
     try d.shutdown();
 }
 
+test "awrd in-memory cache: session cookies survive cross-request" {
+    // T-49: spec/subspecs/daemon-mode.md §5.3 explicit gate —
+    // "the cookie is sent on the second fetch even before disk
+    // writeback". This test exercises a session cookie (no
+    // Max-Age) which the Netscape-format serializer intentionally
+    // skips. The only way a session cookie can round-trip through
+    // the daemon is via the in-memory scope→jar cache; if it
+    // survives, the cache is real (not just disk persistence).
+    //
+    // Three fetches against the same scope:
+    //   1. /set-cookie/sid/abc?session=1 → Set-Cookie has Path=/
+    //      with NO Max-Age. Daemon absorbs into in-memory jar.
+    //      Disk write happens, but serializer skips session
+    //      cookies → on-disk file is empty.
+    //   2. /show-cookie/sid → daemon's in-memory jar still holds
+    //      sid=abc; mock body shows "sid=abc".
+    //   3. (negative) Verify the on-disk file is empty / has no
+    //      "sid" line — proving step 2 came from the cache, not
+    //      disk.
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+    const pid = std.posix.system.getpid();
+
+    const data_home = try std.fmt.allocPrint(
+        allocator,
+        "/tmp/awrd-cache-{d}",
+        .{pid},
+    );
+    defer allocator.free(data_home);
+    std.Io.Dir.cwd().deleteTree(io, data_home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, data_home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, data_home);
+
+    var mock = try MockHandle.start(allocator, 18606);
+    defer mock.deinit();
+    var d = try DaemonHandle.startWith(allocator, "cache", 2000, data_home);
+    defer d.deinit();
+
+    // Fetch 1 — set the SESSION cookie under scope=cache-test.
+    const req_set = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fetch\"," ++
+        "\"params\":{\"url\":\"http://127.0.0.1:18606/set-cookie/sid/abc?session=1\"," ++
+        "\"cookie_scope\":\"cache-test\"}}";
+    const resp_set = try d.rpc(req_set);
+    defer allocator.free(resp_set);
+    try testing.expect(std.mem.indexOf(u8, resp_set, "\"status\":200") != null);
+
+    // Fetch 2 — same scope, /show-cookie. The daemon must serve
+    // sid=abc from its in-memory cache; disk has nothing.
+    const req_show = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"fetch\"," ++
+        "\"params\":{\"url\":\"http://127.0.0.1:18606/show-cookie/sid\"," ++
+        "\"cookie_scope\":\"cache-test\"}}";
+    const resp_show = try d.rpc(req_show);
+    defer allocator.free(resp_show);
+    try testing.expect(std.mem.indexOf(u8, resp_show, "\"status\":200") != null);
+    // The body must contain "sid=abc" — proves the cache replayed it.
+    try testing.expect(std.mem.indexOf(u8, resp_show, "sid=abc") != null);
+
+    // Negative: verify the disk file does NOT contain sid (it was a
+    // session cookie and the serializer drops those). Whatever is
+    // there is just the file header.
+    const path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/awr/cookies/cache-test.txt",
+        .{data_home},
+    );
+    defer allocator.free(path);
+    const disk_bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4096));
+    defer allocator.free(disk_bytes);
+    // No row should mention 'sid' — only the # header lines from
+    // the serializer. Confirms step 2's success came from the
+    // in-memory cache, not the disk file.
+    try testing.expect(std.mem.indexOf(u8, disk_bytes, "sid") == null);
+
+    try d.shutdown();
+}
+
 test "awrd rejects path-traversal cookie_scope values" {
     // Spec §2.4 doesn't enumerate validation, but a daemon that
     // blindly slots scope into a filename is open to writes
