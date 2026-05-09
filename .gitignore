@@ -23,3 +23,8 @@ third_party/quickjs-ng-quickjs/
 # here (see DEV_NOTES.md #1); re-apply after any `zig fetch` refresh until
 # the upstream PR lands or we vendor quickjs_ng under third_party/.
 zig-pkg/
+
+# Solo per-session git worktrees — local-only scratch space for
+# parallel task sessions, reaped via `solo worktree cleanup`. The
+# tracking DB at .solo/solo.db is checked in; the worktrees are not.
+.solo/worktrees/
