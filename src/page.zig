@@ -334,6 +334,23 @@ pub const Page = struct {
     /// `io` is threaded through to the HTTP client for all network fetches
     /// and to `std.Io.Dir.readFileAlloc` for `file://` external scripts.
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Page {
+        // Resolve persistent cookie jar path (opt-in via env vars per
+        // spec/subspecs/agent-browser.md §2). Errors are non-fatal; a missing
+        // path or HOME just disables persistence.
+        const jar_path = cookie_path.resolveCookieJarPath(allocator, io) catch |err| blk: {
+            std.log.warn("cookie jar path resolution failed: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        return initWithJarPath(allocator, io, jar_path);
+    }
+
+    /// Construct a Page with an explicit cookie-jar path (or null for
+    /// no persistence). Takes ownership of `jar_path` — the Page will
+    /// free it in deinit. Use this when the caller already knows which
+    /// jar to use (e.g. the daemon resolving a per-scope path per
+    /// spec/subspecs/daemon-mode.md §2.4) and wants to bypass the
+    /// AWR_COOKIE_JAR / XDG resolution that `init` does.
+    pub fn initWithJarPath(allocator: std.mem.Allocator, io: std.Io, jar_path: ?[]u8) !Page {
         var js_engine = try engine.JsEngine.init(allocator, null);
         errdefer js_engine.deinit();
 
@@ -343,13 +360,6 @@ pub const Page = struct {
         const base_url = try allocator.dupe(u8, "");
         errdefer allocator.free(base_url);
 
-        // Resolve persistent cookie jar path (opt-in via env vars per
-        // spec/subspecs/agent-browser.md §2). Errors are non-fatal; a missing
-        // path or HOME just disables persistence.
-        const jar_path = cookie_path.resolveCookieJarPath(allocator, io) catch |err| blk: {
-            std.log.warn("cookie jar path resolution failed: {s}", .{@errorName(err)});
-            break :blk null;
-        };
         errdefer if (jar_path) |p| allocator.free(p);
 
         // Resolve std-TLS-fail cache path. Auto-activated (no env opt-in)

@@ -63,6 +63,35 @@ fn daemonModeEnabled() bool {
     return std.mem.eql(u8, span, "1");
 }
 
+/// Resolve the cookie scope key the CLI client should send to the
+/// daemon per spec/subspecs/daemon-mode.md §2.4. Resolution order:
+///   1. `$AWR_COOKIE_SCOPE` (if set and non-empty) — explicit override
+///   2. `sha1($PWD)[:12]` — stable per-project handle
+///   3. `"default"` — last-resort fallback when $PWD can't be read
+///
+/// 12 hex chars = 48 bits of name-space; collision risk for a single
+/// user's project list is negligible. Returning a stable hex string
+/// (vs a literal $PWD) avoids leaking the working-directory path
+/// through the on-disk filename.
+fn resolveCookieScope(allocator: std.mem.Allocator) ![]u8 {
+    if (std.c.getenv("AWR_COOKIE_SCOPE")) |raw| {
+        const span = std.mem.sliceTo(raw, 0);
+        if (span.len > 0) return allocator.dupe(u8, span);
+    }
+    if (std.c.getenv("PWD")) |pwd_raw| {
+        const pwd = std.mem.sliceTo(pwd_raw, 0);
+        if (pwd.len > 0) {
+            var hasher = std.crypto.hash.Sha1.init(.{});
+            hasher.update(pwd);
+            var digest: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
+            hasher.final(&digest);
+            // 12 hex chars = first 6 bytes of the 20-byte digest.
+            return std.fmt.allocPrint(allocator, "{x}", .{digest[0..6]});
+        }
+    }
+    return allocator.dupe(u8, "default");
+}
+
 /// Resolve the daemon's socket path per spec/subspecs/daemon-mode.md
 /// §2.1. Identical to main_daemon.zig:resolveSocketPath; duplicated
 /// rather than imported because main and main_daemon are different
@@ -108,13 +137,22 @@ fn runViaDaemon(
     };
     defer stream.close(io);
 
-    // Build the fetch JSON-RPC body. Slice 4 doesn't yet pass
-    // method/body/cookie_scope — those layer on later. format_md is
-    // applied client-side after the daemon returns the envelope.
+    // Cookie scope per spec §2.4 — defaults to sha1($PWD)[:12], or
+    // an explicit AWR_COOKIE_SCOPE override. The daemon validates
+    // the name and routes to the per-scope on-disk jar.
+    const scope = try resolveCookieScope(alloc);
+    defer alloc.free(scope);
+
+    // Build the fetch JSON-RPC body. method/body still default to
+    // GET / unset; subsequent slices will surface them through the
+    // CLI surface. format_md is applied client-side after the
+    // daemon returns the envelope.
     var req_body: std.ArrayList(u8) = .empty;
     defer req_body.deinit(alloc);
     try req_body.appendSlice(alloc, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fetch\",\"params\":{\"url\":");
     try writeJsonStr(&req_body, alloc, url);
+    try req_body.appendSlice(alloc, ",\"cookie_scope\":");
+    try writeJsonStr(&req_body, alloc, scope);
     try req_body.appendSlice(alloc, "}}");
 
     var rbuf: [16 * 1024]u8 = undefined;
@@ -1016,6 +1054,28 @@ test "isFailedCallEnvelope detects {ok:false}" {
     try std.testing.expect(isFailedCallEnvelope("{\"ok\":false,\"error\":\"ToolNotFound\"}"));
     try std.testing.expect(isFailedCallEnvelope("{\"ok\": false, \"error\": \"ToolNotFound\"}"));
     try std.testing.expect(!isFailedCallEnvelope("{\"ok\":true,\"value\":{}}"));
+}
+
+test "resolveCookieScope returns 12 hex chars or default" {
+    // We can't safely setenv inside a test (libc setenv leaks across
+    // tests on some platforms). Resolution depends on env that the
+    // test runner provides — at minimum we expect either a valid
+    // 12-hex scope (sha1($PWD)[:12]) or the literal "default" if
+    // PWD wasn't set. Both shapes are valid — we just check the
+    // returned slice is allocator-owned and non-empty.
+    const allocator = std.testing.allocator;
+    const scope = try resolveCookieScope(allocator);
+    defer allocator.free(scope);
+    try std.testing.expect(scope.len > 0);
+    // If sha1[:12] path was taken, scope is exactly 12 lowercase
+    // hex chars. Otherwise it's "default" or whatever
+    // AWR_COOKIE_SCOPE happens to be in the env. Validate the hex
+    // shape only when length matches.
+    if (scope.len == 12) {
+        for (scope) |c| try std.testing.expect(
+            (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'),
+        );
+    }
 }
 
 test "describeLoadError returns stable messages for common failures" {

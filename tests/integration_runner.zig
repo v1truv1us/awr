@@ -116,6 +116,18 @@ const DaemonHandle = struct {
     /// tests don't collide on the socket. Block until the daemon's
     /// socket is connectable (up to `connect_timeout_ms`).
     fn start(allocator: std.mem.Allocator, slug: []const u8, connect_timeout_ms: u64) !DaemonHandle {
+        return startWith(allocator, slug, connect_timeout_ms, null);
+    }
+
+    /// Variant that pins XDG_DATA_HOME for the daemon — the per-scope
+    /// cookie-jar tests need this so jars land in a hermetic per-test
+    /// dir, not the developer's `$HOME/.local/share`.
+    fn startWith(
+        allocator: std.mem.Allocator,
+        slug: []const u8,
+        connect_timeout_ms: u64,
+        data_home: ?[]const u8,
+    ) !DaemonHandle {
         const io = std.testing.io;
         const pid = std.posix.system.getpid();
         const tmp_dir = try std.fmt.allocPrint(
@@ -138,11 +150,12 @@ const DaemonHandle = struct {
         );
         errdefer allocator.free(sock_path);
 
-        // Minimal env: only XDG_RUNTIME_DIR. main_daemon.zig:
-        // resolveSocketPath reads only that.
+        // Minimal env: XDG_RUNTIME_DIR (always) + optional
+        // XDG_DATA_HOME for per-scope jar tests.
         var env = std.process.Environ.Map.init(allocator);
         defer env.deinit();
         try env.put("XDG_RUNTIME_DIR", tmp_dir);
+        if (data_home) |dh| try env.put("XDG_DATA_HOME", dh);
 
         var child = try std.process.spawn(io, .{
             .argv = &.{AWRD_BIN},
@@ -577,6 +590,111 @@ test "awrd parse_error envelope on malformed JSON" {
     // id field present and explicitly null — JSON-RPC §5.1 requires
     // we still send a response shaped like a real envelope.
     try testing.expect(std.mem.indexOf(u8, resp, "\"id\":null") != null);
+
+    try d.shutdown();
+}
+
+test "awrd per-scope cookie jars land at distinct on-disk paths" {
+    // spec/subspecs/daemon-mode.md §2.4: each cookie_scope routes
+    // to its own jar file at $XDG_DATA_HOME/awr/cookies/<scope>.txt.
+    // We verify scope routing by issuing two fetches with different
+    // cookie_scope params and checking both per-scope files exist.
+    // The mock fixture doesn't return Set-Cookie, so the jars are
+    // empty — but the existence of the files at the spec-mandated
+    // paths proves the scope param is honored end-to-end.
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+    const pid = std.posix.system.getpid();
+
+    const data_home = try std.fmt.allocPrint(
+        allocator,
+        "/tmp/awrd-scope-data-{d}",
+        .{pid},
+    );
+    defer allocator.free(data_home);
+    std.Io.Dir.cwd().deleteTree(io, data_home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, data_home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, data_home);
+
+    var mock = try MockHandle.start(allocator, 18604);
+    defer mock.deinit();
+    var d = try DaemonHandle.startWith(allocator, "scope", 2000, data_home);
+    defer d.deinit();
+
+    // Two fetches at the same URL, different scope keys. The
+    // daemon spawns a fresh Page per request (slice 3 caching is
+    // disk-only), each Page writes its empty jar to the per-scope
+    // file at deinit.
+    const req_alpha = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fetch\"," ++
+        "\"params\":{\"url\":\"http://127.0.0.1:18604/webmcp_mock.html\"," ++
+        "\"cookie_scope\":\"alpha\"}}";
+    const resp_alpha = try d.rpc(req_alpha);
+    defer allocator.free(resp_alpha);
+    try testing.expect(std.mem.indexOf(u8, resp_alpha, "\"status\":200") != null);
+
+    const req_beta = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"fetch\"," ++
+        "\"params\":{\"url\":\"http://127.0.0.1:18604/webmcp_mock.html\"," ++
+        "\"cookie_scope\":\"beta\"}}";
+    const resp_beta = try d.rpc(req_beta);
+    defer allocator.free(resp_beta);
+    try testing.expect(std.mem.indexOf(u8, resp_beta, "\"status\":200") != null);
+
+    // Both per-scope files must exist at the spec-mandated location.
+    const path_alpha = try std.fmt.allocPrint(
+        allocator,
+        "{s}/awr/cookies/alpha.txt",
+        .{data_home},
+    );
+    defer allocator.free(path_alpha);
+    const path_beta = try std.fmt.allocPrint(
+        allocator,
+        "{s}/awr/cookies/beta.txt",
+        .{data_home},
+    );
+    defer allocator.free(path_beta);
+
+    // Stat each file — readFileAlloc returns an error if missing.
+    const alpha_bytes = try std.Io.Dir.cwd().readFileAlloc(io, path_alpha, allocator, .limited(4096));
+    defer allocator.free(alpha_bytes);
+    const beta_bytes = try std.Io.Dir.cwd().readFileAlloc(io, path_beta, allocator, .limited(4096));
+    defer allocator.free(beta_bytes);
+
+    // Sanity: the default scope file must NOT exist — proves the
+    // scope param actually drove path selection (not a hard-coded
+    // "default" path written regardless of the param).
+    const path_default = try std.fmt.allocPrint(
+        allocator,
+        "{s}/awr/cookies/default.txt",
+        .{data_home},
+    );
+    defer allocator.free(path_default);
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.cwd().readFileAlloc(io, path_default, allocator, .limited(4096)),
+    );
+
+    try d.shutdown();
+}
+
+test "awrd rejects path-traversal cookie_scope values" {
+    // Spec §2.4 doesn't enumerate validation, but a daemon that
+    // blindly slots scope into a filename is open to writes
+    // outside the cookies/ subdir. handleFetch must reject scopes
+    // containing `/`, `..`, etc. The error envelope is enough —
+    // we don't need to verify no file was written, the validation
+    // path runs before any file access.
+    const allocator = testing.allocator;
+    var d = try DaemonHandle.start(allocator, "scope-bad", 2000);
+    defer d.deinit();
+
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fetch\"," ++
+        "\"params\":{\"url\":\"http://127.0.0.1:1/\"," ++
+        "\"cookie_scope\":\"../../../etc/passwd\"}}";
+    const resp = try d.rpc(req);
+    defer allocator.free(resp);
+
+    try testing.expect(std.mem.indexOf(u8, resp, "\"error\"") != null);
+    try testing.expect(std.mem.indexOf(u8, resp, "InvalidCookieScope") != null);
 
     try d.shutdown();
 }
