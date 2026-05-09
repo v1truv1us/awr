@@ -920,6 +920,111 @@ test "awrd singleton: second daemon sees flock held, exits 0 with friendly messa
     );
 }
 
+test "awrd RSS cap: daemon shuts down cleanly when ru_maxrss exceeds AWR_DAEMON_MAX_RSS_MB" {
+    // T-55 / spec §2.5: after each request, daemon checks
+    // getrusage(RUSAGE_SELF).ru_maxrss; if it exceeds the cap,
+    // exits cleanly so the next CLI invocation respawns a fresh
+    // process. We set the cap to 1 MB — every page load
+    // comfortably exceeds that — so the very first request
+    // triggers shutdown. The reply must still be delivered
+    // (spec: "shuts down after the in-flight one completes").
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+    const pid = std.posix.system.getpid();
+
+    var mock = try MockHandle.start(allocator, 18608);
+    defer mock.deinit();
+
+    const tmp_dir = try std.fmt.allocPrint(
+        allocator,
+        "/tmp/awrd-rss-{d}",
+        .{pid},
+    );
+    defer allocator.free(tmp_dir);
+    std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, tmp_dir);
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("XDG_RUNTIME_DIR", tmp_dir);
+    // Idle far higher than the test runtime so we KNOW the
+    // shutdown was driven by RSS, not the idle path.
+    try env.put("AWR_DAEMON_IDLE_SEC", "600");
+    try env.put("AWR_DAEMON_MAX_RSS_MB", "1");
+
+    var child = try std.process.spawn(io, .{
+        .argv = &.{AWRD_BIN},
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .environ_map = &env,
+    });
+    errdefer child.kill(io);
+
+    // Wait for the socket to come up.
+    const sock_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/awrd-{d}.sock",
+        .{ tmp_dir, std.posix.system.geteuid() },
+    );
+    defer allocator.free(sock_path);
+    const ua = try std.Io.net.UnixAddress.init(sock_path);
+    var attempts: u8 = 0;
+    var stream = while (attempts < 200) : (attempts += 1) {
+        if (ua.connect(io)) |s| break s else |_| {
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(20), .awake) catch {};
+        }
+    } else return error.DaemonNotListening;
+
+    // Issue one fetch — the request itself must succeed
+    // (the reply is delivered BEFORE the RSS-driven shutdown).
+    const url = try std.fmt.allocPrint(
+        allocator,
+        "http://127.0.0.1:18608/webmcp_mock.html",
+        .{},
+    );
+    defer allocator.free(url);
+    const fetch_body = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fetch\",\"params\":{{\"url\":\"{s}\"}}}}",
+        .{url},
+    );
+    defer allocator.free(fetch_body);
+
+    var rbuf: [16 * 1024]u8 = undefined;
+    var wbuf: [16 * 1024]u8 = undefined;
+    {
+        var net_writer = stream.writer(io, &wbuf);
+        var net_reader = stream.reader(io, &rbuf);
+        try net_writer.interface.print(
+            "Content-Length: {d}\r\n\r\n{s}",
+            .{ fetch_body.len, fetch_body },
+        );
+        try net_writer.interface.flush();
+        const resp = try readFrame(io, &net_reader.interface, allocator);
+        defer allocator.free(resp);
+        // The reply landed — RSS cap fires AFTER the response
+        // is sent, per spec.
+        try testing.expect(std.mem.indexOf(u8, resp, "\"status\":200") != null);
+    }
+    stream.close(io);
+
+    // Daemon should now exit on its own. drainPipe + wait()
+    // hang until the daemon's stdio is closed (process exit).
+    const stdout = try drainPipe(io, allocator, &child.stdout.?);
+    defer allocator.free(stdout);
+    const stderr = try drainPipe(io, allocator, &child.stderr.?);
+    defer allocator.free(stderr);
+    const term = try child.wait(io);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+
+    // Stderr must mention the RSS shutdown reason (so we know
+    // it wasn't the idle-out path or some other failure).
+    try testing.expect(std.mem.indexOf(u8, stderr, "rss") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr, ">= cap 1MB") != null);
+}
+
 test "AWR_DAEMON=1 auto-spawns awrd when no daemon is running" {
     // T-53 / spec §2.5: when AWR_DAEMON=1 and the socket is
     // missing/refused, the CLI must double-fork+exec awrd, wait

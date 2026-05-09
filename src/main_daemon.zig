@@ -42,6 +42,15 @@ const WRITE_BUFFER_BYTES: usize = 16 * 1024;
 /// idle shutdown — useful for "stay up forever" debug runs).
 const DEFAULT_IDLE_SEC: u64 = 300; // 5 minutes per spec
 
+/// Default RSS cap in MB per spec §2.5. Override via
+/// `AWR_DAEMON_MAX_RSS_MB` (any positive integer; 0 disables the
+/// cap — useful for tests that intentionally allocate large
+/// pages, and for diagnosing leaks where you want the daemon to
+/// run unbounded). After each request the daemon checks
+/// `ru_maxrss`; if it exceeds the cap, it sets should_exit so the
+/// loop tears down cleanly after the current request's reply.
+const DEFAULT_MAX_RSS_MB: u64 = 1024; // 1 GB per spec
+
 /// How often the accept-poll wakes up to check the idle clock.
 /// Smaller = quicker shutdown after the deadline; larger = lower
 /// idle CPU. 1s strikes a reasonable balance for a daemon that
@@ -70,7 +79,13 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8) !v
     defer jar_cache.deinit(allocator, io);
 
     const idle_sec = readIdleSec();
-    log("awrd: listening on {s} version=0.0.{s} idle={d}s", .{ socket_path, build_opts.git_hash, idle_sec });
+    const max_rss_mb = readMaxRssMb();
+    log("awrd: listening on {s} version=0.0.{s} idle={d}s rss-cap={d}MB", .{
+        socket_path,
+        build_opts.git_hash,
+        idle_sec,
+        max_rss_mb,
+    });
 
     // Idle shutdown bookkeeping. `last_active_ms` tracks the wall
     // clock at the start of run() (so a daemon that gets no traffic
@@ -123,8 +138,44 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8) !v
             log("awrd: connection error: {t}", .{err});
         };
         last_active_ms = nowMs();
+
+        // Post-request RSS check (spec §2.5). If we've crossed
+        // the cap, set should_exit so the loop tears down after
+        // the *current* request — which has already replied above.
+        // The next CLI invocation will respawn a fresh daemon
+        // (start-from-scratch is cheap relative to leaking).
+        if (max_rss_mb != 0) {
+            const rss_mb = currentRssMb();
+            if (rss_mb >= max_rss_mb) {
+                log("awrd: rss {d}MB >= cap {d}MB, shutting down", .{ rss_mb, max_rss_mb });
+                should_exit = true;
+            }
+        }
     }
     log("awrd: shutdown complete", .{});
+}
+
+/// Current peak RSS in MB via getrusage(RUSAGE_SELF). `ru_maxrss`
+/// reports peak (high-water-mark) resident memory — never
+/// decreases over the process's lifetime, which matches what we
+/// want: a cap on "this daemon has demonstrated it can use this
+/// much, restart it before it does it again".
+///
+/// Unit conversion: macOS reports `ru_maxrss` in **bytes**;
+/// Linux and BSDs report **kilobytes**. We branch on the
+/// compile-time OS tag so the comparison against the MB cap is
+/// always apples-to-apples.
+fn currentRssMb() u64 {
+    var ru: std.posix.rusage = undefined;
+    ru = std.posix.getrusage(std.posix.system.rusage.SELF);
+    const max_rss = ru.maxrss;
+    if (max_rss <= 0) return 0;
+    const tag = @import("builtin").target.os.tag;
+    const bytes: u64 = switch (tag) {
+        .macos, .ios, .tvos, .watchos => @intCast(max_rss),
+        else => @as(u64, @intCast(max_rss)) * 1024, // KB → bytes
+    };
+    return bytes / (1024 * 1024);
 }
 
 /// Wall-clock millis via clock_gettime(REALTIME). Matches the helper
@@ -141,10 +192,20 @@ fn nowMs() i64 {
 /// `0` is a sentinel meaning "never idle-shut-down" — used by debug
 /// runs and any test that expects the daemon to stay up regardless.
 fn readIdleSec() u64 {
-    const raw = std.c.getenv("AWR_DAEMON_IDLE_SEC") orelse return DEFAULT_IDLE_SEC;
+    return readU64Env("AWR_DAEMON_IDLE_SEC", DEFAULT_IDLE_SEC);
+}
+
+/// Read `AWR_DAEMON_MAX_RSS_MB` from env, fall back to default (1024 MB).
+/// `0` disables the cap entirely.
+fn readMaxRssMb() u64 {
+    return readU64Env("AWR_DAEMON_MAX_RSS_MB", DEFAULT_MAX_RSS_MB);
+}
+
+fn readU64Env(name: [:0]const u8, default: u64) u64 {
+    const raw = std.c.getenv(name) orelse return default;
     const span = std.mem.sliceTo(raw, 0);
-    if (span.len == 0) return DEFAULT_IDLE_SEC;
-    return std.fmt.parseInt(u64, span, 10) catch DEFAULT_IDLE_SEC;
+    if (span.len == 0) return default;
+    return std.fmt.parseInt(u64, span, 10) catch default;
 }
 
 /// Per-scope cookie-jar cache for the daemon. One entry per scope

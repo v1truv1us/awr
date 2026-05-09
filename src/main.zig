@@ -186,18 +186,36 @@ fn connectWithRetry(
     return null;
 }
 
+/// Set SO_RCVTIMEO and SO_SNDTIMEO on a socket fd. Used to bound
+/// the ping path (spec §2.5: "100 ms deadline immediately after
+/// connect"). Best-effort — setsockopt failure is non-fatal,
+/// caller falls back to whatever the socket's natural timeout is.
+fn setSocketTimeoutMs(fd: std.posix.fd_t, timeout_ms: u32) void {
+    const tv: std.posix.timeval = .{
+        .sec = @intCast(timeout_ms / 1000),
+        .usec = @intCast((timeout_ms % 1000) * 1000),
+    };
+    const opt = std.mem.asBytes(&tv);
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, opt) catch {};
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, opt) catch {};
+}
+
 /// Send a `ping` JSON-RPC request and return the daemon's reported
 /// version (the value of `result.version`). Caller owns the
 /// returned slice. Errors out if the daemon doesn't respond within
-/// `total_ms` or returns a malformed envelope.
+/// `total_ms` (per spec §2.5: 100ms deadline) or returns a
+/// malformed envelope.
 fn pingForVersion(
     alloc: std.mem.Allocator,
     io: std.Io,
     stream: *std.Io.net.Stream,
-    total_ms: u64,
+    total_ms: u32,
 ) ![]u8 {
-    _ = total_ms; // TODO: per-request timeout. Today rely on the
-                  // daemon's own responsiveness; ping is fast.
+    // Apply the deadline at the kernel level via setsockopt so a
+    // hung daemon doesn't wedge the CLI. EAGAIN on read/write
+    // surfaces as a stream error which our caller treats as
+    // "respawn the daemon".
+    setSocketTimeoutMs(stream.socket.handle, total_ms);
 
     var rbuf: [4096]u8 = undefined;
     var wbuf: [4096]u8 = undefined;
