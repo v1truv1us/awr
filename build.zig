@@ -86,6 +86,7 @@ pub fn build(b: *std.Build) void {
     const test_doc_step = b.step("test-doc", "Run \xc2\xa78 \xe2\x86\x94 curated_cases doc-alignment check");
     const test_integration_step = b.step("test-integration", "Run binary-spawning Zig integration tests (requires built awr/awrd binaries)");
     const smoke_step = b.step("smoke", "Run mvp + regression smoke suites against the built binary");
+    const bench_daemon_step = b.step("bench-daemon", "Daemon vs per-process chained-flow benchmark (spec §4.5 gate)");
 
     // ── stb_image vendored paths ──────────────────────────────────────────
     // Header-only library at third_party/stb/stb_image.h with a single C
@@ -523,6 +524,17 @@ pub fn build(b: *std.Build) void {
         regression_smoke.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
         smoke_step.dependOn(&mvp_smoke.step);
         smoke_step.dependOn(&regression_smoke.step);
+
+        // `zig build bench-daemon` — daemon vs per-process chained-flow
+        // benchmark per spec/subspecs/daemon-mode.md §4.5. Defaults to
+        // hermetic localhost-mock mode (informational; small speedup
+        // because TLS+CA-bundle costs don't fire on HTTP). Set
+        // BENCH_HTTPS=<url> to gate the spec's 30%-floor against a
+        // real HTTPS endpoint. Depends on both binaries being built.
+        const bench_daemon = b.addSystemCommand(&.{ "scripts/bench_daemon.sh" });
+        bench_daemon.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+        bench_daemon.step.dependOn(&b.addInstallArtifact(awrd_exe, .{}).step);
+        bench_daemon_step.dependOn(&bench_daemon.step);
     }
 
     // ── BoringSSL smoke test (confirms libs link + headers resolve) ───────
