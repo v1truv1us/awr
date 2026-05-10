@@ -1332,6 +1332,22 @@ fn isLinkListTable(elem: *const dom.Element) bool {
 fn renderTable(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
     try state.ensureNewline(w);
 
+    // T-72: layout-table detection. Tables containing user-editable
+    // form controls (textarea / select / non-hidden input / button) are
+    // structural layout, not tabular data. Real data tables never have
+    // form fields in their cells — but legacy + old-school sites
+    // (Google's homepage, login pages, w3c form examples) routinely
+    // wrap forms in `<table>` for column alignment. The columnar
+    // renderer flattens cell content via collectTableCellDisplayText,
+    // which strips form controls down to text and never dispatches to
+    // renderTextarea / renderInput. Switching to block flow lets the
+    // cell's children reach their proper renderers and produce visible
+    // input boxes.
+    if (containsLayoutFormControl(elem)) {
+        try renderChildren(state, w, elem);
+        return;
+    }
+
     // Collect all <tr> rows (may be inside thead/tbody/tfoot).
     var rows: std.ArrayList(*const dom.Element) = .empty;
     defer rows.deinit(state.allocator);
@@ -1496,6 +1512,24 @@ fn measureWrappedWidth(text: []const u8, width: usize) usize {
         max_line = @max(max_line, line.len);
     }
     return max_line;
+}
+
+/// True if any descendant of `elem` is a user-editable form control.
+/// Hidden inputs don't count (CSRF round-trip helpers don't make
+/// a table "interactive"). Buttons + select + textarea + non-hidden
+/// input do.
+fn containsLayoutFormControl(elem: *const dom.Element) bool {
+    for (elem.children.items) |child| {
+        if (child != .element) continue;
+        const e = child.element;
+        if (eql(e.tag, "textarea") or eql(e.tag, "select") or eql(e.tag, "button")) return true;
+        if (eql(e.tag, "input")) {
+            const t = e.getAttribute("type") orelse "text";
+            if (!std.ascii.eqlIgnoreCase(t, "hidden")) return true;
+        }
+        if (containsLayoutFormControl(e)) return true;
+    }
+    return false;
 }
 
 fn collectTableCellDisplayText(

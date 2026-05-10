@@ -29,7 +29,37 @@ pub const Metrics = struct {
 
 pub fn chooseContentRoot(doc: *const dom.Document) ?*const dom.Element {
     const body = doc.body() orelse return doc.htmlElement();
+    const candidate = pickContentCandidate(body);
 
+    // T-72 — preserve interactive forms.
+    //
+    // The candidate may be a content-only sub-region that excludes
+    // the page's primary form. For "form-centric" pages — Google,
+    // DuckDuckGo, login pages, search engines — the form *is* the
+    // page; pruning it away leaves a useless render with no input
+    // box and no submit button.
+    //
+    // Rule: if `body` contains a non-trivial form (any
+    // user-editable input or submit button) that is *not* an
+    // ancestor- or descendant-relation to the chosen candidate,
+    // fall back to body. Trivial forms (e.g. a hidden newsletter
+    // signup nested in a footer) don't trigger fallback because
+    // they have no editable surface.
+    //
+    // The candidate stays as-chosen when it already contains the
+    // form, OR when there's no form at all (the heuristic's
+    // existing behavior is correct for article pages).
+    if (candidate != body and bodyHasFormOutside(body, candidate)) {
+        return body;
+    }
+
+    return candidate;
+}
+
+/// Inner helper for `chooseContentRoot` — runs the historical
+/// content-picking logic without the form-preservation guard. Lets
+/// the guard layer above this function compose cleanly.
+fn pickContentCandidate(body: *const dom.Element) *const dom.Element {
     if (findFirstByTag(body, "main")) |elem| {
         if (hasMeaningfulContent(elem)) {
             if (preferLinkListInsideContainer(elem)) |inner| return inner;
@@ -55,6 +85,43 @@ pub fn chooseContentRoot(doc: *const dom.Document) ?*const dom.Element {
         if (best.score >= 6.0) return elem;
     }
     return body;
+}
+
+/// Walk the subtree rooted at `body` looking for any user-editable
+/// form control (`input` text-like / textarea / select / submit
+/// button) that is **not** inside `candidate`. Returns true if
+/// such a control exists — meaning the candidate would prune
+/// interactive surface area the user expects.
+///
+/// Hidden inputs are skipped — they're CSRF round-trip helpers,
+/// not user-facing controls. Forms-with-only-hidden-fields don't
+/// trigger fallback.
+fn bodyHasFormOutside(body: *const dom.Element, candidate: *const dom.Element) bool {
+    return walkLooksForOutsideForm(body, candidate);
+}
+
+fn walkLooksForOutsideForm(elem: *const dom.Element, candidate: *const dom.Element) bool {
+    if (elem == candidate) return false; // skip subtree under candidate
+    if (isUserVisibleFormControl(elem)) return true;
+    for (elem.children.items) |child| {
+        if (child == .element) {
+            if (walkLooksForOutsideForm(child.element, candidate)) return true;
+        }
+    }
+    return false;
+}
+
+fn isUserVisibleFormControl(elem: *const dom.Element) bool {
+    if (eql(elem.tag, "textarea")) return true;
+    if (eql(elem.tag, "select")) return true;
+    if (eql(elem.tag, "button")) return true;
+    if (eql(elem.tag, "input")) {
+        const t = elem.getAttribute("type") orelse "text";
+        // Hidden inputs are CSRF round-trip helpers — ignore them.
+        if (std.ascii.eqlIgnoreCase(t, "hidden")) return false;
+        return true;
+    }
+    return false;
 }
 
 /// Wraps `bestLinkListContainer` with a "the inner candidate must dominate

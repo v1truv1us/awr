@@ -352,6 +352,17 @@ pub const Page = struct {
     /// of `processHtml` calls. Set via `setMetricsSink`.
     metrics_sink: ?*telemetry.SessionMetrics = null,
 
+    /// When true, processHtml skips script execution entirely.
+    /// Used by `awr browse --no-js`, `awr render --no-js`, etc.
+    /// for sites where the JS layer detects a non-Chromium
+    /// environment and falls into a UI-degrading downgrade path
+    /// (e.g. Google's homepage strips its `<textarea>` search box
+    /// when run in a stripped-down JS environment). Disabling
+    /// scripts gives the user back the original server-rendered
+    /// HTML, which on most sites is enough to read + fill forms.
+    /// Default false — JS runs normally per spec.
+    disable_scripts: bool = false,
+
     /// Initialise a new Page with default client options.
     /// `io` is threaded through to the HTTP client for all network fetches
     /// and to `std.Io.Dir.readFileAlloc` for `file://` external scripts.
@@ -1026,15 +1037,24 @@ pub const Page = struct {
         // Pages with many same-origin scripts (github, go.dev) win big from
         // overlapping the network. The cache lives until processHtml returns;
         // executeScriptsInElement consults it, falls back on miss.
+        // Skipped entirely when disable_scripts is set — saves the network
+        // round-trips along with the script execution.
         var prefetch_cache: ScriptPrefetchCache = .{ .allocator = gpa };
         defer prefetch_cache.deinit();
-        if (zig_doc.htmlElement()) |root| {
-            self.prefetchExternalScripts(&prefetch_cache, root, url) catch {};
+        if (!self.disable_scripts) {
+            if (zig_doc.htmlElement()) |root| {
+                self.prefetchExternalScripts(&prefetch_cache, root, url) catch {};
+            }
         }
         probe.mark("prefetch");
 
         // ── Execute <script> tags (inline + external src=) in document order.
-        if (zig_doc.htmlElement()) |root| self.executeScriptsInElement(root, url, &prefetch_cache);
+        // T-72: --no-js mode skips this entirely so pages whose JS removes
+        // their own UI in a non-Chromium environment (Google's homepage
+        // textarea, X.com's full SPA) still show the server-rendered HTML.
+        if (!self.disable_scripts) {
+            if (zig_doc.htmlElement()) |root| self.executeScriptsInElement(root, url, &prefetch_cache);
+        }
         probe.mark("scripts");
 
         bridge.setDocumentReadyState(&self.js, "interactive");

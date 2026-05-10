@@ -716,8 +716,11 @@ const USAGE =
     \\AWR — Agentic Web Runtime
     \\
     \\Usage:
-    \\  awr browse <url>             Open URL in interactive terminal browser
-    \\  awr render <url> [--width N] [--images=MODE]
+    \\  awr browse <url> [--no-js]   Open URL in interactive terminal browser.
+    \\                                 --no-js disables script execution (escape hatch
+    \\                                 for sites whose JS strips their own UI in a
+    \\                                 non-Chromium env, e.g. Google's homepage).
+    \\  awr render <url> [--width N] [--images=MODE] [--no-js]
     \\                               Load URL, print the rendered terminal text non-interactively
     \\                               --images=auto|kitty|iterm|sixel|braille|none (default: auto)
     \\  awr <url> [--format=md]      Load URL/path, print JSON envelope. Default body_text is plain text;
@@ -916,10 +919,32 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     // Subcommand: awr browse <url>
     if (std.mem.eql(u8, args[1], "browse")) {
         if (args.len < 3) {
-            try stdoutWrite(io, "usage: awr browse <url>\n");
+            try stdoutWrite(io, "usage: awr browse <url> [--no-js]\n");
             std.process.exit(1);
         }
-        try browser_mod.run(alloc, io, args[2]);
+        // Parse --no-js flag and a positional URL. Order-agnostic:
+        // either `awr browse --no-js https://…` or `awr browse https://… --no-js`.
+        var url_arg: ?[]const u8 = null;
+        var disable_scripts = false;
+        for (args[2..]) |arg| {
+            if (std.mem.eql(u8, arg, "--no-js") or std.mem.eql(u8, arg, "--no-script")) {
+                disable_scripts = true;
+            } else if (std.mem.startsWith(u8, arg, "--")) {
+                try stdoutWrite(io, "browse: unknown flag: ");
+                try stdoutWrite(io, arg);
+                try stdoutWrite(io, "\n");
+                std.process.exit(1);
+            } else if (url_arg == null) {
+                url_arg = arg;
+            } else {
+                std.process.fatal("browse: unexpected positional arg '{s}'", .{arg});
+            }
+        }
+        const url = url_arg orelse {
+            try stdoutWrite(io, "usage: awr browse <url> [--no-js]\n");
+            std.process.exit(1);
+        };
+        try browser_mod.runWith(alloc, io, url, .{ .disable_scripts = disable_scripts });
         return;
     }
 
@@ -940,6 +965,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         // (sub-step 4f) where it is consumed. Validating the flag eagerly
         // gives users an immediate error on typos.
         var image_mode: image_protocol.Mode = .auto;
+        var disable_scripts = false;
         var i: usize = 3;
         while (i < args.len) : (i += 1) {
             if (std.mem.eql(u8, args[i], "--width") and i + 1 < args.len) {
@@ -957,6 +983,8 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
                     std.process.fatal("render: --images expects auto|kitty|iterm|sixel|braille|none, got '{s}'", .{args[i + 1]});
                 };
                 i += 1;
+            } else if (std.mem.eql(u8, args[i], "--no-js") or std.mem.eql(u8, args[i], "--no-script")) {
+                disable_scripts = true;
             } else {
                 std.process.fatal("render: unknown arg '{s}'", .{args[i]});
             }
@@ -985,6 +1013,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         var p = try page_mod.Page.init(alloc, io);
         defer p.deinit();
         p.metrics_sink = &metrics;
+        p.disable_scripts = disable_scripts;
         var result = loadPage(&p, alloc, io, args[2]) catch |err| {
             fatalLoadErrorWithMetrics(&metrics, alloc, io, "loading", args[2], err);
         };
@@ -1390,12 +1419,21 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     // existing JSON envelope so JSON-aware callers don't have to switch
     // subcommands). Default `--format=json` keeps prior behavior.
     var format_md = false;
+    var disable_scripts = false;
     var url_arg: ?[]const u8 = null;
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--format=markdown") or std.mem.eql(u8, arg, "--format=md")) {
             format_md = true;
         } else if (std.mem.eql(u8, arg, "--format=json")) {
             format_md = false;
+        } else if (std.mem.eql(u8, arg, "--no-js") or std.mem.eql(u8, arg, "--no-script")) {
+            // Per-site escape hatch (T-72). Use sparingly — most
+            // modern pages legitimately depend on JS for display
+            // (lazy-loaded articles, hydrated forms, dropdowns).
+            // Useful when a page's JS detects a non-Chromium
+            // environment and strips its own UI: Google's
+            // homepage textarea is the motivating case.
+            disable_scripts = true;
         } else if (std.mem.startsWith(u8, arg, "--")) {
             try stdoutWrite(io, "awr: unknown flag: ");
             try stdoutWrite(io, arg);
@@ -1444,6 +1482,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     var p = try page_mod.Page.init(alloc, io);
     defer p.deinit();
     p.metrics_sink = &metrics;
+    p.disable_scripts = disable_scripts;
     if (t_startup_done != 0) {
         const elapsed = nowMs() - t_startup_done;
         if (timing_on) std.debug.print("[timing] page_init={d}ms\n", .{elapsed});

@@ -738,11 +738,28 @@ pub const BrowserSession = struct {
 };
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, start_url: []const u8) !void {
+    return runWith(allocator, io, start_url, .{});
+}
+
+pub const RunOptions = struct {
+    /// When true, the page pipeline skips script execution. Useful
+    /// against pages whose JS strips its own UI in non-Chromium
+    /// environments (Google's homepage, similar SPAs). T-72.
+    disable_scripts: bool = false,
+};
+
+pub fn runWith(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    start_url: []const u8,
+    opts: RunOptions,
+) !void {
     var terminal = try tui.Terminal.init();
     defer terminal.deinit();
 
     var session = try BrowserSession.init(allocator, io);
     defer session.deinit();
+    session.page.disable_scripts = opts.disable_scripts;
     const initial_size = terminal.size();
     try session.setViewportSize(initial_size.cols, initial_size.rows);
     try session.navigateTo(start_url);

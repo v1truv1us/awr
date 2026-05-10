@@ -1,4 +1,10 @@
-ziglang[1]/zig[2]Public  •                              Uh oh!
+Skip to content[1][Header omitted]
+
+You signed in with another tab or window.Reloadto refresh your session.You
+signed out in another tab or window.Reloadto refresh your session.You switched
+accounts on another tab or window.Reloadto refresh your session.[]Dismiss
+alert[]{{ message }}
+ziglang[2]/zig[3]Public  •                              Uh oh!
 
 
                              There was an error while loading.Please reload
@@ -6,73 +12,54 @@ ziglang[1]/zig[2]Public  •                              Uh oh!
 
 
 
-  •       Notifications[3]You must be signed in to change notification
+  •       Notifications[4]You must be signed in to change notification
       settings
-  •       Fork3.1k[4]
-  •       Star42.9k[5]
+  •       Fork3.1k[5]
+  •       Star42.9k[6]
 
 [Navigation omitted]
 
-[6][ master]Branches[7]Tags[8][9][10][Go to file][Code][]Open more actions
+[7][ master]Branches[8]Tags[9][10][11][Go to file][Code][]Open more actions
 menuFolders and files
 -----------------
 
- Name               Name             Last commit   Last commit date 
-                                     message                        
- Latest commit                                                     
- History36,058                                                      
- Commits 36,058                                                     
- Commits                                                            
- .forgejo           .forgejo                                      
- ci                 ci                                            
- cmake              cmake                                         
- doc                doc                                           
- lib                lib                                           
- src                src                                           
- stage1             stage1                                        
- test               test                                          
- tools              tools                                         
- .gitattributes     .gitattributes                                
- .gitignore         .gitignore                                    
- .mailmap           .mailmap                                      
- CMakeLists.txt     CMakeLists.txt                                
- LICENSE            LICENSE                                       
- README.md          README.md                                     
- bootstrap.c        bootstrap.c                                   
- build.zig          build.zig                                     
- build.zig.zon      build.zig.zon                                 
- View all files                                                     
-Repository files navigation
+NameNameLast commit messageLast commit dateLatest commit
+-------------
+
+ History
+-------
+
+36,058 Commits[12][13]36,058 Commits.forgejo[14].forgejo[15]  ci[16]ci[17]  cmake[18]cmake[19]  doc[20]doc[21]  lib[22]lib[23]  src[24]src[25]  stage1[26]stage1[27]  test[28]test[29]  tools[30]tools[31]  .gitattributes[32].gitattributes[33]  .gitignore[34].gitignore[35]  .mailmap[36].mailmap[37]  CMakeLists.txt[38]CMakeLists.txt[39]  LICENSE[40]LICENSE[41]  README.md[42]README.md[43]  bootstrap.c[44]bootstrap.c[45]  build.zig[46]build.zig[47]  build.zig.zon[48]build.zig.zon[49]  [View all files]Repository files navigation
 ---------------------------
 
 [Navigation omitted]
 
 
-Moved to Codeberg[49]
+Moved to Codeberg[50]
 This repository is not mirrored.
 
 About
 -----
 
 Moved to Codeberg
-ziglang.org/news/migrating-from-github-to-codeberg/[50]Topics
+ziglang.org/news/migrating-from-github-to-codeberg/[51]Topics
 
-language[51]compiler[52]zig[53]Resources
+language[52]compiler[53]zig[54]Resources
 
-Readme[54]License
+Readme[55]License
 
-MIT license[55]Uh oh!
+MIT license[56]Uh oh!
 
 
 There was an error while loading.Please reload this page.
 
-Activity[56]Custom properties[57]Stars
+Activity[57]Custom properties[58]Stars
 
-42.9kstars[58]Watchers
+42.9kstars[59]Watchers
 
-384watching[59]Forks
+384watching[60]Forks
 
-3.1kforks[60]Report repository[61]Sponsor this project
+3.1kforks[61]Report repository[62]Sponsor this project
 --------------------
 
 Uh oh!
@@ -80,7 +67,7 @@ Uh oh!
 
 There was an error while loading.Please reload this page.
 
-  •       https://ziglang.org/zsf[62]
+  •       https://ziglang.org/zsf[63]
 Uh oh!
 
 
@@ -100,10 +87,13 @@ There was an error while loading.Please reload this page.
 Languages
 ---------
 
-  •       Zig98.4%[63]
-  •       C1.1%[64]
-  •       C++0.2%[65]
-  •       Python0.1%[66]
-  •       CMake0.1%[67]
-  •       JavaScript0.1%[68]
+  •       Zig98.4%[64]
+  •       C1.1%[65]
+  •       C++0.2%[66]
+  •       Python0.1%[67]
+  •       CMake0.1%[68]
+  •       JavaScript0.1%[69]
 
+[Footer omitted]
+
+[]You can’t perform that action at this time.[]
