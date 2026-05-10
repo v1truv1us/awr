@@ -33,6 +33,7 @@ const telemetry = @import("telemetry");
 pub const CookieJar = cookie_mod.CookieJar;
 pub const Client = client.Client;
 pub const ClientOptions = client.ClientOptions;
+pub const SessionMetrics = telemetry.SessionMetrics;
 pub const loadCookiesFromDisk = client.loadCookiesFromDisk;
 pub const saveCookiesToDisk = client.saveCookiesToDisk;
 

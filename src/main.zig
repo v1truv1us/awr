@@ -468,16 +468,30 @@ fn runViaDaemon(
         filled += n;
     }
 
-    // Slice 4 forwards the daemon's envelope verbatim to stdout. The
-    // shape is `{"jsonrpc":"2.0","id":1,"result":{...envelope...}}`
-    // — extract `result` so callers see the same shape as the
-    // in-process path. format_md is a future-work item: we'd ask
-    // the daemon for body_md, or post-process body_text. Today we
-    // just emit the daemon's body_text envelope unchanged when the
-    // flag is set so call sites don't crash.
+    // Forward the daemon's envelope to stdout. The shape is
+    // `{"jsonrpc":"2.0","id":1,"result":{...envelope...}}` —
+    // extract `result` so callers see the same shape as the
+    // in-process path. format_md is a future-work item.
     _ = format_md;
     if (extractJsonRpcResult(resp_body)) |result_slice| {
-        try stdoutWrite(io, result_slice);
+        // T-58: parse the daemon's telemetry side-channel out of
+        // the envelope. Spec §2.2: CLI owns AWR_TELEMETRY emission.
+        // The daemon includes per-fetch phase timings under the
+        // `telemetry` key; we merge them into the local
+        // SessionMetrics and emit through the existing path. The
+        // user-facing stdout envelope MUST NOT include `telemetry`
+        // (would be double-emission for AWR_TELEMETRY users and
+        // shape-incompatible with the in-process path).
+        var metrics = telemetry.SessionMetrics.init();
+        metrics.url = url;
+        defer telemetry.emit(&metrics, alloc, io);
+        if (extractJsonField(result_slice, "telemetry")) |tel_json| {
+            mergeDaemonTelemetry(&metrics, tel_json);
+        }
+        const stripped = try stripTelemetryField(alloc, result_slice);
+        defer alloc.free(stripped);
+        metrics.envelope_bytes = stripped.len + 1; // +1 for newline
+        try stdoutWrite(io, stripped);
         try stdoutWrite(io, "\n");
     } else {
         // Daemon returned an error envelope — surface it verbatim
@@ -486,6 +500,169 @@ fn runViaDaemon(
         try stdoutWrite(io, "\n");
         std.process.exit(1);
     }
+}
+
+/// Extract the JSON value (object, array, string, or number) for the
+/// top-level field `name` from `obj`. Returns the raw byte slice of
+/// the value, or null if the field is missing. Operates on the
+/// daemon's well-known envelope shape — we don't pull a full JSON
+/// parser into main.zig for this. Limitation: works only for
+/// string-typed JSON keys with no whitespace before/after the colon
+/// in the daemon's emit, which the daemon writeJsonStr guarantees.
+fn extractJsonField(obj: []const u8, name: []const u8) ?[]const u8 {
+    // Build a search needle: `"<name>":`.
+    var needle_buf: [128]u8 = undefined;
+    if (name.len + 4 > needle_buf.len) return null;
+    needle_buf[0] = '"';
+    @memcpy(needle_buf[1 .. 1 + name.len], name);
+    needle_buf[1 + name.len] = '"';
+    needle_buf[2 + name.len] = ':';
+    const needle = needle_buf[0 .. 3 + name.len];
+    const idx = std.mem.indexOf(u8, obj, needle) orelse return null;
+    const i = idx + needle.len;
+    if (i >= obj.len) return null;
+
+    return readJsonValue(obj, i);
+}
+
+/// Walk a JSON value starting at `start` and return the slice
+/// covering it. Handles objects, arrays, strings, numbers, true/false/null.
+fn readJsonValue(obj: []const u8, start: usize) ?[]const u8 {
+    var i = start;
+    if (i >= obj.len) return null;
+    const c0 = obj[i];
+    if (c0 == '{' or c0 == '[') {
+        const open = c0;
+        const close: u8 = if (open == '{') '}' else ']';
+        var depth: i32 = 0;
+        var in_string = false;
+        var escape = false;
+        while (i < obj.len) : (i += 1) {
+            const c = obj[i];
+            if (in_string) {
+                if (escape) {
+                    escape = false;
+                    continue;
+                }
+                if (c == '\\') {
+                    escape = true;
+                    continue;
+                }
+                if (c == '"') in_string = false;
+                continue;
+            }
+            if (c == '"') {
+                in_string = true;
+            } else if (c == open) {
+                depth += 1;
+            } else if (c == close) {
+                depth -= 1;
+                if (depth == 0) return obj[start .. i + 1];
+            }
+        }
+        return null;
+    }
+    if (c0 == '"') {
+        var escape = false;
+        var j = i + 1;
+        while (j < obj.len) : (j += 1) {
+            const c = obj[j];
+            if (escape) {
+                escape = false;
+                continue;
+            }
+            if (c == '\\') {
+                escape = true;
+                continue;
+            }
+            if (c == '"') return obj[start .. j + 1];
+        }
+        return null;
+    }
+    // Bare value (number/true/false/null) — read until separator.
+    while (i < obj.len) : (i += 1) {
+        const c = obj[i];
+        if (c == ',' or c == '}' or c == ']') return obj[start..i];
+    }
+    return obj[start..];
+}
+
+/// Populate the CLI-side SessionMetrics from the daemon's telemetry
+/// JSON object. We pluck the few keys we actually care about
+/// (timings); the rest stay at defaults. The daemon's
+/// SessionMetrics.writeJson uses the same field names, so mapping
+/// is a direct lookup.
+fn mergeDaemonTelemetry(metrics: *telemetry.SessionMetrics, tel: []const u8) void {
+    setI64Field(&metrics.navigate_fetch_ms, tel, "navigate_fetch_ms");
+    setI64Field(&metrics.process_html_ms, tel, "process_html_ms");
+    setI64Field(&metrics.page_init_ms, tel, "page_init_ms");
+    setI64Field(&metrics.json_emit_ms, tel, "json_emit_ms");
+    setI64Field(&metrics.js_reset_ms, tel, "js_reset_ms");
+    setI64Field(&metrics.parse_ms, tel, "parse_ms");
+    setI64Field(&metrics.bridge_ms, tel, "bridge_ms");
+    setI64Field(&metrics.prefetch_ms, tel, "prefetch_ms");
+    setI64Field(&metrics.scripts_ms, tel, "scripts_ms");
+    setI64Field(&metrics.drain_interactive_ms, tel, "drain_interactive_ms");
+    setI64Field(&metrics.drain_load_ms, tel, "drain_load_ms");
+    setI64Field(&metrics.extract_ms, tel, "extract_ms");
+    if (extractJsonField(tel, "status")) |s| {
+        metrics.status = std.fmt.parseInt(u16, s, 10) catch null;
+    }
+    if (extractJsonField(tel, "body_bytes")) |s| {
+        metrics.body_bytes = std.fmt.parseInt(usize, s, 10) catch 0;
+    }
+    if (extractJsonField(tel, "ext_fetch_count")) |s| {
+        metrics.ext_fetch_count = std.fmt.parseInt(u32, s, 10) catch 0;
+    }
+    if (extractJsonField(tel, "ext_fetch_total_ms")) |s| {
+        metrics.ext_fetch_total_ms = std.fmt.parseInt(i64, s, 10) catch 0;
+    }
+    if (extractJsonField(tel, "ext_fetch_bytes")) |s| {
+        metrics.ext_fetch_bytes = std.fmt.parseInt(usize, s, 10) catch 0;
+    }
+    // protocol_main is a quoted string; trim the surrounding quotes.
+    if (extractJsonField(tel, "protocol_main")) |s| {
+        if (s.len >= 2 and s[0] == '"' and s[s.len - 1] == '"') {
+            // SessionMetrics.protocol_main expects a static-lifetime
+            // slice (`pub fn tag(...)` returns `[]const u8` from
+            // a comptime-known set). The daemon's wire value
+            // matches that set, so we pin it to a fixed table.
+            const inner = s[1 .. s.len - 1];
+            if (std.mem.eql(u8, inner, "std")) {
+                metrics.protocol_main = "std";
+            } else if (std.mem.eql(u8, inner, "h1.1")) {
+                metrics.protocol_main = "h1.1";
+            } else if (std.mem.eql(u8, inner, "h2")) {
+                metrics.protocol_main = "h2";
+            }
+        }
+    }
+}
+
+fn setI64Field(slot: *i64, tel: []const u8, name: []const u8) void {
+    const v = extractJsonField(tel, name) orelse return;
+    slot.* = std.fmt.parseInt(i64, v, 10) catch slot.*;
+}
+
+/// Return a copy of `result` with the `,"telemetry":{...}` field
+/// removed. The user-facing stdout shape mirrors the in-process
+/// path, which never includes telemetry inline. Caller frees the
+/// returned slice.
+fn stripTelemetryField(alloc: std.mem.Allocator, result: []const u8) ![]u8 {
+    const needle = ",\"telemetry\":";
+    const idx = std.mem.indexOf(u8, result, needle) orelse {
+        // No telemetry field — return a verbatim copy. This is the
+        // pre-T-58 daemon path or a daemon error envelope.
+        return alloc.dupe(u8, result);
+    };
+    const value_start = idx + needle.len;
+    const tel_value = readJsonValue(result, value_start) orelse return alloc.dupe(u8, result);
+    const value_end = value_start + tel_value.len;
+    const out_len = result.len - (value_end - idx);
+    var out = try alloc.alloc(u8, out_len);
+    @memcpy(out[0..idx], result[0..idx]);
+    @memcpy(out[idx..], result[value_end..]);
+    return out;
 }
 
 /// Extract the value of the top-level `"result"` field from a

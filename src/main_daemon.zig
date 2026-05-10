@@ -25,6 +25,7 @@ const page_mod = @import("page");
 const CookieJar = page_mod.CookieJar;
 const Client = page_mod.Client;
 const ClientOptions = page_mod.ClientOptions;
+const SessionMetrics = page_mod.SessionMetrics;
 
 /// Maximum body bytes per request frame. 1 MiB is generous for v1
 /// (typical fetch param JSON is well under 1 KB; even multi-redirect
@@ -457,15 +458,29 @@ fn handleFetch(
     var p = try page_mod.Page.initShared(allocator, io, shared_client);
     defer p.deinit();
 
+    // T-58: per-fetch metrics sink so phase timings reach the
+    // CLI client. The daemon doesn't EMIT telemetry itself
+    // (spec §2.2: "CLI client owns AWR_TELEMETRY semantics");
+    // it just collects and serializes for the response.
+    var metrics = SessionMetrics.init();
+    metrics.url = url;
+    p.metrics_sink = &metrics;
+
     var result = if (is_post)
         try p.navigatePost(url, body_opt orelse "")
     else
         try p.navigate(url);
     defer result.deinit();
+    metrics.status = result.status;
+    metrics.body_bytes = result.body_text.len;
 
     // Build the result envelope per spec §2.3. Mirrors the shape
     // emitted by main.zig's default JSON path so daemon callers and
-    // direct CLI users see identical fields.
+    // direct CLI users see identical fields. Includes the
+    // `telemetry` field per spec §2.2 / §4.6 so the CLI can emit
+    // the daemon's per-fetch phase timings (page_init_ms,
+    // navigate_fetch_ms, sub-phase timings) under its existing
+    // AWR_TELEMETRY destination.
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     try out.append(allocator, '{');
@@ -482,6 +497,8 @@ fn handleFetch(
     if (result.window_data) |wd| try out.appendSlice(allocator, wd) else try out.appendSlice(allocator, "null");
     try out.appendSlice(allocator, ",\"tools\":");
     if (result.tools_json) |tj| try out.appendSlice(allocator, tj) else try out.appendSlice(allocator, "[]");
+    try out.appendSlice(allocator, ",\"telemetry\":");
+    try appendTelemetryJson(&out, allocator, &metrics);
     try out.append(allocator, '}');
 
     try jsonrpc.writeSuccess(wshim, allocator, id_json, out.items);
@@ -492,6 +509,25 @@ fn handleFetch(
     // crashes. Failures are logged but non-fatal — the next request
     // still uses the in-memory state.
     jar_cache.persist(entry, io);
+}
+
+/// Serialize `metrics` to JSON and append into `list`. Reuses
+/// SessionMetrics.writeJson — the canonical serializer that
+/// telemetry.emit also uses, so daemon and CLI produce identical
+/// shape. Trims the trailing `\n` writeJson emits (it's intended
+/// for JSON-Lines output to a file, not for embedding).
+fn appendTelemetryJson(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    metrics: *const SessionMetrics,
+) !void {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try metrics.writeJson(&aw.writer);
+    var bytes = aw.written();
+    // Strip the trailing newline writeJson appends for JSONL.
+    if (bytes.len > 0 and bytes[bytes.len - 1] == '\n') bytes = bytes[0 .. bytes.len - 1];
+    try list.appendSlice(allocator, bytes);
 }
 
 /// Append `s` as a JSON-quoted string into `list`. Mirrors the
