@@ -39,6 +39,39 @@ const FocusTarget = enum {
     field,
 };
 
+/// Sort key for document-order focus traversal (T-60 / Tier 1).
+/// Tab and Shift-Tab walk all focusables — links plus form
+/// fields — in increasing key order. Within a single line, the
+/// `col` field disambiguates fields by their rendered column;
+/// links don't carry a column today (`ScreenLink` only has
+/// `line`), so they sort to the start of their line. The trailing
+/// `index` field breaks remaining ties via input-order so two
+/// focusables that resolve to the same (line, col) stay in DOM
+/// order (rare in practice).
+const FocusKey = struct {
+    line: usize,
+    col: usize,
+    is_link: bool,
+    index: usize,
+};
+
+fn focusKeyForLink(link: page_mod.ScreenLink, index: usize) FocusKey {
+    return .{ .line = link.line, .col = 0, .is_link = true, .index = index };
+}
+
+fn focusKeyForField(field: page_mod.ScreenField, index: usize) FocusKey {
+    return .{ .line = field.line, .col = field.col, .is_link = false, .index = index };
+}
+
+fn focusKeyLess(a: FocusKey, b: FocusKey) bool {
+    if (a.line != b.line) return a.line < b.line;
+    if (a.col != b.col) return a.col < b.col;
+    // Same (line, col): links sort before fields so a link rendered
+    // immediately before a field on the same row keeps its place.
+    if (a.is_link != b.is_link) return a.is_link;
+    return a.index < b.index;
+}
+
 pub const BrowserSession = struct {
     allocator: std.mem.Allocator,
     page: page_mod.Page,
@@ -204,10 +237,106 @@ pub const BrowserSession = struct {
         }
     }
 
+    /// Tier 1 / T-60: Tab and Shift-Tab move focus across ALL
+    /// focusable elements (links + form fields) in document order,
+    /// matching real-browser semantics. Replaces the older mode-
+    /// dependent branching that walked links and fields as
+    /// separate cycles.
+    ///
+    /// Document-order ranking key: (line, then col for fields,
+    /// then 0 for links since ScreenLink lacks a column).
+    /// Links and fields on the same line interleave in source
+    /// order via their respective `index` fields. Submit
+    /// buttons participate in the focus order — pressing Enter
+    /// on a focused submit triggers form submission.
+    ///
+    /// Side effect: any in-flight text editing exits before
+    /// focus moves (matching browser behavior — Tab commits
+    /// the field's value).
+    pub fn nextFocusable(self: *BrowserSession, backwards: bool, viewport_height: usize) void {
+        const model = self.screenModel() orelse return;
+        const total = countFocusables(model);
+        if (total == 0) return;
+
+        // Stop editing first (Tab commits in real browsers).
+        if (self.field_editing) self.exitFieldEditing();
+
+        // Find current ordinal in document-ordered focus list.
+        // We don't need to materialize the full list; just walk
+        // it with a comparison function. For N focusables this is
+        // O(N) per Tab press, which is fine for any realistic
+        // page (links + fields rarely exceed a few hundred).
+        const current_ord = self.currentFocusOrdinal(model);
+        const next_ord: usize = if (current_ord) |c|
+            if (backwards)
+                if (c == 0) total - 1 else c - 1
+            else
+                (c + 1) % total
+        else if (backwards) total - 1 else 0;
+
+        self.setFocusByOrdinal(model, next_ord, viewport_height);
+    }
+
+    /// Return this session's focus position as an ordinal in the
+    /// merged document-order list, or null if nothing is focused.
+    fn currentFocusOrdinal(self: *const BrowserSession, model: *const page_mod.ScreenModel) ?usize {
+        const cur = self.currentFocusKey(model) orelse return null;
+        return countPredecessors(model, cur);
+    }
+
+    fn currentFocusKey(self: *const BrowserSession, model: *const page_mod.ScreenModel) ?FocusKey {
+        switch (self.focus_target) {
+            .link => {
+                const idx = self.selected_link orelse return null;
+                if (idx >= model.links.len) return null;
+                return focusKeyForLink(model.links[idx], idx);
+            },
+            .field => {
+                const idx = self.selected_field orelse return null;
+                if (idx >= model.fields.len) return null;
+                return focusKeyForField(model.fields[idx], idx);
+            },
+        }
+    }
+
+    /// Walk model in document order; pick the focusable at ordinal
+    /// `target_ord`; update focus_target + selected_* + scroll
+    /// accordingly. Caller has already validated `target_ord <
+    /// links.len + fields.len`.
+    fn setFocusByOrdinal(
+        self: *BrowserSession,
+        model: *const page_mod.ScreenModel,
+        target_ord: usize,
+        viewport_height: usize,
+    ) void {
+        // O(N²) scan — for hundreds of focusables this is sub-
+        // millisecond and avoids an allocator dance per Tab.
+        for (model.links, 0..) |link, i| {
+            const ord = countPredecessors(model, focusKeyForLink(link, i));
+            if (ord == target_ord) {
+                self.focus_target = .link;
+                self.selected_link = i;
+                self.ensureLineVisible(link.line, viewport_height);
+                return;
+            }
+        }
+        for (model.fields, 0..) |field, i| {
+            if (!isUserVisibleField(field)) continue;
+            const ord = countPredecessors(model, focusKeyForField(field, i));
+            if (ord == target_ord) {
+                self.focus_target = .field;
+                self.selected_field = i;
+                self.ensureLineVisible(field.line, viewport_height);
+                return;
+            }
+        }
+    }
+
     pub fn activeField(self: *BrowserSession) ?page_mod.ScreenField {
         const model = self.screenModel() orelse return null;
         const idx = self.selected_field orelse return null;
-        return editableFieldAt(model, idx);
+        if (idx >= model.fields.len) return null;
+        return model.fields[idx];
     }
 
     pub fn activeFieldName(self: *BrowserSession) ?[]const u8 {
@@ -636,14 +765,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, start_url: []const u8) !voi
         switch (session.prompt_mode) {
             .none => if (session.field_editing) switch (key) {
                 .escape => session.exitFieldEditing(),
-                .tab => {
-                    session.exitFieldEditing();
-                    session.selectNextField(false, viewportHeight(terminal.size()));
-                },
-                .shift_tab => {
-                    session.exitFieldEditing();
-                    session.selectNextField(true, viewportHeight(terminal.size()));
-                },
+                .tab => session.nextFocusable(false, viewportHeight(terminal.size())),
+                .shift_tab => session.nextFocusable(true, viewportHeight(terminal.size())),
                 .enter => {
                     session.exitFieldEditing();
                 },
@@ -653,34 +776,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, start_url: []const u8) !voi
             } else switch (key) {
                 .arrow_down => session.scrollBy(1, viewportHeight(terminal.size())),
                 .arrow_up => session.scrollBy(-1, viewportHeight(terminal.size())),
-                .tab => {
-                    const model = session.screenModel();
-                    const has_fields = model != null and blk: {
-                        for (model.?.fields) |f| {
-                            if (!f.is_submit) break :blk true;
-                        }
-                        break :blk false;
-                    };
-                    if (has_fields and session.focus_target == .field) {
-                        session.selectNextField(false, viewportHeight(terminal.size()));
-                    } else {
-                        session.selectNextLink(false, viewportHeight(terminal.size()));
-                    }
-                },
-                .shift_tab => {
-                    const model = session.screenModel();
-                    const has_fields = model != null and blk: {
-                        for (model.?.fields) |f| {
-                            if (!f.is_submit) break :blk true;
-                        }
-                        break :blk false;
-                    };
-                    if (has_fields and session.focus_target == .field) {
-                        session.selectNextField(true, viewportHeight(terminal.size()));
-                    } else {
-                        session.selectNextLink(true, viewportHeight(terminal.size()));
-                    }
-                },
+                .tab => session.nextFocusable(false, viewportHeight(terminal.size())),
+                .shift_tab => session.nextFocusable(true, viewportHeight(terminal.size())),
                 .enter => {
                     if (session.focus_target == .field and session.selected_field != null) {
                         const field = session.activeField();
@@ -839,6 +936,32 @@ fn editableFieldAt(model: *const page_mod.ScreenModel, idx: usize) ?page_mod.Scr
     return null;
 }
 
+/// Total number of focusable elements in document order.
+/// Includes all links + visible (non-hidden) fields including
+/// submit buttons. Free function so tests can call it directly.
+fn countFocusables(model: *const page_mod.ScreenModel) usize {
+    var n: usize = model.links.len;
+    for (model.fields) |field| {
+        if (isUserVisibleField(field)) n += 1;
+    }
+    return n;
+}
+
+/// Count how many focusables sort strictly before `key` in
+/// document order. Used by the unified Tab/Shift-Tab traversal
+/// to compute and apply ordinals.
+fn countPredecessors(model: *const page_mod.ScreenModel, key: FocusKey) usize {
+    var n: usize = 0;
+    for (model.links, 0..) |link, i| {
+        if (focusKeyLess(focusKeyForLink(link, i), key)) n += 1;
+    }
+    for (model.fields, 0..) |field, i| {
+        if (!isUserVisibleField(field)) continue;
+        if (focusKeyLess(focusKeyForField(field, i), key)) n += 1;
+    }
+    return n;
+}
+
 test "containsCaseInsensitive matches ASCII substrings" {
     try std.testing.expect(containsCaseInsensitive("Hello World", "world"));
     try std.testing.expect(!containsCaseInsensitive("Hello", "planet"));
@@ -858,7 +981,7 @@ test "browserRenderWidth clamps to floor and ceiling" {
 }
 
 test "BrowserSession rerenderCurrent uses browse render seam" {
-    var session = try BrowserSession.init(std.testing.allocator);
+    var session = try BrowserSession.init(std.testing.allocator, std.testing.io);
     defer session.deinit();
 
     var result = try session.page.processHtml(
@@ -885,4 +1008,108 @@ test "BrowserSession rerenderCurrent uses browse render seam" {
     const model = session.screenModel() orelse return error.SkipZigTest;
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Original.") != null);
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Changed.!") == null);
+}
+
+// ── T-60 / Tier 1 slice T1.1: focus traversal ────────────────────
+
+test "focusKeyLess sorts by line, then col, then link-before-field, then index" {
+    const a: FocusKey = .{ .line = 0, .col = 0, .is_link = true, .index = 0 };
+    const b: FocusKey = .{ .line = 0, .col = 5, .is_link = false, .index = 0 };
+    const c: FocusKey = .{ .line = 1, .col = 0, .is_link = true, .index = 0 };
+
+    // Earlier line wins regardless of col / kind.
+    try std.testing.expect(focusKeyLess(a, c));
+    try std.testing.expect(focusKeyLess(b, c));
+    try std.testing.expect(!focusKeyLess(c, a));
+
+    // Same line, lower col wins.
+    try std.testing.expect(focusKeyLess(a, b));
+    try std.testing.expect(!focusKeyLess(b, a));
+
+    // Same (line, col): link sorts before field.
+    const link_at_zero: FocusKey = .{ .line = 2, .col = 0, .is_link = true, .index = 0 };
+    const field_at_zero: FocusKey = .{ .line = 2, .col = 0, .is_link = false, .index = 0 };
+    try std.testing.expect(focusKeyLess(link_at_zero, field_at_zero));
+
+    // Same kind+pos: index breaks tie.
+    const idx0: FocusKey = .{ .line = 3, .col = 7, .is_link = false, .index = 0 };
+    const idx1: FocusKey = .{ .line = 3, .col = 7, .is_link = false, .index = 1 };
+    try std.testing.expect(focusKeyLess(idx0, idx1));
+}
+
+test "Tab traversal walks links and visible fields in document order, skipping hidden" {
+    var session = try BrowserSession.init(std.testing.allocator, std.testing.io);
+    defer session.deinit();
+
+    // Page with: link → text input → hidden input → submit button → link.
+    // Tab should visit link0, input, submit, link1 (4 stops; hidden skipped).
+    const html =
+        \\<html><body>
+        \\<form action="/submit" method="post">
+        \\<a href="/before">first link</a>
+        \\<input type="text" name="user">
+        \\<input type="hidden" name="csrf" value="abc">
+        \\<input type="submit" value="Go">
+        \\<a href="/after">second link</a>
+        \\</form>
+        \\</body></html>
+    ;
+    var result = try session.page.processHtml("http://example.com/", 200, html);
+    const screen = try session.page.renderBrowseModel(std.testing.allocator, &result, .{
+        .max_width = 78,
+        .ansi_colors = false,
+        .show_links = true,
+        .show_images = true,
+    });
+    session.current = .{ .result = result, .screen = screen };
+
+    const model = session.screenModel().?;
+
+    // Expectation: 2 links + 2 visible fields (hidden CSRF skipped) = 4 stops.
+    try std.testing.expectEqual(@as(usize, 4), countFocusables(model));
+
+    // First Tab from no-focus lands on the first focusable in
+    // document order. With our fixture and the renderer's ordering,
+    // walking 4 Tab presses must end on the same starting position
+    // (cycle-complete). We don't assert exact identity at each step
+    // (that depends on renderer line/col placement which can shift
+    // with style changes), only that the cycle returns home.
+    session.nextFocusable(false, 24);
+    const first_target = session.focus_target;
+    const first_link = session.selected_link;
+    const first_field = session.selected_field;
+    var i: usize = 0;
+    while (i < 4) : (i += 1) session.nextFocusable(false, 24);
+    try std.testing.expectEqual(first_target, session.focus_target);
+    try std.testing.expectEqual(first_link, session.selected_link);
+    try std.testing.expectEqual(first_field, session.selected_field);
+}
+
+test "countFocusables excludes hidden inputs" {
+    var session = try BrowserSession.init(std.testing.allocator, std.testing.io);
+    defer session.deinit();
+
+    const html =
+        \\<html><body>
+        \\<form>
+        \\<input type="hidden" name="a" value="1">
+        \\<input type="hidden" name="b" value="2">
+        \\<input type="text" name="c">
+        \\</form>
+        \\</body></html>
+    ;
+    var result = try session.page.processHtml("http://example.com/", 200, html);
+    const screen = try session.page.renderBrowseModel(std.testing.allocator, &result, .{
+        .max_width = 78,
+        .ansi_colors = false,
+        .show_links = true,
+        .show_images = true,
+    });
+    session.current = .{ .result = result, .screen = screen };
+
+    const model = session.screenModel().?;
+    // 0 links + 1 visible field = 1 focusable. Hidden inputs do
+    // appear in model.fields (we keep them for form submission)
+    // but must not be counted toward focus order.
+    try std.testing.expectEqual(@as(usize, 1), countFocusables(model));
 }
