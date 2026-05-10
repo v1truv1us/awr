@@ -716,7 +716,9 @@ const USAGE =
     \\AWR — Agentic Web Runtime
     \\
     \\Usage:
-    \\  awr browse <url> [--no-js]   Open URL in interactive terminal browser.
+    \\  awr tui [<url>] [--no-js]    Open the interactive terminal browser. Without a URL,
+    \\                                 starts on AWR_HOMEPAGE if set, otherwise opens with the
+    \\                                 URL bar active. `awr browse` is a deprecated alias.
     \\                                 --no-js disables script execution (escape hatch
     \\                                 for sites whose JS strips their own UI in a
     \\                                 non-Chromium env, e.g. Google's homepage).
@@ -916,35 +918,40 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         return;
     }
 
-    // Subcommand: awr browse <url>
-    if (std.mem.eql(u8, args[1], "browse")) {
-        if (args.len < 3) {
-            try stdoutWrite(io, "usage: awr browse <url> [--no-js]\n");
-            std.process.exit(1);
-        }
-        // Parse --no-js flag and a positional URL. Order-agnostic:
-        // either `awr browse --no-js https://…` or `awr browse https://… --no-js`.
+    // Subcommand: `awr tui [<url>]` (canonical) and `awr browse [<url>]` (alias).
+    // T-75: `tui` is the human-facing browser command. URL is optional —
+    // when omitted we fall back to `AWR_HOMEPAGE`, and finally to opening
+    // with the URL bar already active so the user can type a destination.
+    if (std.mem.eql(u8, args[1], "tui") or std.mem.eql(u8, args[1], "browse")) {
+        const subcmd = args[1];
         var url_arg: ?[]const u8 = null;
         var disable_scripts = false;
         for (args[2..]) |arg| {
             if (std.mem.eql(u8, arg, "--no-js") or std.mem.eql(u8, arg, "--no-script")) {
                 disable_scripts = true;
             } else if (std.mem.startsWith(u8, arg, "--")) {
-                try stdoutWrite(io, "browse: unknown flag: ");
+                try stdoutWrite(io, subcmd);
+                try stdoutWrite(io, ": unknown flag: ");
                 try stdoutWrite(io, arg);
                 try stdoutWrite(io, "\n");
                 std.process.exit(1);
             } else if (url_arg == null) {
                 url_arg = arg;
             } else {
-                std.process.fatal("browse: unexpected positional arg '{s}'", .{arg});
+                std.process.fatal("{s}: unexpected positional arg '{s}'", .{ subcmd, arg });
             }
         }
-        const url = url_arg orelse {
-            try stdoutWrite(io, "usage: awr browse <url> [--no-js]\n");
-            std.process.exit(1);
-        };
-        try browser_mod.runWith(alloc, io, url, .{ .disable_scripts = disable_scripts });
+
+        // Homepage fallback: AWR_HOMEPAGE env var beats "blank tab".
+        // The slice borrows from libc's static env block, so no free.
+        if (url_arg == null) {
+            if (std.c.getenv("AWR_HOMEPAGE")) |raw| {
+                const slice = std.mem.span(raw);
+                if (slice.len > 0) url_arg = slice;
+            }
+        }
+
+        try browser_mod.runWith(alloc, io, url_arg, .{ .disable_scripts = disable_scripts });
         return;
     }
 

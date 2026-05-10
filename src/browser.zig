@@ -789,7 +789,7 @@ pub const RunOptions = struct {
 pub fn runWith(
     allocator: std.mem.Allocator,
     io: std.Io,
-    start_url: []const u8,
+    start_url: ?[]const u8,
     opts: RunOptions,
 ) !void {
     var terminal = try tui.Terminal.init();
@@ -800,7 +800,15 @@ pub fn runWith(
     session.page.disable_scripts = opts.disable_scripts;
     const initial_size = terminal.size();
     try session.setViewportSize(initial_size.cols, initial_size.rows);
-    try session.navigateTo(start_url);
+    // T-75: when launched without a URL (`awr tui` with no args and no
+    // AWR_HOMEPAGE), drop the user straight into the URL bar so they
+    // get a "blank tab" feel. The URL prompt already accepts free-form
+    // input via the existing `:` binding; we just trigger it on entry.
+    if (start_url) |url| {
+        try session.navigateTo(url);
+    } else {
+        try session.startPrompt(.url);
+    }
 
     var prev_cols: usize = 0;
     var prev_rows: usize = 0;
@@ -956,7 +964,7 @@ fn draw(terminal: *tui.Terminal, io: std.Io, session: *BrowserSession) !void {
     const stdout = &stdout_writer.interface;
     const model = session.screenModel();
     const url = session.currentUrl() orelse "";
-    try writeClippedLine(stdout, size.cols, "AWR browse — ");
+    try writeClippedLine(stdout, size.cols, "AWR — ");
     try writeClippedLine(stdout, size.cols, url);
     try stdout.writeAll("\n");
 
@@ -1255,4 +1263,60 @@ test "countFocusables excludes hidden inputs" {
     // appear in model.fields (we keep them for form submission)
     // but must not be counted toward focus order.
     try std.testing.expectEqual(@as(usize, 1), countFocusables(model));
+}
+
+test "Tab onto Google-shaped textarea enters edit mode and accepts typing" {
+    // Mirror Google's homepage form shape: hidden CSRF-style inputs +
+    // textarea named `q` + submit button. The user-visible flow is:
+    //   1. press Tab once → focus lands on textarea (hidden skipped)
+    //   2. text-like auto-edit kicks in (`field_editing == true`)
+    //   3. typing flows into `field_values["q"]` not the status bar
+    //   4. activeField()'s type is "textarea" and is text-like
+    //
+    // T-76 follow-up: documents the keypress contract that "clicks/
+    // presses don't work" was actually testing. If this test ever
+    // regresses, the TUI is broken in the same way the user reported.
+    var session = try BrowserSession.init(std.testing.allocator, std.testing.io);
+    defer session.deinit();
+
+    const html =
+        \\<html><body>
+        \\<form action="/search" method="get">
+        \\<input type="hidden" name="ie" value="UTF-8">
+        \\<input type="hidden" name="source" value="hp">
+        \\<textarea name="q" aria-label="Search"></textarea>
+        \\<input type="submit" name="btnK" value="Google Search">
+        \\</form>
+        \\</body></html>
+    ;
+    var result = try session.page.processHtml("https://www.google.com/", 200, html);
+    const screen = try session.page.renderBrowseModel(std.testing.allocator, &result, .{
+        .max_width = 78,
+        .ansi_colors = false,
+        .show_links = true,
+        .show_images = true,
+    });
+    session.current = .{ .result = result, .screen = screen };
+
+    const model = session.screenModel().?;
+    // 0 links + 2 visible fields (textarea + submit; 2 hidden skipped).
+    try std.testing.expectEqual(@as(usize, 2), countFocusables(model));
+
+    // First Tab: should land on the textarea (first visible field in
+    // doc order). Submit comes after.
+    session.nextFocusable(false, 24);
+    try std.testing.expectEqual(@as(@TypeOf(session.focus_target), .field), session.focus_target);
+    const field = session.activeField().?;
+    try std.testing.expect(std.mem.eql(u8, field.field_type, "textarea"));
+    try std.testing.expect(std.mem.eql(u8, field.name, "q"));
+    try std.testing.expect(isTextLikeField(field));
+    // Auto-edit on text-like — typing flows into the field, not the
+    // status line. This was the bug the user reported.
+    try std.testing.expect(session.field_editing);
+
+    // Type "hi" — should populate field_values["q"], not status bar.
+    try session.appendFieldByte('h');
+    try session.appendFieldByte('i');
+    const stored = session.getFieldValue("q") orelse "";
+    try std.testing.expect(std.mem.eql(u8, stored, "hi"));
 }
