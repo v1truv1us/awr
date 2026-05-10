@@ -408,7 +408,16 @@ pub const Page = struct {
         const owned_client = try allocator.create(client.Client);
         errdefer allocator.destroy(owned_client);
         owned_client.* = client.Client.init(allocator, io, .{
-            .use_chrome_headers = false, // plain headers → uncompressed body
+            // T-74: Chrome-shaped headers by default. The previous
+            // comment ("plain headers → uncompressed body") was
+            // misleading — std.http auto-decompresses gzip+deflate
+            // either way. The actual effect of use_chrome_headers
+            // is the Accept / Accept-Language / Sec-Fetch-* /
+            // Upgrade-Insecure-Requests set that makes anti-bot
+            // detectors see Chrome instead of a script. Without
+            // this, plain HTTP/1.1 fetches got flagged on Google,
+            // Cloudflare-fronted sites, etc.
+            .use_chrome_headers = true,
             .persist_cookies = jar_path != null,
             .cookie_jar_path = jar_path,
             .tls_fail_cache_path = tls_cache_path,
@@ -465,7 +474,10 @@ pub const Page = struct {
         const owned_client = try allocator.create(client.Client);
         errdefer allocator.destroy(owned_client);
         owned_client.* = client.Client.init(allocator, io, .{
-            .use_chrome_headers = false,
+            // T-74: same rationale as Page.initWithJarPath — Chrome
+            // headers by default so anti-bot detectors don't flag
+            // the request.
+            .use_chrome_headers = true,
             // persist_cookies / cookie_jar_path stay at defaults;
             // external_cookie_jar takes precedence in Client.
             .external_cookie_jar = jar,

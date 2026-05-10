@@ -174,8 +174,13 @@ pub const ClientOptions = struct {
     max_redirects: u8 = 10,
     timeout_ms: u32 = 30_000,
     max_response_header_bytes: usize = 64 * 1024,
-    /// Sent as the User-Agent header when not using Chrome 132 defaults.
-    user_agent: []const u8 = "AWR/0.1",
+    /// Explicit User-Agent override. Leave empty (default) so Chrome 132
+    /// is emitted automatically when `use_chrome_headers = true`. T-74:
+    /// the previous `"AWR/0.1"` default silently won over the Chrome UA
+    /// because the if-branch in `effective_user_agent` checks `len != 0`
+    /// first — that mismatch (TLS fingerprint claims Chrome 132, HTTP
+    /// claims AWR/0.1) was the loudest anti-bot tell on Google.
+    user_agent: []const u8 = "",
     /// When true, setChrome132Defaults() is called on every request.
     use_chrome_headers: bool = true,
     /// When true and `cookie_jar_path` is non-null, Client.init reads the
@@ -611,21 +616,26 @@ pub const Client = struct {
         var body_buf: std.Io.Writer.Allocating = .init(self.allocator);
         errdefer body_buf.deinit();
 
+        // T-74: Chrome 132 UA (matches the JA4 fingerprint per
+        // spec/Fingerprint-Plan.md). Bumped from 127 — the version
+        // skew between TLS fingerprint claim (132) and HTTP UA (127)
+        // was itself a tell for fingerprint-correlating bot detectors.
         const effective_user_agent =
             if (self.options.user_agent.len != 0)
                 self.options.user_agent
             else if (self.options.use_chrome_headers)
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
             else
                 "awr";
 
-        // Capacity 12: 1 user-agent + up to 9 chrome + 1 content-type +
-        // 1 cookie. Fits the worst-case header set for this path.
-        var extra_headers: [12]std.http.Header = undefined;
+        // Capacity 11: up to 9 chrome + 1 content-type + 1 cookie.
+        // user-agent and accept-encoding go through std.http's
+        // Headers.override knobs (below) to avoid std.http's
+        // auto-injected `zig/0.16.0 (std.http)` user-agent
+        // showing up alongside ours — that double-UA was the
+        // single biggest anti-bot tell (T-74).
+        var extra_headers: [11]std.http.Header = undefined;
         var extra_header_count: usize = 0;
-
-        extra_headers[extra_header_count] = .{ .name = "user-agent", .value = effective_user_agent };
-        extra_header_count += 1;
 
         if (self.options.use_chrome_headers) {
             extra_headers[extra_header_count] = .{ .name = "accept", .value = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,*/*;q=0.8" };
@@ -689,9 +699,28 @@ pub const Client = struct {
             const body_const = body orelse "";
             owned_body = try self.allocator.dupe(u8, body_const);
         }
+        // T-74: header overrides. `headers.user_agent = .override(...)`
+        // replaces std.http's default `zig/0.16.0 (std.http)` UA
+        // entirely — without this we send TWO user-agent headers
+        // and bot detectors flag us instantly. accept-encoding is
+        // overridden to advertise what AWR can actually decompress
+        // (gzip + deflate + zstd, NOT br/brotli — see fetchOnceStd's
+        // content_encoding switch). Chrome 132 also sends br but
+        // we'd have to add brotli decompression first.
+        const std_request_headers: std.http.Client.Request.Headers = if (self.options.use_chrome_headers)
+            .{
+                .user_agent = .{ .override = effective_user_agent },
+                .accept_encoding = .{ .override = "gzip, deflate, zstd" },
+            }
+        else
+            .{
+                .user_agent = .{ .override = effective_user_agent },
+            };
+
         while (true) : (attempt += 1) {
             req = std_client.request(std_method, uri, .{
                 .redirect_behavior = .unhandled,
+                .headers = std_request_headers,
                 .extra_headers = extra_headers[0..extra_header_count],
             }) catch |err| return mapFetchError(err);
             // On retry, deinit the previous (failed) request before

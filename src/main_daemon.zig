@@ -90,7 +90,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8) !v
     // request at a time per spec §3 v1) makes that safe without
     // a lock.
     var shared_client = Client.init(allocator, io, .{
-        .use_chrome_headers = false, // matches Page.initWithJar contract
+        // T-74: Chrome headers by default — same rationale as
+        // Page.initShared. Without this, daemon-mode requests look
+        // like a script to anti-bot detectors and get blocked.
+        .use_chrome_headers = true,
         // external_cookie_jar set per-fetch in handleFetch.
     });
     defer shared_client.deinit();
