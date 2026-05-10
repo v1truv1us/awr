@@ -23,6 +23,8 @@ const page_mod = @import("page");
 // named imports for cookie/client. Keeps build.zig's daemon_mod deps
 // narrow (just `page` + `build_opts`).
 const CookieJar = page_mod.CookieJar;
+const Client = page_mod.Client;
+const ClientOptions = page_mod.ClientOptions;
 
 /// Maximum body bytes per request frame. 1 MiB is generous for v1
 /// (typical fetch param JSON is well under 1 KB; even multi-redirect
@@ -77,6 +79,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8) !v
     // session cookies (no Max-Age) round-trip correctly.
     var jar_cache: JarCache = .empty;
     defer jar_cache.deinit(allocator, io);
+
+    // Process-scope HTTP Client (spec §2.1 / §4.5). Persists for
+    // daemon lifetime so its BoringSslPool, shared_tls_ctx
+    // (parsed Mozilla CA bundle), and std_tls_failed_hosts
+    // amortize across all fetches. Per-scope cookie jars are
+    // pointed into by setting `external_cookie_jar` on the
+    // options before each fetch — sequential dispatch (one
+    // request at a time per spec §3 v1) makes that safe without
+    // a lock.
+    var shared_client = Client.init(allocator, io, .{
+        .use_chrome_headers = false, // matches Page.initWithJar contract
+        // external_cookie_jar set per-fetch in handleFetch.
+    });
+    defer shared_client.deinit();
 
     const idle_sec = readIdleSec();
     const max_rss_mb = readMaxRssMb();
@@ -134,7 +150,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8) !v
         };
         defer stream.close(io);
 
-        handleConnection(allocator, io, &stream, &should_exit, &jar_cache) catch |err| {
+        handleConnection(allocator, io, &stream, &should_exit, &jar_cache, &shared_client) catch |err| {
             log("awrd: connection error: {t}", .{err});
         };
         last_active_ms = nowMs();
@@ -301,6 +317,7 @@ fn handleConnection(
     stream: *std.Io.net.Stream,
     should_exit: *bool,
     jar_cache: *JarCache,
+    shared_client: *Client,
 ) !void {
     const read_buf = try allocator.alloc(u8, READ_BUFFER_BYTES);
     defer allocator.free(read_buf);
@@ -352,7 +369,7 @@ fn handleConnection(
         // in fetch N+1 without a disk round-trip. Persistence after
         // each fetch is still done for crash durability (see
         // handleFetch's post-fetch JarCache.persist call).
-        handleFetch(allocator, io, &req, id_json, &wshim, jar_cache) catch |err| {
+        handleFetch(allocator, io, &req, id_json, &wshim, jar_cache, shared_client) catch |err| {
             const msg = try std.fmt.allocPrint(allocator, "{t}", .{err});
             defer allocator.free(msg);
             try jsonrpc.writeError(&wshim, allocator, id_json, .internal_error, msg);
@@ -374,6 +391,7 @@ fn handleFetch(
     id_json: []const u8,
     wshim: *WriterShim,
     jar_cache: *JarCache,
+    shared_client: *Client,
 ) !void {
     const params_val = req.params() orelse return error.MissingParams;
     const params_obj = switch (params_val) {
@@ -426,9 +444,17 @@ fn handleFetch(
     // First touch loads from disk; subsequent fetches see the
     // already-resolved jar. The Entry pointer stays stable across
     // map re-hashes (entries are heap-allocated), so the borrowed
-    // *CookieJar we hand to Page is safe to use through Page.deinit.
+    // *CookieJar we hand into the shared Client is safe.
     const entry = try jar_cache.getOrLoad(allocator, io, scope);
-    var p = try page_mod.Page.initWithJar(allocator, io, &entry.jar);
+
+    // Point the shared Client's cookie jar at this scope's jar
+    // for the duration of this fetch. Sequential dispatch (one
+    // request at a time per spec §3 v1) makes this in-place
+    // mutation race-free; concurrent fetches across scopes
+    // would need either a per-scope Client or a lock.
+    shared_client.options.external_cookie_jar = &entry.jar;
+
+    var p = try page_mod.Page.initShared(allocator, io, shared_client);
     defer p.deinit();
 
     var result = if (is_post)

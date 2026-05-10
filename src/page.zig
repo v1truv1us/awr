@@ -31,6 +31,8 @@ const telemetry = @import("telemetry");
 // helpers it needs from cookie/client are surfaced here. Keeping
 // these as `pub const` aliases avoids adding new build-graph edges.
 pub const CookieJar = cookie_mod.CookieJar;
+pub const Client = client.Client;
+pub const ClientOptions = client.ClientOptions;
 pub const loadCookiesFromDisk = client.loadCookiesFromDisk;
 pub const saveCookiesToDisk = client.saveCookiesToDisk;
 
@@ -320,7 +322,17 @@ fn appendJsonQuoted(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []con
 pub const Page = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    client: client.Client,
+    /// HTTP client. Heap-allocated so the daemon can swap between
+    /// "Page owns Client" and "Page borrows a shared Client" without
+    /// changing access patterns elsewhere in this file. `self.client.X`
+    /// works either way thanks to Zig's auto-deref.
+    client: *client.Client,
+    /// True when this Page owns `client` (must deinit + free on
+    /// teardown). False when it was borrowed via `initShared` — caller
+    /// (typically the daemon) manages the Client's lifecycle so its
+    /// BoringSslPool, shared_tls_ctx, and std_tls_failed_hosts persist
+    /// across fetches.
+    client_owned: bool = true,
     js: engine.JsEngine,
     event_loop: engine.EventLoop,
     base_url: []u8, // duped, may be replaced on each processHtml
@@ -380,15 +392,20 @@ pub const Page = struct {
         };
         errdefer if (tls_cache_path) |p| allocator.free(p);
 
+        const owned_client = try allocator.create(client.Client);
+        errdefer allocator.destroy(owned_client);
+        owned_client.* = client.Client.init(allocator, io, .{
+            .use_chrome_headers = false, // plain headers → uncompressed body
+            .persist_cookies = jar_path != null,
+            .cookie_jar_path = jar_path,
+            .tls_fail_cache_path = tls_cache_path,
+        });
+
         var page = Page{
             .allocator = allocator,
             .io = io,
-            .client = client.Client.init(allocator, io, .{
-                .use_chrome_headers = false, // plain headers → uncompressed body
-                .persist_cookies = jar_path != null,
-                .cookie_jar_path = jar_path,
-                .tls_fail_cache_path = tls_cache_path,
-            }),
+            .client = owned_client,
+            .client_owned = true,
             .js = js_engine,
             .event_loop = el,
             .base_url = base_url,
@@ -432,16 +449,21 @@ pub const Page = struct {
         };
         errdefer if (tls_cache_path) |p| allocator.free(p);
 
+        const owned_client = try allocator.create(client.Client);
+        errdefer allocator.destroy(owned_client);
+        owned_client.* = client.Client.init(allocator, io, .{
+            .use_chrome_headers = false,
+            // persist_cookies / cookie_jar_path stay at defaults;
+            // external_cookie_jar takes precedence in Client.
+            .external_cookie_jar = jar,
+            .tls_fail_cache_path = tls_cache_path,
+        });
+
         var page = Page{
             .allocator = allocator,
             .io = io,
-            .client = client.Client.init(allocator, io, .{
-                .use_chrome_headers = false,
-                // persist_cookies / cookie_jar_path stay at defaults;
-                // external_cookie_jar takes precedence in Client.
-                .external_cookie_jar = jar,
-                .tls_fail_cache_path = tls_cache_path,
-            }),
+            .client = owned_client,
+            .client_owned = true,
             .js = js_engine,
             .event_loop = el,
             .base_url = base_url,
@@ -456,6 +478,54 @@ pub const Page = struct {
         return page;
     }
 
+    /// Construct a Page that borrows BOTH a CookieJar AND a Client
+    /// from a long-lived owner (the daemon). The Client's
+    /// connection pool, shared TLS context, parsed CA bundle, and
+    /// per-host TLS-failure cache persist across all fetches that
+    /// borrow it — closing spec §4.5's startup-amortization gate
+    /// for HTTPS workloads.
+    ///
+    /// The caller is responsible for:
+    ///   - allocating + initializing the Client up-front
+    ///   - setting `client.options.external_cookie_jar` to the
+    ///     scope's jar BEFORE each fetch (the daemon mutates this
+    ///     between requests; safe because requests are serialized)
+    ///   - tearing down the Client once no more Pages reference it
+    ///
+    /// The caller must NOT pass a Client that was previously owned
+    /// by another Page: ownership transitions are explicit, and
+    /// the `client_owned` flag tracks them per-Page.
+    pub fn initShared(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        shared_client: *client.Client,
+    ) !Page {
+        var js_engine = try engine.JsEngine.init(allocator, null);
+        errdefer js_engine.deinit();
+
+        var el = try engine.EventLoop.init(allocator, js_engine.ctx);
+        errdefer el.deinit();
+
+        const base_url = try allocator.dupe(u8, "");
+        errdefer allocator.free(base_url);
+
+        var page = Page{
+            .allocator = allocator,
+            .io = io,
+            .client = shared_client,
+            .client_owned = false,
+            .js = js_engine,
+            .event_loop = el,
+            .base_url = base_url,
+            .current_doc = null,
+            // No paths owned — daemon manages all persistence.
+            .cookie_jar_path = null,
+            .tls_fail_cache_path = null,
+        };
+        page.attachHosts();
+        return page;
+    }
+
     pub fn deinit(self: *Page) void {
         if (self.current_doc) |*doc_ref| {
             bridge.removeDomBridge(&self.js);
@@ -464,7 +534,13 @@ pub const Page = struct {
         }
         self.event_loop.deinit();
         self.js.deinit();
-        self.client.deinit();
+        // Client is heap-allocated; deinit + free only when we own
+        // it. Borrowed Clients (daemon's shared instance) outlive
+        // Page and are managed by the caller.
+        if (self.client_owned) {
+            self.client.deinit();
+            self.allocator.destroy(self.client);
+        }
         self.allocator.free(self.base_url);
         if (self.cookie_jar_path) |p| self.allocator.free(p);
         if (self.tls_fail_cache_path) |p| self.allocator.free(p);
