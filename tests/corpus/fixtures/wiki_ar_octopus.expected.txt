@@ -290,135 +290,98 @@
 أخطبوطيات فيالمشاريع الشقيقة[133]  •                                                                  []وسائط[135]من
                                                                  كومنز
   •       []صفحة[137]من ويكي أنواع
- .mw-parser-output                                                           
- .navbar{display:inline;font-size:88%                                        
- ;font-weight:normal}.mw-parser-outpu                                        
- t                                                                           
- .navbar-collapse{float:right;text-al                                        
- ign:right}.mw-parser-output                                                 
- .navbar-boxtext{word-spacing:0}.mw-p                                        
- arser-output .navbar                                                        
- ul{display:inline-block;white-space:                                        
- nowrap;line-height:inherit}.mw-parse                                        
- r-output                                                                    
- .navbar-brackets::before{margin-left                                        
- :-0.125em;content:"[                                                        
- "}.mw-parser-output                                                         
- .navbar-brackets::after{margin-right                                        
- :-0.125em;content:"                                                         
- ]"}.mw-parser-output .navbar                                                
- li{word-spacing:-0.125em}.mw-parser-                                        
- output .navbar                                                              
- a>span,.mw-parser-output .navbar                                            
- a>abbr{text-decoration:inherit}.mw-p                                        
- arser-output .navbar-mini                                                   
- abbr{font-variant:small-caps;border-                                        
- bottom:none;text-decoration:none;cur                                        
- sor:inherit}.mw-parser-output                                               
- .navbar-ct-full{font-size:114%;margi                                        
- n:0 7em}.mw-parser-output                                                   
- .navbar-ct-mini{font-size:114%;margi                                        
- n:0 4em}@media                                                              
- screen{html.skin-theme-clientpref-ni                                        
- ght .mw-parser-output .navbar li a                                          
- abbr{color:var(--color-base)!importa                                        
- nt}}@media screen and                                                       
- (prefers-color-scheme:dark){html.ski                                        
- n-theme-clientpref-os                                                       
- .mw-parser-output .navbar li a                                              
- abbr{color:var(--color-base)!importa                                        
- nt}} ع ن ت رخويات                                                  
- صالحة للأكل                                                       
- ذوات الصدفتين              محار ملزمي Atlantic         
-                                        jackknife  [لغات أخرى]‏  
-                                        Atlantic surf  [لغات           
-                                        أخرى]‏ محار جيوداك   
-                                        Grooved carpet shell Hard clam Horse 
-                                        Mactra stultorum Blunt               
-                                        gaper  [لغات أخرى]‏      
-                                        Ocean quahog  [لغات            
-                                        أخرى]‏ Pacific                 
-                                        razor  [لغات أخرى]‏      
-                                        Venus California                     
-                                        butterclam  [لغات أخرى]‏ 
-                                        Senilia senilis Smooth clam          
-                                        Soft-shell Triangle                  
-                                        shell  [لغات أخرى]‏      
-                                        Tuatua Japanese                      
-                                        littleneck  [لغات أخرى]‏ 
-                                        Razor clam  [لغات أخرى]‏ 
-                                        Pod razor Ensis (razor genus)        
-                                        Paphies Cockles Common Blood Goolwa  
-                                        نيوزيلندا Sydney بلح     
-                                        البحر بلح البحر         
-                                        الأزرق Mediterranean New       
-                                        Zealand green-lipped  [لغات    
-                                        أخرى]‏ California Brown        
-                                        Asian/Philippine green  [لغات  
-                                        أخرى]‏ طريث طريث       
-                                        بلحيات البحر              
-                                        البحرية (mussel family)       
-                                        محار Auckland Eastern Olympia    
-                                        Southern mud  [لغات            
-                                        أخرى]‏ Colchester              
-                                        native  [لغات أخرى]‏     
-                                        Pacific البرتغال Windowpane  
-                                        Rock Sydney rock  [لغات        
-                                        أخرى]‏ Ostra                   
-                                        chilena/Bluff  [لغات           
-                                        أخرى]‏ Gillardeau oysters      
-                                        Crassostrea ("true oyster" genus)    
-                                        مشطية Atlantic bay  [لغات 
-                                        أخرى]‏ أسقلوب            
-                                        نيوزيلندا Pecten jacobaeus  
-                                        Peruvian calico  [لغات         
-                                        أخرى]‏ Yesso                   
- بطنيات القدم                صفيلح White Red Black Green     
-                                        Pink Blacklip Green ormer Pāua      
-                                        (group of three species) تشيلي  
-                                        صدفة Queen Dog بطلينوس    
-                                        Black-foot                           
-                                        opihi/Hawaiian  [لغات          
-                                        أخرى]‏ Turtle/talc Yellow-foot 
-                                        opihi  [لغات أخرى]‏      
-                                        الصين بطلينوس Rayed      
-                                        Mediterranean  [لغات           
-                                        أخرى]‏ بطلينوس صدئة 
-                                        Rustic ونكات ونكة           
-                                        شائعة Banded Littorina sitkana  
-                                        حَبَار  [لغات            
-                                        أخرى]‏s Common Kellet's        
-                                        Knobbed Lightning Channeled          
-                                        حلزون حلزون البحر     
-                                        Mud-flat Korean mud  [لغات     
-                                        أخرى]‏ Chorus giganteus        
-                                        حلزون أرضي حلزون       
-                                        الحدائق Helix lucorum         
-                                        حلزون كرمي حلزون       
-                                        المياه العذبة            
-                                        لزيقيات                       
- رأسيات القدم                حبار Spineless Bottletail        
-                                        أخطبوطيات أخطبوط      
-                                        شائع Atlantic                    
-                                        white-spotted  [لغات           
-                                        أخرى]‏ Big blue  [لغات   
-                                        أخرى]‏ أخطبوط            
-                                        المحيط الهادئ            
-                                        العملاق Southern              
-                                        red  [لغات أخرى]‏        
-                                        Amphioctopus fangsiao سبيدج New 
-                                        Zealand arrow  [لغات           
-                                        أخرى]‏ Japanese                
-                                        flying  [لغات أخرى]‏     
-                                        Humboldt Neon flying  [لغات    
-                                        أخرى]‏                         
- خيتون                             خيتون كبير Acanthopleura    
-                                        granulata                            
- مواضيع متعلقة Oyster                                            
- farming Land snail                                                          
- farming  [لغات أخرى]‏                                           
- بطنيات القدم ذوات                                            
- الصدفتين                                                            
+ ع ن ت رخويات صالحة                                         
+ للأكل                                                               
+ ذوات الصدفتين           محار ملزمي Atlantic         
+                                     jackknife  [لغات أخرى]‏  
+                                     Atlantic surf  [لغات           
+                                     أخرى]‏ محار جيوداك   
+                                     Grooved carpet shell Hard clam Horse 
+                                     Mactra stultorum Blunt               
+                                     gaper  [لغات أخرى]‏      
+                                     Ocean quahog  [لغات            
+                                     أخرى]‏ Pacific                 
+                                     razor  [لغات أخرى]‏      
+                                     Venus California                     
+                                     butterclam  [لغات أخرى]‏ 
+                                     Senilia senilis Smooth clam          
+                                     Soft-shell Triangle                  
+                                     shell  [لغات أخرى]‏      
+                                     Tuatua Japanese                      
+                                     littleneck  [لغات أخرى]‏ 
+                                     Razor clam  [لغات أخرى]‏ 
+                                     Pod razor Ensis (razor genus)        
+                                     Paphies Cockles Common Blood Goolwa  
+                                     نيوزيلندا Sydney بلح     
+                                     البحر بلح البحر         
+                                     الأزرق Mediterranean New       
+                                     Zealand green-lipped  [لغات    
+                                     أخرى]‏ California Brown        
+                                     Asian/Philippine green  [لغات  
+                                     أخرى]‏ طريث طريث       
+                                     بلحيات البحر              
+                                     البحرية (mussel family)       
+                                     محار Auckland Eastern Olympia    
+                                     Southern mud  [لغات            
+                                     أخرى]‏ Colchester              
+                                     native  [لغات أخرى]‏     
+                                     Pacific البرتغال Windowpane  
+                                     Rock Sydney rock  [لغات        
+                                     أخرى]‏ Ostra                   
+                                     chilena/Bluff  [لغات           
+                                     أخرى]‏ Gillardeau oysters      
+                                     Crassostrea ("true oyster" genus)    
+                                     مشطية Atlantic bay  [لغات 
+                                     أخرى]‏ أسقلوب            
+                                     نيوزيلندا Pecten jacobaeus  
+                                     Peruvian calico  [لغات         
+                                     أخرى]‏ Yesso                   
+ بطنيات القدم             صفيلح White Red Black Green     
+                                     Pink Blacklip Green ormer Pāua      
+                                     (group of three species) تشيلي  
+                                     صدفة Queen Dog بطلينوس    
+                                     Black-foot                           
+                                     opihi/Hawaiian  [لغات          
+                                     أخرى]‏ Turtle/talc Yellow-foot 
+                                     opihi  [لغات أخرى]‏      
+                                     الصين بطلينوس Rayed      
+                                     Mediterranean  [لغات           
+                                     أخرى]‏ بطلينوس صدئة 
+                                     Rustic ونكات ونكة           
+                                     شائعة Banded Littorina sitkana  
+                                     حَبَار  [لغات            
+                                     أخرى]‏s Common Kellet's        
+                                     Knobbed Lightning Channeled          
+                                     حلزون حلزون البحر     
+                                     Mud-flat Korean mud  [لغات     
+                                     أخرى]‏ Chorus giganteus        
+                                     حلزون أرضي حلزون       
+                                     الحدائق Helix lucorum         
+                                     حلزون كرمي حلزون       
+                                     المياه العذبة            
+                                     لزيقيات                       
+ رأسيات القدم             حبار Spineless Bottletail        
+                                     أخطبوطيات أخطبوط      
+                                     شائع Atlantic                    
+                                     white-spotted  [لغات           
+                                     أخرى]‏ Big blue  [لغات   
+                                     أخرى]‏ أخطبوط            
+                                     المحيط الهادئ            
+                                     العملاق Southern              
+                                     red  [لغات أخرى]‏        
+                                     Amphioctopus fangsiao سبيدج New 
+                                     Zealand arrow  [لغات           
+                                     أخرى]‏ Japanese                
+                                     flying  [لغات أخرى]‏     
+                                     Humboldt Neon flying  [لغات    
+                                     أخرى]‏                         
+ خيتون                          خيتون كبير Acanthopleura    
+                                     granulata                            
+ مواضيع متعلقة Oyster                                         
+ farming Land snail                                                       
+ farming  [لغات أخرى]‏                                        
+ بطنيات القدم ذوات                                         
+ الصدفتين                                                         
  معرفات الأصنوفة   المَرفَق العالمي      
                                  لمعلومات التنوع        
                                  الحيوي (GBIF) • أنا       

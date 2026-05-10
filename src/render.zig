@@ -765,7 +765,7 @@ fn renderElement(state: *RenderState, w: anytype, elem: *const dom.Element) anye
 fn renderHeading(state: *RenderState, w: anytype, elem: *const dom.Element, level: u8) anyerror!void {
     try state.ensureNewline(w);
 
-    const text = elem.textContent(state.allocator) catch return;
+    const text = elem.textContentForExtract(state.allocator) catch return;
     defer state.allocator.free(text);
     const trimmed = std.mem.trim(u8, text, " \t\r\n");
     if (trimmed.len == 0) return;
@@ -803,7 +803,7 @@ fn renderLink(state: *RenderState, w: anytype, elem: *const dom.Element) anyerro
     if (state.opts.show_links) {
         const href = elem.getAttribute("href") orelse "";
         if (href.len > 0) {
-            const raw_text = elem.textContent(state.allocator) catch return;
+            const raw_text = elem.textContentForExtract(state.allocator) catch return;
             defer state.allocator.free(raw_text);
             const idx = state.registerLink(href, std.mem.trim(u8, raw_text, " \t\r\n")) catch return;
             const ref = try std.fmt.allocPrint(state.allocator, "[{d}]", .{idx});
@@ -879,7 +879,7 @@ fn renderPre(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror
 }
 
 fn renderCode(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
-    const text = elem.textContent(state.allocator) catch return;
+    const text = elem.textContentForExtract(state.allocator) catch return;
     defer state.allocator.free(text);
     if (text.len == 0) return;
     try state.writeAll(w, "`");
@@ -1087,7 +1087,7 @@ fn renderInput(state: *RenderState, w: anytype, elem: *const dom.Element) anyerr
 }
 
 fn renderButton(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
-    const label = elem.textContent(state.allocator) catch "Button";
+    const label = elem.textContentForExtract(state.allocator) catch "Button";
     defer state.allocator.free(label);
     const trimmed = std.mem.trim(u8, label, " \t\r\n");
     const col = state.col;
@@ -1114,7 +1114,7 @@ fn renderSelect(state: *RenderState, w: anytype, elem: *const dom.Element) anyer
     var first_option: ?[]const u8 = null;
     for (elem.children.items) |child| {
         if (child == .element and eql(child.element.tag, "option")) {
-            const text = child.element.textContent(state.allocator) catch continue;
+            const text = child.element.textContentForExtract(state.allocator) catch continue;
             defer state.allocator.free(text);
             const trimmed = std.mem.trim(u8, text, " \t\r\n");
             if (trimmed.len > 0) {
@@ -1144,7 +1144,7 @@ fn renderSelect(state: *RenderState, w: anytype, elem: *const dom.Element) anyer
 }
 
 fn renderTextarea(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
-    const value = elem.textContent(state.allocator) catch "";
+    const value = elem.textContentForExtract(state.allocator) catch "";
     defer state.allocator.free(value);
     const trimmed = std.mem.trim(u8, value, " \t\r\n");
     const name = elem.getAttribute("name") orelse "";
@@ -1524,6 +1524,15 @@ fn collectTableCellDisplayFragments(
         switch (child) {
             .text => |text_node| buf.appendSlice(state.allocator, text_node.data) catch {},
             .element => |child_elem| {
+                // Defensive parity with renderElement's isHiddenTag
+                // gate: a <script> / <style> / <noscript> nested
+                // inside a table cell otherwise leaks its raw source
+                // into the rendered text. Real browsers never paint
+                // these. Caught by the Google homepage which puts
+                // inline scripts inside the layout <table>; without
+                // this check the script body is rendered as visible
+                // text alongside neighbor cells.
+                if (isHiddenTag(child_elem.tag)) continue;
                 if (eql(child_elem.tag, "a")) {
                     collectTableCellDisplayFragments(state, preview_link_index, child_elem, buf);
                     appendTableCellLinkMarker(state, preview_link_index, child_elem, buf);
@@ -1551,7 +1560,7 @@ fn appendTableCellLinkMarker(
     const href = elem.getAttribute("href") orelse return;
     if (href.len == 0) return;
 
-    const raw_text = elem.textContent(state.allocator) catch return;
+    const raw_text = elem.textContentForExtract(state.allocator) catch return;
     defer state.allocator.free(raw_text);
     const trimmed = std.mem.trim(u8, raw_text, " \t\r\n");
 
