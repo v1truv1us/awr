@@ -4,17 +4,31 @@ This file provides module-level guidance for agents working in specific parts of
 
 Global framing:
 
-- Treat AWR as a CLI-first browser runtime
-- Prioritize real page execution and readable terminal output
-- Use curated WPT and Test262 coverage as the first correctness signal for DOM and JS work
-- Treat WebMCP as a supported layer on top of the browser runtime
+- Treat AWR as a **dual-surface CLI-first terminal browser**: one binary
+  serving humans (`awr browse`) and agents (`awr <url>`, `awr extract`,
+  `awr tools`, `awr call`) over the same DOM, cookie jar, and connection
+  pool.
+- Prioritize real page execution and readable terminal output for both
+  surfaces.
+- Use curated WPT and Test262 coverage as the first correctness signal
+  for DOM and JS work. The corpus grows with each active tier per
+  `spec/subspecs/browser-roadmap.md §4`.
+- Treat WebMCP as a supported layer on top of the browser runtime.
 
 Execution specs:
 
 - Canonical umbrella spec: `spec/MVP.md`
-- Closure record: `spec/subspecs/mvp-remainder.md`, `spec/subspecs/wpt-conformance.md`
-- Active agent-browser scope: `spec/subspecs/agent-browser.md` (POST in `fetch`/XHR, `<form method=post>`, cookie persistence)
-- Deferred tracks: `spec/subspecs/mcp-stdio.md`, `spec/subspecs/browser-tui.md`, `spec/Fingerprint-Plan.md`
+- Cross-tier roadmap (T0 closed, T1 active, T2-T5 deferred):
+  `spec/subspecs/browser-roadmap.md`
+- Tier 0 closure record: `spec/subspecs/mvp-remainder.md`,
+  `spec/subspecs/wpt-conformance.md`
+- Tier 0 closed sub-specs: `spec/subspecs/agent-browser.md`,
+  `spec/subspecs/rendering.md`
+- Tier 0 active → closing sub-spec: `spec/subspecs/daemon-mode.md`
+- Tier 1 active sub-spec: `spec/subspecs/browser-tui.md` (interactive
+  TUI parity — form fields, focus, keyboard input, history, URL bar,
+  cookie inspector, browser-cookie import)
+- Deferred tracks: `spec/subspecs/mcp-stdio.md`, `spec/Fingerprint-Plan.md`
 - Historical/background docs: `MVP_PLAN.md`, `MVP_BACKLOG.md`, `spec/PRD.md`
 - Governance ADR: `docs/adr/0001-spec-governance.md`
 

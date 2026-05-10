@@ -1,16 +1,26 @@
 # AWR — Agentic Web Runtime
 
-A headless terminal browser for AI agents. Loads pages and runs their
-JavaScript with a CLI-first interface.
+A dual-surface CLI-first terminal browser, written in Zig. One binary
+serves both **humans** in the terminal (`awr browse`) and **AI agents**
+via JSON / Markdown / WebMCP — sharing one cookie jar, one connection
+pool, one rendered DOM.
 
 > **Canonical spec:** `spec/MVP.md`
-> **Closure record:** `spec/subspecs/mvp-remainder.md`, `spec/subspecs/wpt-conformance.md`
-> **Deferred tracks:** `spec/subspecs/mcp-stdio.md`,
-> `spec/subspecs/browser-tui.md`, and `spec/Fingerprint-Plan.md`
+> **Cross-tier roadmap:** `spec/subspecs/browser-roadmap.md`
+> **Tier 0 closure record:** `spec/subspecs/mvp-remainder.md`, `spec/subspecs/wpt-conformance.md`
+> **Tier 1 active sub-spec:** `spec/subspecs/browser-tui.md`
+> **Deferred tracks:** `spec/subspecs/mcp-stdio.md`, `spec/Fingerprint-Plan.md`
 > **Governance ADR:** `docs/adr/0001-spec-governance.md`
 
-**Status:** AWR ships a closed CLI-first browser-runtime MVP gated by curated
-WPT/Test262 coverage and a green default test baseline.
+**Status:**
+- **Tier 0** (CLI-first agent runtime + daemon mode + WPT/Test262 gates) is
+  CLOSED and shipped.
+- **Tier 1** (interactive TUI parity with lynx/w3m: form fields, focus,
+  keyboard input, history, URL bar, cookie inspector, browser-cookie
+  import) is ACTIVE.
+- Tiers 2–5 (rendering polish, dynamic-site browser APIs, layout engine,
+  full SPA parity) are documented in
+  `spec/subspecs/browser-roadmap.md §3` and deferred.
 
 If canonical spec boundaries or document authority change, update both
 `spec/MVP.md` and `docs/adr/0001-spec-governance.md` as part of the same change.
@@ -204,14 +214,15 @@ without recompiling AWR.
 
 ---
 
-## Deferred tracks
+## Spec map
 
 See the canonical spec map in `spec/MVP.md`.
 
-- **MVP closure record:** `spec/subspecs/mvp-remainder.md`
-- **Conformance authority:** `spec/subspecs/wpt-conformance.md`
+- **Cross-tier roadmap:** `spec/subspecs/browser-roadmap.md`
+- **Tier 0 closure record:** `spec/subspecs/mvp-remainder.md`
+- **Conformance authority (corpus grows with active tiers):** `spec/subspecs/wpt-conformance.md`
+- **Tier 1 active sub-spec:** `spec/subspecs/browser-tui.md`
 - **Deferred MCP stdio:** `spec/subspecs/mcp-stdio.md`
-- **Deferred browser/TUI:** `spec/subspecs/browser-tui.md`
 - **Deferred fingerprint roadmap:** `spec/Fingerprint-Plan.md`
 
 ---
@@ -238,10 +249,14 @@ spec/
   PRD.md            Product context only; non-canonical for execution
   Fingerprint-Plan.md
   subspecs/
-    mvp-remainder.md
-    wpt-conformance.md
-    mcp-stdio.md
-    browser-tui.md
+    browser-roadmap.md   Cross-tier capability ladder (T0-T5)
+    browser-tui.md       Tier 1 active: interactive TUI parity
+    mvp-remainder.md     Tier 0 closure record
+    wpt-conformance.md   Curated WPT/Test262 corpus + gates
+    agent-browser.md     Tier 0 agent surface (closed)
+    rendering.md         Tier 0 terminal renderer (closed)
+    daemon-mode.md       Tier 0 long-lived `awrd` (active → closing)
+    mcp-stdio.md         Deferred native MCP stdio server
 third_party/lexbor/       Build notes for lexbor dependency
 ```
 

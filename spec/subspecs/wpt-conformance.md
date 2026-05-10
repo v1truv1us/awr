@@ -1,9 +1,13 @@
 # WPT/Test262 conformance — closure authority
 
-> **Status:** CLOSED FOR CURRENT MVP SURFACE
+> **Status:** CLOSED FOR TIER 0 SURFACE; CORPUS GROWS WITH ACTIVE TIERS
 > `spec/MVP.md` is the canonical umbrella spec.
+> `spec/subspecs/browser-roadmap.md §4` is the cross-tier WPT-growth
+> contract — each new tier requires matching corpus growth before it
+> can close.
 > This file is the authority for curated conformance runners, corpus scope, and
-> merge gates.
+> merge gates. The corpus listed in §3 / §8 is the **Tier 0** baseline;
+> §3 grows when an active tier promotes new API areas into scope.
 
 ---
 
@@ -75,25 +79,40 @@ Include a WPT case only when it:
 4. does not require upstream browser subsystems that AWR does not claim to ship
    for MVP.
 
-Target MVP WPT areas:
+Target Tier 0 WPT areas (closed):
 
 - document and element queries;
 - DOM mutation behavior;
 - event dispatch and lifecycle behavior;
 - mutation observation;
-- storage;
+- storage (in-memory `localStorage` / `sessionStorage` for the page lifetime);
 - request integration (GET and POST) — `fetch()` and `XMLHttpRequest`;
 - form submission (GET and POST) — `<form>` parse, render, and submit;
 - cookie persistence across simulated process restart;
-- same-origin history subset;
+- same-origin history subset (`length` + `state`);
 - terminal-backed geometry and viewport APIs.
 
 The form-submission and cookie-persistence rows are governed by
 `spec/subspecs/agent-browser.md`; they remain inside this conformance file's
 inclusion rules and merge gates.
 
-The curated WPT corpus should cover the shipped MVP surface and reject or omit
-APIs that are intentionally outside it.
+**Tier 1 WPT areas** (added when `spec/subspecs/browser-tui.md` closes,
+per the WPT-growth contract in `spec/subspecs/browser-roadmap.md §4`):
+
+- form-input event semantics (`input`, `change`);
+- focus / blur events;
+- keyboard event semantics (`keydown` / `keyup` with `key` and `code`);
+- submit-via-Enter implicit form submission;
+- same-origin navigation history `length` and `state` round-trip
+  across in-session forward/back.
+
+Future tiers extend the corpus per their own sub-specs' closure
+gates. This file's inclusion rules apply uniformly across all tiers.
+
+The curated WPT corpus should cover the actively-shipped surface and
+reject or omit APIs that are intentionally outside it. As tiers
+promote new APIs from "intentionally out" to "in scope", the corpus
+grows in the same change.
 
 ---
 

@@ -317,6 +317,65 @@ documentation governance.
   `spec/MVP.md §2 + §7`, `docs/research/2026-05-07-daemon-mode-design.md`
   (already committed earlier today as B1), this ADR.
 
+### 2026-05-09 — Tier ladder formalized; browser-tui promoted to ACTIVE (Tier 1)
+
+- Change: AWR's product framing reframed from "CLI-first agent
+  browser runtime + deferred TUI" to **dual-surface CLI-first
+  terminal browser** (one binary; humans via `awr browse`, agents
+  via `awr <url>` / `awr extract` / `awr tools` / `awr call`;
+  shared cookie jar, connection pool, and DOM via the daemon).
+  Capability growth organized into a **tiered ladder** with five
+  tiers documented in `spec/subspecs/browser-roadmap.md §3`:
+  - Tier 0: agent runtime baseline (CLOSED — was the "MVP")
+  - Tier 1: interactive TUI parity with lynx/w3m (now ACTIVE)
+  - Tier 2: render + UX polish (deferred)
+  - Tier 3: lightly dynamic site support — History API,
+    localStorage, WebSocket, MutationObserver, synthetic input
+    events (deferred)
+  - Tier 4: layout engine — the gating constraint for SPA
+    support (deferred; ADR amendment required to activate
+    because of strategic choice between building a Zig layout
+    engine vs embedding Servo/Ladybird/Chromium)
+  - Tier 5: full SPA + parity polish (deferred)
+- `spec/subspecs/browser-tui.md` rewritten from a 31-line
+  DEFERRED stub into the active **Tier 1 sub-spec** with concrete
+  scope (form-field interaction, focus management, keyboard
+  input, history navigation, URL bar, cookie inspector, browser-
+  cookie import via SQLite reads of Chrome / Firefox cookie
+  stores), §4 closure gates including end-to-end HN sign-in
+  smoke flow, and §6 implementation slice ordering.
+- `spec/subspecs/browser-roadmap.md` added (new) as the
+  cross-tier authority. Owns tier ordering, the WPT-growth
+  contract (§4), permanently-out-of-scope items (§5 — WebGL,
+  video playback, WebRTC, single-site bot-detection arms races),
+  and tier-promotion governance (§6).
+- `spec/subspecs/wpt-conformance.md` updated to acknowledge that
+  the corpus listed in §3/§8 is the **Tier 0 baseline**; new
+  tiers grow the corpus per `browser-roadmap.md §4`.
+- Reason: the originally-stated MVP framing said "execute enough
+  DOM and JS to make them useful" — implicitly Tier 0. As that
+  surface closed, the conversation about whether AWR is "a real
+  browser" or "an agent runtime" needed an explicit answer. The
+  product owner clarified the goal is the former, with explicit
+  honesty about which tiers of the web AWR will reach (most of
+  it) vs which are out of scope at every tier (X.com, Facebook,
+  modern Slack/Discord — full SPAs depending on rendering loops).
+  The tier ladder makes the trajectory auditable and gives every
+  tier a defined closure gate, preventing scope drift.
+- Tier 1 promotion did NOT change Tier 0 closure gates; all
+  existing tests (`zig build test`, `test-wpt`, `test-test262`,
+  `test-integration`, `smoke`) remain green.
+- Documents updated: `spec/MVP.md` (status, doc map §2,
+  deferred-tracks §7), `spec/subspecs/browser-roadmap.md` (new),
+  `spec/subspecs/browser-tui.md` (full rewrite, status flipped
+  to ACTIVE), `spec/subspecs/mvp-remainder.md` ("not in scope"
+  list updated to point at tier authorities),
+  `spec/subspecs/wpt-conformance.md` (status note + Tier 1
+  area listing in §3), `README.md` (status block + spec map
+  + repo layout), `CLAUDE.md` (product framing + primary
+  experience list), `AGENTS.md` (global framing + execution
+  specs list), this ADR.
+
 ### Template for future amendments
 
 - Date:

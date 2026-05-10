@@ -228,16 +228,29 @@ the following:
 
 ---
 
-## Explicitly not in scope for the closed MVP surface
+## Explicitly not in scope for the closed MVP surface (Tier 0)
 
-- finishing native MCP stdio server mode
-- browser/TUI product-track expansion beyond the viewport-backed APIs needed by
-  browser-runtime closure
-- later fingerprinting and browser-identity work
-- `IntersectionObserver` / `ResizeObserver`
-- full browser-history navigation/traversal semantics
+These items were **outside Tier 0** when this file's closure record
+was written. They are now governed by other sub-specs and may be
+active under a later tier — see `spec/subspecs/browser-roadmap.md`
+for the cross-tier ladder. This file remains the **Tier 0 closure
+record only**.
 
-Those remain documented, but deferred.
+- finishing native MCP stdio server mode → `spec/subspecs/mcp-stdio.md`
+  (deferred)
+- interactive-TUI expansion (form fields, focus, keyboard input,
+  history, URL bar, cookie inspector) → `spec/subspecs/browser-tui.md`
+  (**active** as Tier 1, per ADR 2026-05-09)
+- later fingerprinting / browser-identity work →
+  `spec/Fingerprint-Plan.md` (deferred)
+- `IntersectionObserver` / `ResizeObserver` → Tier 4
+  (`spec/subspecs/browser-roadmap.md §3`); blocked on layout engine
+- full browser-history `pushState`/`popstate` semantics → Tier 3
+  (`spec/subspecs/browser-roadmap.md §3`)
+
+Tier 0's closure record is unaffected: the gates listed in §
+"Verification gates" above continue to apply, and any later tier
+must keep them green.
 
 ## Follow-on closed tracks
 

@@ -2,23 +2,39 @@
 
 > **Canonical execution spec.** If any other planning doc disagrees, this file wins.
 >
-> **Current status:** AWR ships a CLI-first browser-runtime MVP on the primary
-> CLI surface. MVP closure is defined by the curated WPT/Test262 gates in this
-> document and the no-stubs rule for the shipped runtime subset.
+> **Current status:** Tier 0 (CLI-first agent browser runtime) is **CLOSED**
+> and shipped under curated WPT/Test262 gates. Tier 1 (interactive human
+> TUI parity with lynx/w3m) is **ACTIVE** per
+> `spec/subspecs/browser-roadmap.md`. Subsequent tiers (rendering polish,
+> dynamic-site browser APIs, layout, full SPA support) are documented and
+> deferred. This file remains the change-control point for any tier
+> promotion or scope change.
 
 ---
 
 ## 1. Product target
 
-AWR's MVP is a **CLI-first browser runtime** that can:
+AWR is a **dual-surface CLI-first browser**: one Zig binary, two
+co-equal interfaces sharing one session.
 
-1. load real pages from disk and the network;
-2. execute the page JavaScript needed for agent workflows;
-3. return stable machine-readable output and readable terminal output;
-4. ground runtime correctness in curated Web Platform Tests and Test262 cases.
+1. **Human surface** (`awr browse <url>`): a terminal UI for reading,
+   navigating, and interacting with pages — keyboard navigation, form
+   fill, history, cookie management.
+2. **Agent surface** (`awr <url>`, `awr extract`, `awr tools`,
+   `awr call`): clean JSON / Markdown / WebMCP outputs for LLM and
+   tool-using agents.
 
-WebMCP remains a supported layer on top of that runtime, but browser/runtime
-correctness is the primary MVP authority.
+Both surfaces render from the same DOM tree and share the same
+cookie / connection state via the daemon (`spec/subspecs/daemon-mode.md`).
+A human can log in once; an agent operating in the same scope picks up
+the authenticated session.
+
+The product climbs a tiered capability ladder
+(`spec/subspecs/browser-roadmap.md`) from the closed Tier 0 agent
+runtime upward toward broader site coverage. WebMCP remains a
+supported layer on top of the runtime; browser/runtime correctness
+remains the primary MVP authority and is gated by curated Web Platform
+Tests and Test262 cases.
 
 ---
 
@@ -29,10 +45,13 @@ correctness is the primary MVP authority.
 | Document | Role |
 |---|---|
 | `spec/MVP.md` | Top-level canonical umbrella spec and change-control point |
-| `spec/subspecs/mvp-remainder.md` | Active MVP completion track and execution order |
-| `spec/subspecs/wpt-conformance.md` | Canonical WPT/Test262 runner, corpus, and merge-gate spec |
-| `spec/subspecs/agent-browser.md` | Active agent-browser scope: POST in fetch+XHR, form `method=post`, cookie persistence |
-| `spec/subspecs/daemon-mode.md` | Active daemon-mode scope: long-lived `awrd` + JSON-RPC IPC for amortized startup |
+| `spec/subspecs/browser-roadmap.md` | **Cross-tier capability ladder.** Tier ordering, tier-promotion gates, and the WPT-growth contract that ties tier closure to corpus growth |
+| `spec/subspecs/mvp-remainder.md` | Tier 0 closure record (was: active MVP completion track) |
+| `spec/subspecs/wpt-conformance.md` | Canonical WPT/Test262 runner, corpus, and merge-gate spec; corpus grows with each active tier |
+| `spec/subspecs/agent-browser.md` | Tier 0 agent-browser scope (closed): POST in fetch+XHR, form `method=post`, cookie persistence |
+| `spec/subspecs/rendering.md` | Tier 0 rendering scope (closed): terminal render + image protocols |
+| `spec/subspecs/daemon-mode.md` | Tier 0 daemon-mode scope (active → closing): long-lived `awrd` + JSON-RPC IPC for amortized startup |
+| `spec/subspecs/browser-tui.md` | **Tier 1 active sub-spec**: interactive TUI parity (form fields, focus, keyboard input, history, URL bar, cookie inspector, browser-cookie import) |
 | `docs/adr/0001-spec-governance.md` | Historical record for spec/documentation governance decisions |
 
 ### Deferred, documented, not active now
@@ -40,8 +59,12 @@ correctness is the primary MVP authority.
 | Document | Role |
 |---|---|
 | `spec/subspecs/mcp-stdio.md` | Deferred native MCP stdio server track (will be a thin client of daemon-mode per its B1 design doc) |
-| `spec/subspecs/browser-tui.md` | Deferred browser/TUI product track |
 | `spec/Fingerprint-Plan.md` | Future-only fingerprinting roadmap |
+
+Tiers 2–5 (rendering polish, dynamic-site APIs, layout engine, full SPA
+parity) are described in `spec/subspecs/browser-roadmap.md §3` but do
+not yet have dedicated sub-specs; they're created when promoted to
+ACTIVE.
 
 ### Background / historical only
 
@@ -142,18 +165,29 @@ Rules:
 
 ## 7. Explicitly deferred
 
-These tracks stay documented, but they are **not** in the active MVP closure
-queue:
+These tracks stay documented, but they are **not** in the active queue:
 
 - native MCP stdio server work → `spec/subspecs/mcp-stdio.md`
-- browser/TUI product-track expansion → `spec/subspecs/browser-tui.md`
 - later fingerprinting / owned browser identity work →
   `spec/Fingerprint-Plan.md`
+- Tiers 2–5 of the browser-roadmap (rendering polish, dynamic-site
+  browser APIs, layout engine, full SPA parity) →
+  `spec/subspecs/browser-roadmap.md §3`. These do not have dedicated
+  sub-specs yet; sub-specs are created at promotion time.
 
 The agent-browser scope (POST in `fetch` and XHR, `<form method=post>` end-to-
 end through `awr browse`, cookie jar disk persistence) is governed by
 `spec/subspecs/agent-browser.md` and is **closed** (per ADR
-2026-04-28 entry).
+2026-04-28 entry). Tier 0 of the browser-roadmap encompasses
+agent-browser, rendering, daemon-mode, and the WPT/Test262 gates.
+
+The Tier 1 interactive-TUI scope (form-field interaction, focus
+management, keyboard input dispatch, history navigation, URL bar,
+cookie inspector, Chrome/Firefox cookie import) is governed by
+`spec/subspecs/browser-tui.md` and is **active** (per ADR
+2026-05-09 entry). Tier 1 closure does not weaken any Tier 0
+gate — `spec/subspecs/browser-tui.md §4` requires every existing
+gate stays green plus the new corpus areas land.
 
 The rendering scope (real-page render-quality corpus + terminal image
 rendering) is governed by `spec/subspecs/rendering.md` and is

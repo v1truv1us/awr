@@ -2,11 +2,27 @@
 
 ## What This Is
 
-AWR is a CLI-first MVP web browser written in Zig.
-Its main job is to fetch real pages, execute enough DOM and JS to make them useful, and render practical output in the terminal.
+AWR is a **dual-surface CLI-first terminal browser** written in Zig.
+One binary, two co-equal interfaces sharing one session:
 
-WebMCP and MCP server mode are supported features.
-They should be treated as extensions of the browser runtime, not the primary framing for the product.
+- **Human surface** — `awr browse <url>`: a TUI for reading,
+  navigating, filling forms, and interacting with pages from the
+  terminal.
+- **Agent surface** — `awr <url>`, `awr extract`, `awr tools`,
+  `awr call`: clean JSON / Markdown / WebMCP outputs for LLM and
+  tool-using agents.
+
+Both surfaces render from the same DOM tree and share the same cookie
+jar / connection pool via the daemon (`spec/subspecs/daemon-mode.md`).
+
+The product climbs a **tiered capability ladder** (see
+`spec/subspecs/browser-roadmap.md`) from a closed Tier 0 (agent
+runtime + WPT/Test262 gates + daemon) toward the broader readable
+web. Tier 1 (interactive TUI parity with lynx/w3m) is the active
+track; Tiers 2–5 are deferred and documented.
+
+WebMCP and MCP server mode are supported layers on top of the runtime;
+not the primary framing.
 
 ## Principles
 
@@ -52,19 +68,30 @@ zig build test-test262 # JS conformance subset
 
 ## Product framing
 
-Primary experience:
+Primary experience (Tier 0 closed + Tier 1 active):
 
-1. `awr <url>` renders readable terminal output
-2. `awr tools <url>` returns discovered WebMCP tools
-3. `awr call <url> <tool> <json>` invokes a discovered WebMCP tool
-4. `awr mock` serves local test fixtures
+1. `awr browse <url>` — interactive TUI: read, navigate, fill
+   forms, manage cookies (Tier 1 active per
+   `spec/subspecs/browser-tui.md`)
+2. `awr <url>` — agent JSON envelope
+3. `awr extract <url>` — agent Markdown extraction
+4. `awr tools <url>` — discovered WebMCP tools
+5. `awr call <url> <tool> <json>` — invoke a WebMCP tool
+6. `awr mock` — local test fixtures
 
-Secondary experience:
+Daemon-amortized variants of all of the above when `AWR_DAEMON=1` is
+set; auto-spawn handled by the CLI.
 
-1. deferred native MCP stdio work
-2. deferred browser/TUI expansion beyond the core browser-runtime MVP closure
+Deferred (do not implement without an ADR amendment):
 
-When docs or code comments need a one-line description, use **CLI-first web browser runtime**.
+1. native MCP stdio server (`spec/subspecs/mcp-stdio.md`)
+2. Tier 2+ browser capabilities (rendering polish, dynamic-site
+   APIs like History/WebSocket/MutationObserver, layout engine,
+   full SPA support) — see
+   `spec/subspecs/browser-roadmap.md §3`
+
+When docs or code comments need a one-line description, use **dual-surface
+CLI-first terminal browser**.
 
 ## Architecture
 
