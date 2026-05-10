@@ -2,7 +2,7 @@
   •       Skip to search[2]
 [Navigation omitted]
 
-[]Toggle sidebar  1.                      Web[3]
+[button]Toggle sidebar  1.                            Web[3]
   2.      HTML[4]
   3.      Reference[5]
   4.      Elements[6]

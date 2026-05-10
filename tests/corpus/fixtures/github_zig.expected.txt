@@ -2,8 +2,8 @@ Skip to content[1][Header omitted]
 
 You signed in with another tab or window.Reloadto refresh your session.You
 signed out in another tab or window.Reloadto refresh your session.You switched
-accounts on another tab or window.Reloadto refresh your session.[]Dismiss
-alert[]{{ message }}
+accounts on another tab or window.Reloadto refresh your session.[button]Dismiss
+alert[Dismiss this message]{{ message }}
 ziglang[2]/zig[3]Public  •                              Uh oh!
 
 
@@ -19,8 +19,8 @@ ziglang[2]/zig[3]Public  •                              Uh oh!
 
 [Navigation omitted]
 
-[7][ master]Branches[8]Tags[9][10][11][Go to file][Code][]Open more actions
-menuFolders and files
+[7][ master]Branches[8]Tags[9][10][11][Go to file][Code][button]Open more
+actions menuFolders and files
 -----------------
 
 NameNameLast commit messageLast commit dateLatest commit
@@ -76,9 +76,6 @@ There was an error while loading.Please reload this page.
 Contributors
 ------------
 
-  • 
-  • 
-  • 
 Uh oh!
 
 
@@ -96,4 +93,4 @@ Languages
 
 [Footer omitted]
 
-[]You can’t perform that action at this time.[]
+[Dismiss error]You can’t perform that action at this time.[Close dialog]

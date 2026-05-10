@@ -1,9 +1,9 @@
 
 
 
-[][NVIDIA][2][Navigation omitted]
+[Open Menu][NVIDIA][2][Navigation omitted]
 
-[____________________]⌘KCtrl+K[][][?][Login]Models
+[____________________]⌘KCtrl+K[Search][Search][?][Login]Models
 ======
 
 Deploy and scale models on your GPU infrastructure of choice with NVIDIA NIM
@@ -14,7 +14,7 @@ inference microservices
 [Sidebar omitted]
 
 
-[Filters (2)]8 models[____________________][]Sort By[dateCreated:DESC ▼][Most Recent]Z.ai[3]Free
+[Filters (2)]8 models[____________________][Search]Sort By[dateCreated:DESC ▼][Most Recent]Z.ai[3]Free
 Endpointglm-4.7
 
 
@@ -40,6 +40,7 @@ State-of-the-art open mixture-of-experts model with strong reasoning, coding,
 and agentic capabilitiescoding[10][+3]15.32M9mo[Header omitted]
 
 High performance reasoning model optimized for efficiency and edge deploymentcoding[11][+3]1.19M9moItems
-per page[24][][][11][][][1___________________]of 1 pages
+per page[24][Go to first page][Go to previous page][11][Go to next page][Go to last page][1___________________]of
+1 pages
 [Footer omitted]
 

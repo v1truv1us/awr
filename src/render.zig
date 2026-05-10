@@ -866,6 +866,15 @@ fn renderListItem(
     is_ordered: bool,
     item_num: *usize,
 ) anyerror!void {
+    // Skip list items whose visible content is empty after extraction
+    // (script/style stripped, decorative images skipped). Otherwise we
+    // emit a bare bullet `•` with no text — pure noise. T-76: surfaced
+    // by Google's homepage where suggestion `<li>` elements with only
+    // empty-alt icons rendered as a column of stranded bullets.
+    const probe = elem.textContentForExtract(state.allocator) catch "";
+    defer if (probe.len > 0) state.allocator.free(probe);
+    if (std.mem.trim(u8, probe, " \t\r\n").len == 0 and !hasVisibleControl(elem)) return;
+
     const saved_indent = state.hang_indent;
 
     try state.ensureNewline(w);
@@ -884,6 +893,27 @@ fn renderListItem(
     try state.newline(w);
 
     state.hang_indent = saved_indent;
+}
+
+/// True when an element subtree contains a focusable form control we
+/// want the user to be able to Tab into (input/select/textarea/button).
+/// Used by `renderListItem` to keep an `<li>` that wraps a button even
+/// if the textual content is empty (icon-only buttons).
+fn hasVisibleControl(elem: *const dom.Element) bool {
+    for (elem.children.items) |child| {
+        if (child != .element) continue;
+        const tag = child.element.tag;
+        if (eql(tag, "input") or eql(tag, "textarea") or eql(tag, "select") or eql(tag, "button")) {
+            // hidden inputs are not visible controls
+            if (eql(tag, "input")) {
+                const t = child.element.getAttribute("type") orelse "text";
+                if (eql(t, "hidden")) continue;
+            }
+            return true;
+        }
+        if (hasVisibleControl(child.element)) return true;
+    }
+    return false;
 }
 
 fn renderBlockquote(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
@@ -1008,7 +1038,18 @@ fn renderImage(state: *RenderState, w: anytype, elem: *const dom.Element) anyerr
         }
     }
 
-    const alt = elem.getAttribute("alt") orelse "image";
+    // HTML spec: an explicit `alt=""` marks the image as decorative —
+    // screen readers skip it. Treat it the same way in the terminal
+    // render: emit nothing (no `[]` placeholder, no link footnote).
+    // Real-world payoff: Google/X/etc. use `alt=""` for icons inside
+    // text links, which would otherwise spam the page with `[]` and
+    // duplicate footnote refs that aren't useful targets.
+    const alt_attr = elem.getAttribute("alt");
+    if (alt_attr) |alt_val| {
+        if (alt_val.len == 0) return;
+    }
+    const alt = alt_attr orelse "image";
+
     try state.writeAll(w, "[");
     try state.writeAll(w, alt);
     try state.writeAll(w, "]");
@@ -1133,12 +1174,30 @@ fn focusMatches(focused_ptr: ?usize, elem: *const dom.Element) bool {
 fn renderButton(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
     const label = elem.textContentForExtract(state.allocator) catch "Button";
     defer state.allocator.free(label);
-    const trimmed = std.mem.trim(u8, label, " \t\r\n");
+    const trimmed_text = std.mem.trim(u8, label, " \t\r\n");
+
+    // T-76: icon-only buttons (Google's voice/lens/etc.) have empty text
+    // content — they used to render as `[]`. Fall back to aria-label /
+    // title / value / name in priority order so the user sees *what*
+    // they're focusing. This matches screen-reader resolution.
+    const display: []const u8 = if (trimmed_text.len > 0)
+        trimmed_text
+    else if (elem.getAttribute("aria-label")) |al|
+        al
+    else if (elem.getAttribute("title")) |t|
+        t
+    else if (elem.getAttribute("value")) |v|
+        v
+    else if (elem.getAttribute("name")) |n|
+        n
+    else
+        "button";
+
     const col = state.col;
     try state.prepareForContent(w);
     try state.ansi(w, BOLD);
     try state.writeAll(w, "[");
-    try state.writeAll(w, trimmed);
+    try state.writeAll(w, display);
     try state.writeAll(w, "]");
     try state.ansi(w, RESET);
     const name = elem.getAttribute("name") orelse "";
@@ -1147,9 +1206,9 @@ fn renderButton(state: *RenderState, w: anytype, elem: *const dom.Element) anyer
         @intFromPtr(elem),
         name,
         btn_type,
-        trimmed,
+        display,
         col,
-        trimmed.len + 2,
+        display.len + 2,
         eql(btn_type, "submit"),
     ) catch {};
 }
