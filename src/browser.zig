@@ -719,6 +719,21 @@ pub const BrowserSession = struct {
         self.status_message = try self.allocator.dupe(u8, msg);
     }
 
+    /// Surface a runtime error in the status line instead of letting
+    /// it propagate out of the run loop and tear down the TUI. T-78:
+    /// before this, any `try session.submitPrompt()` / `openSelectedLink`
+    /// failure (invalid URL, network error, parse error) exited the
+    /// process — looked like a crash to the user.
+    pub fn reportError(self: *BrowserSession, label: []const u8, err: anyerror) void {
+        const msg = std.fmt.allocPrint(
+            self.allocator,
+            "{s}: {t}",
+            .{ label, err },
+        ) catch return;
+        defer self.allocator.free(msg);
+        self.setStatusMessage(msg) catch {};
+    }
+
     /// FieldValueLookup callback: returns the user's typed value for
     /// `field_name`, or null when the user hasn't touched that field.
     /// Plumbed into the renderer so the displayed `[___]` reflects what
@@ -906,26 +921,26 @@ pub fn runWith(
                     if (session.focus_target == .field and session.selected_field != null) {
                         const field = session.activeField();
                         if (field != null and field.?.is_submit) {
-                            try session.submitForm();
+                            session.submitForm() catch |err| session.reportError("submit failed", err);
                         } else {
-                            try session.openSelectedLink();
+                            session.openSelectedLink() catch |err| session.reportError("open failed", err);
                         }
                     } else {
-                        try session.openSelectedLink();
+                        session.openSelectedLink() catch |err| session.reportError("open failed", err);
                     }
                 },
                 .char => |ch| switch (ch) {
                     'j' => session.scrollBy(1, viewportHeight(terminal.size())),
                     'k' => session.scrollBy(-1, viewportHeight(terminal.size())),
-                    'b' => try session.goBack(),
-                    'f' => try session.goForward(),
-                    'r' => try session.reload(),
+                    'b' => session.goBack() catch |err| session.reportError("back failed", err),
+                    'f' => session.goForward() catch |err| session.reportError("forward failed", err),
+                    'r' => session.reload() catch |err| session.reportError("reload failed", err),
                     // T-66 / Tier 1: URL bar opens via vim-style ':'
                     // (preferred per spec/subspecs/browser-tui.md §2.6)
                     // OR legacy 'g' (existing binding kept for muscle
                     // memory compatibility).
-                    'g', ':' => try session.startPrompt(.url),
-                    '/' => try session.startPrompt(.search),
+                    'g', ':' => session.startPrompt(.url) catch |err| session.reportError("prompt failed", err),
+                    '/' => session.startPrompt(.search) catch |err| session.reportError("prompt failed", err),
                     'n' => session.advanceSearch(viewportHeight(terminal.size())),
                     'e' => {
                         const model2 = session.screenModel();
@@ -944,10 +959,10 @@ pub fn runWith(
                 else => {},
             },
             .url, .search => switch (key) {
-                .enter => try session.submitPrompt(),
+                .enter => session.submitPrompt() catch |err| session.reportError("navigate failed", err),
                 .backspace => session.popPromptByte(),
                 .escape => session.cancelPrompt(),
-                .char => |ch| try session.appendPromptByte(ch),
+                .char => |ch| session.appendPromptByte(ch) catch |err| session.reportError("input failed", err),
                 else => {},
             },
         }
@@ -977,6 +992,13 @@ fn draw(terminal: *tui.Terminal, io: std.Io, session: *BrowserSession) !void {
             }
             try stdout.writeAll("\x1b[K\n");
         }
+    } else {
+        // T-77: fresh-tab welcome. With no page loaded, paint a
+        // welcome screen in the body so `awr tui` (no URL) looks
+        // like a "new tab" rather than a broken-page blank. The
+        // URL prompt stays in the footer (vim-style) — startPrompt
+        // is already active so typing here goes straight to it.
+        try drawWelcome(stdout, size.cols, viewport_height);
     }
 
     const footer = try session.footerText(session.allocator);
@@ -988,6 +1010,79 @@ fn draw(terminal: *tui.Terminal, io: std.Io, session: *BrowserSession) !void {
 
 fn viewportHeight(size: tui.Size) usize {
     return if (size.rows > 2) size.rows - 2 else 0;
+}
+
+/// Welcome screen painted in the viewport when no page has loaded
+/// yet — the `awr tui` "new tab" experience. Caller has already
+/// written the header (`AWR — ` + url). We're responsible for
+/// filling exactly `viewport_height` rows; each ends with `\x1b[K\n`
+/// so leftover content from prior frames is cleared on resize.
+fn drawWelcome(writer: anytype, cols: usize, viewport_height: usize) !void {
+    // Content block we want to vertically center.
+    const BOLD = "\x1b[1m";
+    const DIM = "\x1b[2m";
+    const RESET = "\x1b[0m";
+
+    // Build the lines in order. Empty strings are blank spacer rows.
+    const tips = [_][]const u8{
+        BOLD ++ "AWR — Agentic Web Runtime" ++ RESET,
+        DIM ++ "A CLI browser for humans and agents." ++ RESET,
+        "",
+        BOLD ++ "Type a URL below and press Enter to navigate." ++ RESET,
+        "",
+        DIM ++ "Keys:" ++ RESET,
+        "  " ++ BOLD ++ ":" ++ RESET ++ "  URL bar             " ++ BOLD ++ "/" ++ RESET ++ "  find in page",
+        "  " ++ BOLD ++ "Tab" ++ RESET ++ " next link/field    " ++ BOLD ++ "Enter" ++ RESET ++ " activate",
+        "  " ++ BOLD ++ "b" ++ RESET ++ "  back                " ++ BOLD ++ "f" ++ RESET ++ "  forward",
+        "  " ++ BOLD ++ "r" ++ RESET ++ "  reload              " ++ BOLD ++ "q" ++ RESET ++ "  quit",
+        "",
+        DIM ++ "Tip: set $AWR_HOMEPAGE to skip this screen." ++ RESET,
+    };
+
+    // Vertical centering: leave roughly equal blank rows above and
+    // below. Saturating arithmetic so small terminals still paint
+    // something useful instead of nothing.
+    const top_pad = if (viewport_height > tips.len)
+        (viewport_height - tips.len) / 2
+    else
+        0;
+
+    var row: usize = 0;
+    while (row < top_pad) : (row += 1) try writer.writeAll("\x1b[K\n");
+
+    for (tips) |line| {
+        if (row >= viewport_height) break;
+        // Horizontal centering: left-pad by half of the leftover
+        // space. visualLen ignores ANSI so the math is correct even
+        // for the BOLD/DIM-wrapped strings above.
+        const vl = visualLen(line);
+        if (cols > vl) {
+            const lpad = (cols - vl) / 2;
+            for (0..lpad) |_| try writer.writeByte(' ');
+        }
+        try writeClippedLine(writer, cols, line);
+        try writer.writeAll("\x1b[K\n");
+        row += 1;
+    }
+
+    while (row < viewport_height) : (row += 1) try writer.writeAll("\x1b[K\n");
+}
+
+/// Visible column count of `text`, skipping ANSI escape sequences.
+/// Shares its scan strategy with `writeClippedLine`.
+fn visualLen(text: []const u8) usize {
+    var visible: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '\x1b') {
+            while (i < text.len and text[i] != 'm') : (i += 1) {}
+            if (i < text.len) i += 1;
+            continue;
+        }
+        visible += 1;
+        i += 1;
+    }
+    return visible;
 }
 
 fn writeClippedLine(writer: anytype, width: usize, text: []const u8) !void {
@@ -1263,6 +1358,58 @@ test "countFocusables excludes hidden inputs" {
     // appear in model.fields (we keep them for form submission)
     // but must not be counted toward focus order.
     try std.testing.expectEqual(@as(usize, 1), countFocusables(model));
+}
+
+test "search round-trip: prompt → type → submit → matches populated → advance" {
+    // Reproduces "crashing whenever I try to search in the tui" by
+    // driving the exact key sequence: `/` → chars → Enter → `n`.
+    var session = try BrowserSession.init(std.testing.allocator, std.testing.io);
+    defer session.deinit();
+
+    const html =
+        \\<html><body>
+        \\<h1>Hello World</h1>
+        \\<p>Some text with hello somewhere inside.</p>
+        \\<p>Another paragraph mentioning Hello again.</p>
+        \\<p>No match on this row.</p>
+        \\</body></html>
+    ;
+    var result = try session.page.processHtml("http://example.com/", 200, html);
+    const screen = try session.page.renderBrowseModel(std.testing.allocator, &result, .{
+        .max_width = 78,
+        .ansi_colors = false,
+        .show_links = true,
+        .show_images = true,
+    });
+    session.current = .{ .result = result, .screen = screen };
+    try session.setViewportSize(80, 24);
+
+    // `/` opens search prompt.
+    try session.startPrompt(.search);
+    try std.testing.expectEqual(@as(@TypeOf(session.prompt_mode), .search), session.prompt_mode);
+
+    // type "hello"
+    for ("hello") |ch| try session.appendPromptByte(ch);
+    try std.testing.expect(std.mem.eql(u8, session.prompt_buffer.items, "hello"));
+
+    // Enter commits.
+    try session.submitPrompt();
+    try std.testing.expectEqual(@as(@TypeOf(session.prompt_mode), .none), session.prompt_mode);
+
+    // matches should be non-empty (3 lines contain "hello" case-insensitive).
+    try std.testing.expect(session.search_matches.items.len >= 2);
+    try std.testing.expect(session.search_index != null);
+
+    // `n` advances to next match — was a crash suspect (index/scroll math).
+    session.advanceSearch(20);
+    session.advanceSearch(20);
+    session.advanceSearch(20); // wrap
+
+    // Re-search same query: previous_query path that exercises
+    // dupe→free→dupe in setSearchQuery. Frequent source of UAF in
+    // string-shuffling state machines.
+    try session.setSearchQuery("hello");
+    try std.testing.expect(session.search_matches.items.len >= 2);
 }
 
 test "Tab onto Google-shaped textarea enters edit mode and accepts typing" {
