@@ -77,6 +77,32 @@ pub const RenderOptions = struct {
     /// preserves `test-corpus` determinism since corpus tests never
     /// build a lookup.
     image_lookup: ?ImageLookup = null,
+    /// Per-field user-typed-value override. When non-null,
+    /// `renderInput` / `renderTextarea` query this lookup with the
+    /// field's `name` attribute; if the lookup returns a value, it
+    /// replaces the DOM's `value` attribute in the rendered box.
+    /// Used by `awr browse` to show what the user has typed in a
+    /// focused field as they type, instead of leaving the box empty
+    /// while their text accumulates only in the status bar.
+    field_value_lookup: ?FieldValueLookup = null,
+    /// Pointer-equality identifier of the currently-focused element
+    /// (typically `@intFromPtr(elem)` of a form control). When set,
+    /// `renderInput` / `renderTextarea` / `renderButton` /
+    /// `renderSelect` add a visible highlight (reverse video) to the
+    /// matching field's rendered box so the user sees where Tab
+    /// landed and where typing will go. `null` means "no focus
+    /// highlight" — non-interactive `awr render` and corpus output
+    /// stays clean.
+    focused_element_ptr: ?usize = null,
+};
+
+pub const FieldValueLookup = struct {
+    ctx: *anyopaque,
+    lookup_fn: *const fn (ctx: *anyopaque, name: []const u8) ?[]const u8,
+
+    pub fn lookup(self: FieldValueLookup, name: []const u8) ?[]const u8 {
+        return self.lookup_fn(self.ctx, name);
+    }
 };
 
 pub const ScreenField = struct {
@@ -355,6 +381,7 @@ const RenderState = struct {
 
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
+const REVERSE = "\x1b[7m";
 const DIM = "\x1b[2m";
 const UNDERLINE = "\x1b[4m";
 const ITALIC = "\x1b[3m";
@@ -1058,9 +1085,20 @@ fn renderInput(state: *RenderState, w: anytype, elem: *const dom.Element) anyerr
     }
 
     const field_width: usize = 20;
-    const value = elem.getAttribute("value") orelse "";
+    // T-72b: prefer the user's typed value (from BrowserSession's
+    // field_values map) over the DOM's value attribute. The lookup
+    // returns null for fields the user hasn't touched yet, falling
+    // back to whatever the DOM had (server-side default, hidden
+    // pre-fill, etc.).
+    const dom_value = elem.getAttribute("value") orelse "";
+    const value: []const u8 = if (state.opts.field_value_lookup) |fvl|
+        fvl.lookup(name) orelse dom_value
+    else
+        dom_value;
     const col = state.col;
+    const focused = focusMatches(state.opts.focused_element_ptr, elem);
     try state.prepareForContent(w);
+    if (focused and state.opts.ansi_colors) try state.ansi(w, REVERSE);
     try state.writeAll(w, "[");
     if (eql(input_type, "password")) {
         for (0..@min(value.len, field_width)) |_| {
@@ -1075,6 +1113,7 @@ fn renderInput(state: *RenderState, w: anytype, elem: *const dom.Element) anyerr
         try state.writeByte(w, '_');
     }
     try state.writeAll(w, "]");
+    if (focused and state.opts.ansi_colors) try state.ansi(w, RESET);
     _ = state.registerField(
         @intFromPtr(elem),
         name,
@@ -1084,6 +1123,11 @@ fn renderInput(state: *RenderState, w: anytype, elem: *const dom.Element) anyerr
         field_width + 2,
         false,
     ) catch {};
+}
+
+fn focusMatches(focused_ptr: ?usize, elem: *const dom.Element) bool {
+    const fp = focused_ptr orelse return false;
+    return fp == @intFromPtr(elem);
 }
 
 fn renderButton(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
@@ -1144,11 +1188,17 @@ fn renderSelect(state: *RenderState, w: anytype, elem: *const dom.Element) anyer
 }
 
 fn renderTextarea(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
-    const value = elem.textContentForExtract(state.allocator) catch "";
-    defer state.allocator.free(value);
-    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    const dom_value = elem.textContentForExtract(state.allocator) catch "";
+    defer state.allocator.free(dom_value);
     const name = elem.getAttribute("name") orelse "";
+    // T-72b: user-typed value beats the DOM-default if present.
+    const raw_value: []const u8 = if (state.opts.field_value_lookup) |fvl|
+        fvl.lookup(name) orelse dom_value
+    else
+        dom_value;
+    const trimmed = std.mem.trim(u8, raw_value, " \t\r\n");
     const col = state.col;
+    const focused = focusMatches(state.opts.focused_element_ptr, elem);
     const rows: usize = blk: {
         const rows_str = elem.getAttribute("rows") orelse "2";
         break :blk std.fmt.parseInt(usize, rows_str, 10) catch 2;
@@ -1158,14 +1208,17 @@ fn renderTextarea(state: *RenderState, w: anytype, elem: *const dom.Element) any
         break :blk std.fmt.parseInt(usize, cols_str, 10) catch 20;
     };
     try state.prepareForContent(w);
+    if (focused and state.opts.ansi_colors) try state.ansi(w, REVERSE);
     try state.writeAll(w, "+");
     for (0..cols) |_| try state.writeByte(w, '-');
     try state.writeAll(w, "+");
+    if (focused and state.opts.ansi_colors) try state.ansi(w, RESET);
     try state.newline(w);
     var line_idx: usize = 0;
     var byte_idx: usize = 0;
     while (line_idx < rows) : (line_idx += 1) {
         try state.prepareForContent(w);
+        if (focused and state.opts.ansi_colors) try state.ansi(w, REVERSE);
         try state.writeByte(w, '|');
         var char_count: usize = 0;
         while (char_count < cols and byte_idx < trimmed.len) {
@@ -1182,13 +1235,16 @@ fn renderTextarea(state: *RenderState, w: anytype, elem: *const dom.Element) any
             char_count += 1;
         }
         try state.writeByte(w, '|');
+        if (focused and state.opts.ansi_colors) try state.ansi(w, RESET);
         if (line_idx < rows - 1) try state.newline(w);
     }
     try state.newline(w);
     try state.prepareForContent(w);
+    if (focused and state.opts.ansi_colors) try state.ansi(w, REVERSE);
     try state.writeAll(w, "+");
     for (0..cols) |_| try state.writeByte(w, '-');
     try state.writeAll(w, "+");
+    if (focused and state.opts.ansi_colors) try state.ansi(w, RESET);
     _ = state.registerField(
         @intFromPtr(elem),
         name,

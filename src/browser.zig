@@ -624,11 +624,19 @@ pub const BrowserSession = struct {
         var local_result = result;
         errdefer local_result.deinit();
 
+        const fvl: page_mod.FieldValueLookup = .{
+            .ctx = self,
+            .lookup_fn = fieldValueLookupCallback,
+        };
         var rendered = try self.page.renderBrowseModel(self.allocator, &local_result, .{
             .max_width = self.render_width,
             .ansi_colors = true,
             .show_links = true,
             .show_images = true,
+            .field_value_lookup = fvl,
+            // First render of a fresh page — no focus yet (Tab will set
+            // it, then the next rerender picks it up).
+            .focused_element_ptr = null,
         });
         errdefer rendered.deinit();
 
@@ -711,16 +719,46 @@ pub const BrowserSession = struct {
         self.status_message = try self.allocator.dupe(u8, msg);
     }
 
+    /// FieldValueLookup callback: returns the user's typed value for
+    /// `field_name`, or null when the user hasn't touched that field.
+    /// Plumbed into the renderer so the displayed `[___]` reflects what
+    /// the user typed instead of staying empty.
+    fn fieldValueLookupCallback(ctx: *anyopaque, field_name: []const u8) ?[]const u8 {
+        const self: *const BrowserSession = @ptrCast(@alignCast(ctx));
+        for (self.field_values.items) |fv| {
+            if (std.mem.eql(u8, fv.name, field_name)) return fv.value.items;
+        }
+        return null;
+    }
+
+    /// Pointer-equality identifier of the currently-focused form
+    /// control for the renderer's focus highlight. Returns null when
+    /// focus is on a link (or nothing) — link highlighting is a
+    /// separate code path the renderer already handles.
+    fn focusedElementPtrForRender(self: *const BrowserSession) ?usize {
+        if (self.focus_target != .field) return null;
+        const idx = self.selected_field orelse return null;
+        const model = self.screenModel() orelse return null;
+        if (idx >= model.fields.len) return null;
+        return model.fields[idx].element_ptr;
+    }
+
     fn rerenderCurrent(self: *BrowserSession) !void {
         var current = if (self.current) |*loaded| loaded else return;
         const previous_query = if (self.search_query) |query| try self.allocator.dupe(u8, query) else null;
         defer if (previous_query) |query| self.allocator.free(query);
 
+        const fvl: page_mod.FieldValueLookup = .{
+            .ctx = self,
+            .lookup_fn = fieldValueLookupCallback,
+        };
         var rendered = try self.page.renderBrowseModel(self.allocator, &current.result, .{
             .max_width = self.render_width,
             .ansi_colors = true,
             .show_links = true,
             .show_images = true,
+            .field_value_lookup = fvl,
+            .focused_element_ptr = self.focusedElementPtrForRender(),
         });
         errdefer rendered.deinit();
 
@@ -789,9 +827,18 @@ pub fn runWith(
         if (key == .interrupt) return;
         switch (session.prompt_mode) {
             .none => if (session.field_editing) switch (key) {
-                .escape => session.exitFieldEditing(),
-                .tab => session.nextFocusable(false, viewportHeight(terminal.size())),
-                .shift_tab => session.nextFocusable(true, viewportHeight(terminal.size())),
+                .escape => {
+                    session.exitFieldEditing();
+                    session.rerenderCurrent() catch {};
+                },
+                .tab => {
+                    session.nextFocusable(false, viewportHeight(terminal.size()));
+                    session.rerenderCurrent() catch {};
+                },
+                .shift_tab => {
+                    session.nextFocusable(true, viewportHeight(terminal.size()));
+                    session.rerenderCurrent() catch {};
+                },
                 .enter => {
                     // T-64 / Tier 1 slice T1.5: implicit form
                     // submission. Per HTML5 forms, pressing Enter
@@ -821,14 +868,32 @@ pub fn runWith(
                         session.exitFieldEditing();
                     }
                 },
-                .backspace => session.deleteFieldByte(),
-                .char => |ch| try session.appendFieldByte(ch),
+                .backspace => {
+                    session.deleteFieldByte();
+                    // Rerender so the box reflects the deleted byte
+                    // immediately. T-73.
+                    session.rerenderCurrent() catch {};
+                },
+                .char => |ch| {
+                    try session.appendFieldByte(ch);
+                    // Rerender so the typed byte appears inside the
+                    // [____] box. T-73.
+                    session.rerenderCurrent() catch {};
+                },
                 else => {},
             } else switch (key) {
                 .arrow_down => session.scrollBy(1, viewportHeight(terminal.size())),
                 .arrow_up => session.scrollBy(-1, viewportHeight(terminal.size())),
-                .tab => session.nextFocusable(false, viewportHeight(terminal.size())),
-                .shift_tab => session.nextFocusable(true, viewportHeight(terminal.size())),
+                .tab => {
+                    session.nextFocusable(false, viewportHeight(terminal.size()));
+                    // Rerender so the focus highlight moves with the
+                    // cursor. T-73.
+                    session.rerenderCurrent() catch {};
+                },
+                .shift_tab => {
+                    session.nextFocusable(true, viewportHeight(terminal.size()));
+                    session.rerenderCurrent() catch {};
+                },
                 .enter => {
                     if (session.focus_target == .field and session.selected_field != null) {
                         const field = session.activeField();

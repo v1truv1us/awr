@@ -87,6 +87,7 @@ const TimingProbe = struct {
 pub const ScreenModel = render.ScreenModel;
 pub const ScreenLink = render.ScreenLink;
 pub const ScreenField = render.ScreenField;
+pub const FieldValueLookup = render.FieldValueLookup;
 pub const ImageLookup = render.ImageLookup;
 pub const RenderOptions = render.RenderOptions;
 pub const Element = dom.Element;
