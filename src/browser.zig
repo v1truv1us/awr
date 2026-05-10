@@ -326,6 +326,14 @@ pub const BrowserSession = struct {
             if (ord == target_ord) {
                 self.focus_target = .field;
                 self.selected_field = i;
+                // Auto-enter edit mode for text-like fields so the
+                // user can type immediately after Tab. Buttons,
+                // checkboxes, radios, submits stay non-editing —
+                // they activate via Space / Enter (T-62 lands the
+                // activation logic). Matches Chrome / Firefox
+                // behavior where Tab lands on a text input and
+                // typing flows in directly.
+                self.field_editing = isTextLikeField(field);
                 self.ensureLineVisible(field.line, viewport_height);
                 return;
             }
@@ -768,7 +776,33 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, start_url: []const u8) !voi
                 .tab => session.nextFocusable(false, viewportHeight(terminal.size())),
                 .shift_tab => session.nextFocusable(true, viewportHeight(terminal.size())),
                 .enter => {
-                    session.exitFieldEditing();
+                    // T-64 / Tier 1 slice T1.5: implicit form
+                    // submission. Per HTML5 forms, pressing Enter
+                    // in a focused text input submits the parent
+                    // <form>. We commit the field's value (exit
+                    // edit mode) then call submitForm — which
+                    // handles GET vs POST, hidden CSRF inputs,
+                    // and target URL resolution.
+                    if (session.activeField()) |field| {
+                        if (isTextLikeField(field)) {
+                            session.exitFieldEditing();
+                            session.submitForm() catch |err| {
+                                const msg = std.fmt.allocPrint(
+                                    session.allocator,
+                                    "submit failed: {t}",
+                                    .{err},
+                                ) catch null;
+                                if (msg) |m| {
+                                    defer session.allocator.free(m);
+                                    session.setStatusMessage(m) catch {};
+                                }
+                            };
+                        } else {
+                            session.exitFieldEditing();
+                        }
+                    } else {
+                        session.exitFieldEditing();
+                    }
                 },
                 .backspace => session.deleteFieldByte(),
                 .char => |ch| try session.appendFieldByte(ch),
@@ -796,7 +830,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, start_url: []const u8) !voi
                     'b' => try session.goBack(),
                     'f' => try session.goForward(),
                     'r' => try session.reload(),
-                    'g' => try session.startPrompt(.url),
+                    // T-66 / Tier 1: URL bar opens via vim-style ':'
+                    // (preferred per spec/subspecs/browser-tui.md §2.6)
+                    // OR legacy 'g' (existing binding kept for muscle
+                    // memory compatibility).
+                    'g', ':' => try session.startPrompt(.url),
                     '/' => try session.startPrompt(.search),
                     'n' => session.advanceSearch(viewportHeight(terminal.size())),
                     'e' => {
@@ -924,6 +962,29 @@ fn countEditableFields(model: *const page_mod.ScreenModel) usize {
         if (isUserVisibleField(field)) count += 1;
     }
     return count;
+}
+
+/// True for field types where the user types text directly:
+/// `text`, `password`, `email`, `url`, `search`, `tel`, `number`,
+/// and `textarea`. Buttons / checkboxes / radios / submits are
+/// focusable but not text-typing — they accept Space / Enter
+/// activation (handled by T-62 / slice T1.3).
+fn isTextLikeField(field: page_mod.ScreenField) bool {
+    if (field.is_submit) return false;
+    const t = field.field_type;
+    if (std.mem.eql(u8, t, "text")) return true;
+    if (std.mem.eql(u8, t, "password")) return true;
+    if (std.mem.eql(u8, t, "email")) return true;
+    if (std.mem.eql(u8, t, "url")) return true;
+    if (std.mem.eql(u8, t, "search")) return true;
+    if (std.mem.eql(u8, t, "tel")) return true;
+    if (std.mem.eql(u8, t, "number")) return true;
+    if (std.mem.eql(u8, t, "textarea")) return true;
+    // Default-to-text behavior for inputs without an explicit
+    // type attribute (HTML default is "text"). Defensive — most
+    // pages set type explicitly, but lazy markup exists.
+    if (t.len == 0) return true;
+    return false;
 }
 
 fn editableFieldAt(model: *const page_mod.ScreenModel, idx: usize) ?page_mod.ScreenField {
