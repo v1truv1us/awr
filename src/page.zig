@@ -1636,6 +1636,33 @@ pub const Page = struct {
         const trimmed_src = std.mem.trim(u8, raw_src, " \t\r\n");
         if (trimmed_src.len == 0) return;
 
+        // T-92.2: data: URL inline content. Per RFC 2397, the URL itself
+        // carries the script body (percent- or base64-encoded). Reddit
+        // and other sites inline polyfills this way; without this branch
+        // we'd punt to the HTTP fetcher and fail with UnsupportedScheme.
+        if (std.mem.startsWith(u8, trimmed_src, "data:")) {
+            const decoded = decodeDataUrl(self.allocator, trimmed_src) catch |err| {
+                logExternalScriptError("awr: data URL decode failed: {t}\n", .{err});
+                return;
+            };
+            defer self.allocator.free(decoded);
+            if (decoded.len == 0) return;
+            // QuickJS wants a null-terminated buffer + filename.
+            const buf = self.allocator.allocSentinel(u8, decoded.len, 0) catch return;
+            defer self.allocator.free(buf);
+            @memcpy(buf, decoded);
+            // For the source-map / stack-trace filename, surface a
+            // synthetic `data:` placeholder so QuickJS errors carry
+            // context without dumping the full encoded URL.
+            const name = self.allocator.allocSentinel(u8, 9, 0) catch return;
+            defer self.allocator.free(name);
+            @memcpy(name[0..9], "data-url:");
+            self.js.eval(buf, name) catch |err| {
+                logExternalScriptError("awr: data URL script eval failed: {t}\n", .{err});
+            };
+            return;
+        }
+
         const resolved = resolveUrlAlloc(self.allocator, page_url, trimmed_src) catch |err| {
             logExternalScriptError("awr: external script resolve failed ({s}): {t}\n", .{ trimmed_src, err });
             return;
@@ -1754,6 +1781,51 @@ pub const Page = struct {
 ///     the directory of the base URL's path, with `.`/`..` normalised.
 ///
 /// Fragments and query strings on `base` are stripped before resolution.
+/// Decode a `data:` URL into its payload bytes per RFC 2397. T-92.
+/// Caller owns the returned slice. Errors when the URL is malformed
+/// (no comma separator, bad base64, etc.). Percent-decoding follows
+/// RFC 3986 — `+` stays literal (data: is not form-urlencoded).
+fn decodeDataUrl(alloc: std.mem.Allocator, url: []const u8) ![]u8 {
+    if (!std.mem.startsWith(u8, url, "data:")) return error.NotADataUrl;
+    const after = url["data:".len..];
+    const comma = std.mem.indexOfScalar(u8, after, ',') orelse return error.MalformedDataUrl;
+    const header = after[0..comma];
+    const data = after[comma + 1 ..];
+    const is_base64 = std.mem.endsWith(u8, header, ";base64");
+    if (is_base64) {
+        const decoder = std.base64.standard.Decoder;
+        const out_size = decoder.calcSizeForSlice(data) catch return error.MalformedDataUrl;
+        const out = try alloc.alloc(u8, out_size);
+        errdefer alloc.free(out);
+        decoder.decode(out, data) catch return error.MalformedDataUrl;
+        return out;
+    }
+    // Percent-decode (`%XX` → byte, everything else literal).
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < data.len) {
+        if (data[i] == '%' and i + 2 < data.len) {
+            const hi = std.fmt.charToDigit(data[i + 1], 16) catch {
+                try out.append(alloc, data[i]);
+                i += 1;
+                continue;
+            };
+            const lo = std.fmt.charToDigit(data[i + 2], 16) catch {
+                try out.append(alloc, data[i]);
+                i += 1;
+                continue;
+            };
+            try out.append(alloc, (hi << 4) | lo);
+            i += 3;
+        } else {
+            try out.append(alloc, data[i]);
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 fn resolveUrlAlloc(
     alloc: std.mem.Allocator,
     base: []const u8,
@@ -1943,6 +2015,41 @@ test "Page.processHtml — body_text excludes <style> and <script> source" {
         @as(?usize, null),
         std.mem.indexOf(u8, result.body_text, "should-not-appear"),
     );
+}
+
+test "decodeDataUrl: percent-encoded JS payload round-trips" {
+    const url = "data:text/javascript,let%20x%3D1%3Bx%3B";
+    const out = try decodeDataUrl(std.testing.allocator, url);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("let x=1;x;", out);
+}
+
+test "decodeDataUrl: base64-encoded JS payload" {
+    // base64("alert(1)") = "YWxlcnQoMSk="
+    const url = "data:text/javascript;base64,YWxlcnQoMSk=";
+    const out = try decodeDataUrl(std.testing.allocator, url);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("alert(1)", out);
+}
+
+test "decodeDataUrl: empty body decodes to empty slice" {
+    const url = "data:,";
+    const out = try decodeDataUrl(std.testing.allocator, url);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "decodeDataUrl: missing comma is rejected" {
+    const url = "data:text/javascript";
+    try std.testing.expectError(error.MalformedDataUrl, decodeDataUrl(std.testing.allocator, url));
+}
+
+test "decodeDataUrl: stray % decodes byte-by-byte (no rewind)" {
+    // The first '%' has only one char after it — treat as literal.
+    const url = "data:,a%X";
+    const out = try decodeDataUrl(std.testing.allocator, url);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("a%X", out);
 }
 
 test "Page.processHtml — html field is raw source" {
