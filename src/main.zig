@@ -720,9 +720,20 @@ const USAGE =
     \\  awr tui [<url>] [--no-js]    Open the interactive terminal browser. Without a URL,
     \\                                 starts on AWR_HOMEPAGE if set, otherwise opens with the
     \\                                 URL bar active. `awr browse` is a deprecated alias.
+    \\                                 Keys (when reading a page): Tab/Shift-Tab move focus,
+    \\                                   Enter activates link/submit, Space toggles
+    \\                                   checkbox/radio or opens <select> picker, : URL bar,
+    \\                                   / find, b/f back/forward, r reload, c cookie inspector
+    \\                                   (in-inspector: arrows move, d delete row, C clear all,
+    \\                                    q close), q quit.
     \\                                 --no-js disables script execution (escape hatch
     \\                                 for sites whose JS strips their own UI in a
     \\                                 non-Chromium env, e.g. Google's homepage).
+    \\  awr session import <browser> [--out PATH] [--profile NAME] [--source PATH]
+    \\                               Import cookies from Chrome/Firefox SQLite into a Netscape
+    \\                                 cookies.txt that AWR_COOKIE_JAR can load. Browsers:
+    \\                                 chrome, chromium, firefox. macOS Chrome encrypted
+    \\                                 cookies are skipped (Keychain integration deferred).
     \\  awr render <url> [--width N] [--images=MODE] [--no-js]
     \\                               Load URL, print the rendered terminal text non-interactively
     \\                               --images=auto|kitty|iterm|sixel|braille|none (default: auto)

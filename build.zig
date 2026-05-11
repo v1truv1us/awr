@@ -522,8 +522,14 @@ pub fn build(b: *std.Build) void {
         mvp_smoke.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
         const regression_smoke = b.addSystemCommand(&.{ "scripts/regression_smoke.sh" });
         regression_smoke.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+        // T-86 / Tier 1 closure smoke (T1.11): Google search round-trip
+        // + optional HN sign-in. Honors AWR_SMOKE_OFFLINE=1 like the
+        // other smokes; in offline mode it exits 0 immediately.
+        const browse_smoke = b.addSystemCommand(&.{ "scripts/browse_smoke.sh" });
+        browse_smoke.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
         smoke_step.dependOn(&mvp_smoke.step);
         smoke_step.dependOn(&regression_smoke.step);
+        smoke_step.dependOn(&browse_smoke.step);
 
         // `zig build bench-daemon` — daemon vs per-process chained-flow
         // benchmark per spec/subspecs/daemon-mode.md §4.5. Defaults to

@@ -296,3 +296,59 @@ for accepting this sub-spec:
 
 If the answers to any of these would change the contract above,
 amend this sub-spec in the same change as the slice plan.
+
+---
+
+## 9. Progress record
+
+**2026-05-11 — Functional implementation complete; WPT-corpus gate
+still outstanding.**
+
+The following slices from §6 have landed with code + tests:
+
+| Slice | Task | Lands in |
+|---|---|---|
+| T1.1 — Focus model + Tab/Shift-Tab | T-60 | `src/browser.zig` (FocusKey + countFocusables) |
+| T1.2 — Text-field input | T-73 / T-79 | renderInput field-value lookup + omnibox routing |
+| T1.3 — Checkbox / radio / button activation | T-81 | toggleCheckedField + Space/Enter handlers |
+| T1.4 — `<select>` inline picker | T-83 | SelectPicker + drawSelectPicker overlay |
+| T1.5 — Implicit form submission | T-64 | submitForm on Enter in focused text field |
+| T1.6 — History navigation | (prior) | b/f/r keys |
+| T1.7 — URL bar | T-66 / T-75 / T-79 | startPrompt(.url) + omnibox routing |
+| T1.8 — Cookie inspector | T-84 | CookieInspector + drawCookieInspector |
+| T1.9 — `awr session import <browser>` | T-85 | `src/session_import.zig` |
+| T1.10 — TUI integration harness | T-80 | processKey/drawFrame + TuiHarness in tests |
+| T1.11 — Smoke flow | T-86 | `scripts/browse_smoke.sh` (Google + HN) |
+
+Closure gates §4 status:
+
+- **§4.1 Tier 0 gates green** — yes (`zig build test` green at HEAD).
+- **§4.2 Curated WPT corpus** — **NOT YET MET**. Form input event
+  semantics (`input`/`change`), focus/blur, keyboard event semantics,
+  submit-via-Enter, and same-origin history `length`/`state` are
+  not yet added to the curated WPT corpus. This is the remaining
+  Tier 1 closure work.
+- **§4.3 Two smoke flows** — yes (`scripts/browse_smoke.sh`
+  exercises Google search round-trip and HN sign-in; the HN flow
+  is skipped when AWR_HN_USER/AWR_HN_PASS are unset, the Google
+  flow runs unconditionally).
+- **§4.4 Session import** — yes (Chrome unencrypted + Firefox full
+  support; macOS Chrome encrypted-value path deferred per §8.2).
+- **§4.5 Inspector documentation** — yes (`awr tui --help` lists
+  every key including `c` for cookies; in-TUI welcome screen
+  shows the cheat sheet).
+
+Verification gates §5 status:
+
+- **§5.1 zig build test green** — yes.
+- **§5.2 zig build test-wpt green w/ §4.2 coverage** — pending the
+  WPT corpus extension above.
+- **§5.3 zig build test-integration green** — yes.
+- **§5.4 TUI integration test** — yes (in-process T-80 harness
+  spawns BrowserSessions, drives keys, asserts on rendered frame
+  buffers). Subprocess-with-PTY variant deferred.
+- **§5.5 Smoke against real network** — yes (Google flow passes;
+  HN flow is conditional on credentials but the codepath is the
+  same as the regression_smoke.sh sign-in flow that runs in CI).
+
+Status header stays at ACTIVE until §4.2 / §5.2 land.
