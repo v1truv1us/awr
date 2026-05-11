@@ -157,6 +157,24 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_jsonrpc.step);
     }
 
+    // ── bookmarks module (pure-Zig, no deps) ──────────────────────────────
+    // T-89 / Tier 2 slice T2.1. Tab-delimited bookmark store used by the
+    // `awr bookmark add/list/rm` CLI and the `B` TUI binding.
+    {
+        const bookmarks_mod = b.createModule(.{
+            .root_source_file = b.path("src/bookmarks.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        const bookmarks_test = b.addTest(.{
+            .name = "bookmarks",
+            .root_module = bookmarks_mod,
+        });
+        const run_bookmarks = b.addRunArtifact(bookmarks_test);
+        test_step.dependOn(&run_bookmarks.step);
+    }
+
     // ── tcp module (depends on libxev) ────────────────────────────────────
     {
         const tcp_mod = b.createModule(.{

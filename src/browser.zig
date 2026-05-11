@@ -1,6 +1,7 @@
 const std = @import("std");
 const page_mod = @import("page");
 const tui = @import("tui.zig");
+const bookmarks_mod = @import("bookmarks.zig");
 
 /// Hard ceiling for the browse renderer. Defends against terminals that lie
 /// about width (some iOS SSH apps + tmux chains) or report extreme values that
@@ -1188,6 +1189,28 @@ pub const BrowserSession = struct {
         self.status_message = try self.allocator.dupe(u8, msg);
     }
 
+    /// T-89 / Tier 2 T2.1: persist the current page (URL + title)
+    /// into the bookmarks store. The store path resolves to
+    /// $AWR_BOOKMARKS → $XDG_DATA_HOME/awr/bookmarks.txt → ~/.local/share/awr/...
+    /// just like the cookie jar's. No-op when there's no current page.
+    pub fn bookmarkCurrentPage(self: *BrowserSession) !void {
+        const url = self.currentUrl() orelse return;
+        const path_opt = try bookmarks_mod.defaultPath(self.allocator, self.page.io);
+        const path = path_opt orelse return error.NoBookmarksPath;
+        defer self.allocator.free(path);
+
+        var store = try bookmarks_mod.Store.load(self.allocator, self.page.io, path);
+        defer store.deinit();
+
+        const t = self.title();
+        const id = try store.add(t, url);
+        try store.save(self.page.io, path);
+
+        var msg_buf: [256]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&msg_buf, "bookmark #{d} saved: {s}", .{ id, t });
+        try self.setStatusMessage(msg);
+    }
+
     /// Surface a runtime error in the status line instead of letting
     /// it propagate out of the run loop and tear down the TUI. T-78:
     /// before this, any `try session.submitPrompt()` / `openSelectedLink`
@@ -1553,6 +1576,10 @@ pub fn processKey(
                     // *inside* the inspector for the destructive
                     // "clear all" action.
                     'c' => session.openCookieInspector() catch |err| session.reportError("cookies failed", err),
+                    // T-89 / Tier 2 T2.1: uppercase B adds the current
+                    // page to the persistent bookmarks store. Lowercase
+                    // `b` is already history-back (Tier 1).
+                    'B' => session.bookmarkCurrentPage() catch |err| session.reportError("bookmark failed", err),
                     'n' => session.advanceSearch(viewport_height),
                     'e' => {
                         const model2 = session.screenModel();
@@ -1888,7 +1915,7 @@ fn drawWelcome(writer: anytype, cols: usize, viewport_height: usize) !void {
         "  " ++ BOLD ++ "Tab" ++ RESET ++ " next link/field    " ++ BOLD ++ "Enter" ++ RESET ++ " activate",
         "  " ++ BOLD ++ "b" ++ RESET ++ "  back                " ++ BOLD ++ "f" ++ RESET ++ "  forward",
         "  " ++ BOLD ++ "r" ++ RESET ++ "  reload              " ++ BOLD ++ "q" ++ RESET ++ "  quit",
-        "  " ++ BOLD ++ "c" ++ RESET ++ "  cookies for origin",
+        "  " ++ BOLD ++ "c" ++ RESET ++ "  cookies             " ++ BOLD ++ "B" ++ RESET ++ "  bookmark page",
         "",
         DIM ++ "Tip: set $AWR_HOMEPAGE to skip this screen." ++ RESET,
     };

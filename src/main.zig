@@ -4,6 +4,7 @@ const page_mod = @import("page");
 const mock_mod = @import("mock.zig");
 const browser_mod = @import("browser.zig");
 const session_import = @import("session_import.zig");
+const bookmarks_mod = @import("bookmarks.zig");
 const telemetry = @import("telemetry");
 const image_protocol = @import("image_protocol");
 const image_pipeline = @import("image_pipeline");
@@ -725,7 +726,7 @@ const USAGE =
     \\                                   checkbox/radio or opens <select> picker, : URL bar,
     \\                                   / find, b/f back/forward, r reload, c cookie inspector
     \\                                   (in-inspector: arrows move, d delete row, C clear all,
-    \\                                    q close), q quit.
+    \\                                    q close), B bookmark current page, q quit.
     \\                                 --no-js disables script execution (escape hatch
     \\                                 for sites whose JS strips their own UI in a
     \\                                 non-Chromium env, e.g. Google's homepage).
@@ -734,6 +735,10 @@ const USAGE =
     \\                                 cookies.txt that AWR_COOKIE_JAR can load. Browsers:
     \\                                 chrome, chromium, firefox. macOS Chrome encrypted
     \\                                 cookies are skipped (Keychain integration deferred).
+    \\  awr bookmark <add|list|rm>   Manage bookmarks. `add <url> [--title=…]` appends;
+    \\                                 `list` prints id<TAB>created_ts<TAB>title<TAB>url;
+    \\                                 `rm <id>` removes by numeric id. Storage:
+    \\                                 $XDG_DATA_HOME/awr/bookmarks.txt (or $AWR_BOOKMARKS).
     \\  awr render <url> [--width N] [--images=MODE] [--no-js]
     \\                               Load URL, print the rendered terminal text non-interactively
     \\                               --images=auto|kitty|iterm|sixel|braille|none (default: auto)
@@ -911,6 +916,12 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     // Subcommand: awr session import <browser> [--out PATH] [--profile N] [--source PATH]
     if (std.mem.eql(u8, args[1], "session")) {
         try runSessionSubcommand(alloc, io, args);
+        return;
+    }
+
+    // Subcommand: awr bookmark <add|list|rm> [...] — T-89 / Tier 2 T2.1.
+    if (std.mem.eql(u8, args[1], "bookmark")) {
+        try runBookmarkSubcommand(alloc, io, args);
         return;
     }
 
@@ -1693,6 +1704,99 @@ fn runSessionSubcommand(alloc: std.mem.Allocator, io: std.Io, args: []const [:0]
     var msg: [256]u8 = undefined;
     const summary = try std.fmt.bufPrint(&msg, "imported {d} cookies → {s} (skipped {d} encrypted)\n", .{ imported_count, out_resolved, result.skipped_encrypted });
     try stdoutWrite(io, summary);
+}
+
+/// T-89 / Tier 2 slice T2.1: `awr bookmark <add|list|rm> ...`.
+fn runBookmarkSubcommand(alloc: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
+    if (args.len < 3) {
+        try stdoutWrite(io, "usage: awr bookmark <add|list|rm> [args]\n");
+        std.process.exit(1);
+    }
+    const verb = args[2];
+
+    const path = (try bookmarks_mod.defaultPath(alloc, io)) orelse {
+        try stdoutWrite(io, "bookmark: could not resolve bookmark store path (set $AWR_BOOKMARKS, $XDG_DATA_HOME, or $HOME)\n");
+        std.process.exit(1);
+    };
+    defer alloc.free(path);
+
+    var store = bookmarks_mod.Store.load(alloc, io, path) catch |err| {
+        std.process.fatal("bookmark: load failed: {t}", .{err});
+    };
+    defer store.deinit();
+
+    if (std.mem.eql(u8, verb, "add")) {
+        if (args.len < 4) {
+            try stdoutWrite(io, "usage: awr bookmark add <url> [--title=TITLE]\n");
+            std.process.exit(1);
+        }
+        var url: ?[]const u8 = null;
+        var title: []const u8 = "";
+        var i: usize = 3;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.startsWith(u8, args[i], "--title=")) {
+                title = args[i]["--title=".len..];
+            } else if (std.mem.eql(u8, args[i], "--title") and i + 1 < args.len) {
+                title = args[i + 1];
+                i += 1;
+            } else if (url == null and !std.mem.startsWith(u8, args[i], "--")) {
+                url = args[i];
+            } else {
+                std.process.fatal("bookmark add: unknown arg '{s}'", .{args[i]});
+            }
+        }
+        if (url == null) {
+            try stdoutWrite(io, "bookmark add: URL is required\n");
+            std.process.exit(1);
+        }
+        const id = store.add(title, url.?) catch |err| {
+            std.process.fatal("bookmark add: {t}", .{err});
+        };
+        try store.save(io, path);
+        var out_buf: [256]u8 = undefined;
+        const out_msg = try std.fmt.bufPrint(&out_buf, "added bookmark #{d} → {s}\n", .{ id, path });
+        try stdoutWrite(io, out_msg);
+        return;
+    }
+
+    if (std.mem.eql(u8, verb, "list")) {
+        if (store.bookmarks.items.len == 0) {
+            try stdoutWrite(io, "(no bookmarks)\n");
+            return;
+        }
+        var line_buf: [4096]u8 = undefined;
+        for (store.bookmarks.items) |b| {
+            const line = try std.fmt.bufPrint(&line_buf, "{d}\t{d}\t{s}\t{s}\n", .{ b.id, b.created_ts, b.title, b.url });
+            try stdoutWrite(io, line);
+        }
+        return;
+    }
+
+    if (std.mem.eql(u8, verb, "rm")) {
+        if (args.len < 4) {
+            try stdoutWrite(io, "usage: awr bookmark rm <id>\n");
+            std.process.exit(1);
+        }
+        const id = std.fmt.parseInt(u64, args[3], 10) catch {
+            std.process.fatal("bookmark rm: id must be a number, got '{s}'", .{args[3]});
+        };
+        if (!store.remove(id)) {
+            var nf: [128]u8 = undefined;
+            const nf_msg = try std.fmt.bufPrint(&nf, "bookmark rm: no bookmark with id {d}\n", .{id});
+            try stdoutWrite(io, nf_msg);
+            std.process.exit(1);
+        }
+        try store.save(io, path);
+        var out_buf: [128]u8 = undefined;
+        const out_msg = try std.fmt.bufPrint(&out_buf, "removed bookmark #{d}\n", .{id});
+        try stdoutWrite(io, out_msg);
+        return;
+    }
+
+    try stdoutWrite(io, "bookmark: unknown verb '");
+    try stdoutWrite(io, verb);
+    try stdoutWrite(io, "' (want add|list|rm)\n");
+    std.process.exit(1);
 }
 
 test "isFailedCallEnvelope detects {ok:false}" {

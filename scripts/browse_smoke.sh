@@ -64,17 +64,47 @@ if ! echo "$GOOGLE_OUT" | grep -qiE 'hello|world|search|google'; then
 fi
 echo "  ok"
 
-# ── Flow 2: HN sign-in flow ─────────────────────────────────────────
+# ── Flow 2: bookmark round-trip ─────────────────────────────────────
+# Tier 2 / T-89 closure gate: `awr bookmark add/list/rm` round-trips
+# through the on-disk store without network access.
+echo "→ Flow 2: bookmark round-trip (no auth)"
+BM="$(mktemp "${TMPDIR:-/tmp}/awr-bookmarks-XXXXXX.txt")"
+AWR_BOOKMARKS="$BM" "$AWR" bookmark add "https://example.com/" --title="Example Domain" > /dev/null || {
+  echo "FAIL: bookmark add" >&2
+  rm -f "$BM"; exit 1
+}
+LIST="$( AWR_BOOKMARKS="$BM" "$AWR" bookmark list )" || {
+  echo "FAIL: bookmark list" >&2
+  rm -f "$BM"; exit 1
+}
+if ! echo "$LIST" | grep -q "https://example.com/"; then
+  echo "FAIL: list missing example.com" >&2
+  rm -f "$BM"; exit 1
+fi
+AWR_BOOKMARKS="$BM" "$AWR" bookmark rm 1 > /dev/null || {
+  echo "FAIL: bookmark rm" >&2
+  rm -f "$BM"; exit 1
+}
+EMPTY="$( AWR_BOOKMARKS="$BM" "$AWR" bookmark list )"
+if ! echo "$EMPTY" | grep -q "no bookmarks"; then
+  echo "FAIL: store not empty after rm" >&2
+  echo "$EMPTY" >&2
+  rm -f "$BM"; exit 1
+fi
+rm -f "$BM"
+echo "  ok"
+
+# ── Flow 3: HN sign-in flow ─────────────────────────────────────────
 if [ -z "${AWR_HN_USER:-}" ] || [ -z "${AWR_HN_PASS:-}" ]; then
-  echo "→ Flow 2: HN sign-in — skipped (set AWR_HN_USER + AWR_HN_PASS to run)"
-  echo "browse_smoke: 1/2 flows ok (HN skipped — no creds)"
+  echo "→ Flow 3: HN sign-in — skipped (set AWR_HN_USER + AWR_HN_PASS to run)"
+  echo "browse_smoke: 2/3 flows ok (HN skipped — no creds)"
   exit 0
 fi
 
 JAR="$(mktemp "${TMPDIR:-/tmp}/awr-hn-jar-XXXXXX.txt")"
 trap "rm -f \"$JAR\"" EXIT
 
-echo "→ Flow 2: HN sign-in (auth)"
+echo "→ Flow 3: HN sign-in (auth)"
 # Step 1: POST credentials to /login. The login form on HN is a
 # straight POST with `acct` and `pw` fields — no CSRF token, no
 # hidden inputs. After login, HN sets a `user` cookie containing
@@ -114,4 +144,4 @@ if ! echo "$THREADS_OUT" | grep -qi "$AWR_HN_USER"; then
 fi
 echo "  ok"
 
-echo "browse_smoke: 2/2 flows ok"
+echo "browse_smoke: 3/3 flows ok"
