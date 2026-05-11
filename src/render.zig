@@ -100,6 +100,12 @@ pub const RenderOptions = struct {
     /// attribute. Used by `awr browse` so toggled state shows
     /// immediately (`[x]` / `(*)`) without a re-fetch.
     is_checked_lookup: ?IsCheckedLookup = null,
+    /// T-83: per-element selected-value override for `<select>`.
+    /// When non-null, `renderSelect` queries this with the select's
+    /// `element_ptr`; non-null result wins over the DOM's
+    /// `<option selected>` attribute. Used by the inline picker so
+    /// the chosen option shows immediately after closing the picker.
+    selected_option_lookup: ?SelectedOptionLookup = null,
 };
 
 pub const FieldValueLookup = struct {
@@ -120,6 +126,20 @@ pub const IsCheckedLookup = struct {
     lookup_fn: *const fn (ctx: *anyopaque, element_ptr: usize) ?bool,
 
     pub fn lookup(self: IsCheckedLookup, element_ptr: usize) ?bool {
+        return self.lookup_fn(self.ctx, element_ptr);
+    }
+};
+
+pub const SelectedOptionLookup = struct {
+    ctx: *anyopaque,
+    /// Returns the user-selected option *label* (display text) for
+    /// the given `<select>` element, or null when the user hasn't
+    /// touched it (renderer falls back to DOM `<option selected>`).
+    /// We return the label rather than the value because the
+    /// renderer's job is display, not submission.
+    lookup_fn: *const fn (ctx: *anyopaque, element_ptr: usize) ?[]const u8,
+
+    pub fn lookup(self: SelectedOptionLookup, element_ptr: usize) ?[]const u8 {
         return self.lookup_fn(self.ctx, element_ptr);
     }
 };
@@ -1248,8 +1268,10 @@ fn renderButton(state: *RenderState, w: anytype, elem: *const dom.Element) anyer
 }
 
 fn renderSelect(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
-    // Prefer the option marked `selected`; fall back to the first
-    // non-empty option (HTML default behavior for single-select). T-82.
+    // T-83 priority: user-selected option (from inline picker) wins
+    // over DOM `<option selected>`, which wins over first option.
+    // The user-selected label is borrowed from the session — no dupe
+    // needed; it lives at least until the next page change.
     var first_option: ?[]const u8 = null;
     var selected_option: ?[]const u8 = null;
     for (elem.children.items) |child| {
@@ -1263,9 +1285,6 @@ fn renderSelect(state: *RenderState, w: anytype, elem: *const dom.Element) anyer
         if (child.element.getAttribute("selected") != null) {
             if (selected_option) |opt| state.allocator.free(opt);
             selected_option = try state.allocator.dupe(u8, trimmed);
-            // First `selected` wins (per HTML5 if multiple, only the
-            // last would, but real browsers vary — first is simpler
-            // and matches authoring intent in practice).
             break;
         }
         if (first_option == null) {
@@ -1275,7 +1294,11 @@ fn renderSelect(state: *RenderState, w: anytype, elem: *const dom.Element) anyer
     defer if (first_option) |opt| state.allocator.free(opt);
     defer if (selected_option) |opt| state.allocator.free(opt);
 
-    const display = selected_option orelse first_option orelse "";
+    const user_selected: ?[]const u8 = if (state.opts.selected_option_lookup) |l|
+        l.lookup(@intFromPtr(elem))
+    else
+        null;
+    const display = user_selected orelse selected_option orelse first_option orelse "";
     const col = state.col;
     try state.prepareForContent(w);
     try state.writeAll(w, "[");

@@ -88,6 +88,15 @@ pub const BrowserSession = struct {
     /// Radio toggles set this entry and clear other radios sharing
     /// the same `name`.
     field_checked: std.ArrayListUnmanaged(CheckedState) = .empty,
+    /// T-83: user-selected option for `<select>` fields, keyed by
+    /// element_ptr. Holds both the submit value and the display
+    /// label. When a key is missing, the renderer falls back to DOM
+    /// `<option selected>` and submitForm falls back to the same.
+    field_selected: std.ArrayListUnmanaged(SelectedOption) = .empty,
+    /// T-83: when non-null, an inline `<select>` picker is open.
+    /// The TUI overlays the picker on the body area; arrow keys
+    /// navigate, Enter commits, Esc cancels.
+    select_picker: ?SelectPicker = null,
     field_editing: bool,
     scroll_row: usize,
     search_query: ?[]u8,
@@ -110,6 +119,25 @@ pub const BrowserSession = struct {
     const CheckedState = struct {
         element_ptr: usize,
         checked: bool,
+    };
+
+    /// T-83: user-selected option for a `<select>` element. Owns
+    /// both the submit value and the display label so the lookups
+    /// (renderer queries label; submitForm queries value) can be
+    /// satisfied without re-walking the DOM.
+    const SelectedOption = struct {
+        element_ptr: usize,
+        value: []u8,
+        label: []u8,
+    };
+
+    /// T-83: state for an open inline `<select>` picker. Owns the
+    /// option snapshot taken at open time so subsequent rerenders
+    /// of the page don't disturb the picker's contents.
+    pub const SelectPicker = struct {
+        element_ptr: usize,
+        cursor: usize,
+        options: []page_mod.Page.OptionEntry,
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !BrowserSession {
@@ -150,6 +178,12 @@ pub const BrowserSession = struct {
         }
         self.field_values.deinit(self.allocator);
         self.field_checked.deinit(self.allocator);
+        for (self.field_selected.items) |entry| {
+            self.allocator.free(entry.value);
+            self.allocator.free(entry.label);
+        }
+        self.field_selected.deinit(self.allocator);
+        if (self.select_picker) |*picker| self.page.freeOptions(picker.options);
         self.page.deinit();
     }
 
@@ -203,6 +237,137 @@ pub const BrowserSession = struct {
             .element_ptr = element_ptr,
             .checked = checked,
         });
+    }
+
+    /// Look up the user-selected option label for a `<select>` so
+    /// the renderer can display it. Null when the user hasn't opened
+    /// the picker for this select; the renderer falls back to DOM
+    /// `<option selected>`. T-83.
+    pub fn selectedOptionLabel(self: *const BrowserSession, element_ptr: usize) ?[]const u8 {
+        for (self.field_selected.items) |entry| {
+            if (entry.element_ptr == element_ptr) return entry.label;
+        }
+        return null;
+    }
+
+    /// Look up the user-selected option *value* (what gets submitted)
+    /// for a `<select>`. Null when the user hasn't picked one. T-83.
+    pub fn selectedOptionValue(self: *const BrowserSession, element_ptr: usize) ?[]const u8 {
+        for (self.field_selected.items) |entry| {
+            if (entry.element_ptr == element_ptr) return entry.value;
+        }
+        return null;
+    }
+
+    /// Persist the user's selection from the picker. Owns the
+    /// duped value/label strings; frees any prior entry for the
+    /// same element. T-83.
+    fn setSelectedOption(
+        self: *BrowserSession,
+        element_ptr: usize,
+        value: []const u8,
+        label: []const u8,
+    ) !void {
+        for (self.field_selected.items) |*entry| {
+            if (entry.element_ptr == element_ptr) {
+                const new_value = try self.allocator.dupe(u8, value);
+                errdefer self.allocator.free(new_value);
+                const new_label = try self.allocator.dupe(u8, label);
+                self.allocator.free(entry.value);
+                self.allocator.free(entry.label);
+                entry.value = new_value;
+                entry.label = new_label;
+                return;
+            }
+        }
+        const value_owned = try self.allocator.dupe(u8, value);
+        errdefer self.allocator.free(value_owned);
+        const label_owned = try self.allocator.dupe(u8, label);
+        errdefer self.allocator.free(label_owned);
+        try self.field_selected.append(self.allocator, .{
+            .element_ptr = element_ptr,
+            .value = value_owned,
+            .label = label_owned,
+        });
+    }
+
+    /// Open an inline `<select>` picker for the focused select.
+    /// No-op if the focus isn't on a select. The picker snapshots
+    /// the option list so subsequent rerenders don't disturb it.
+    /// Initial cursor lands on the currently-selected option (from
+    /// user state if set, else DOM `selected`, else 0). T-83.
+    pub fn openSelectPicker(self: *BrowserSession) !void {
+        const field = self.activeField() orelse return;
+        if (!std.mem.eql(u8, field.field_type, "select")) return;
+
+        const options = try self.page.optionsForSelect(field);
+        errdefer self.page.freeOptions(options);
+        if (options.len == 0) {
+            // No options to pick from — release the empty alloc and
+            // skip opening; an empty modal would just confuse the user.
+            self.page.freeOptions(options);
+            return;
+        }
+
+        // Land cursor on the current selection.
+        var cursor: usize = 0;
+        if (self.selectedOptionValue(field.element_ptr)) |val| {
+            for (options, 0..) |opt, i| {
+                if (std.mem.eql(u8, opt.value, val)) {
+                    cursor = i;
+                    break;
+                }
+            }
+        } else {
+            for (options, 0..) |opt, i| {
+                if (opt.selected) {
+                    cursor = i;
+                    break;
+                }
+            }
+        }
+
+        // Replace any existing picker (e.g. user pressed Space twice on
+        // different selects without committing) — free the old options.
+        if (self.select_picker) |*old| self.page.freeOptions(old.options);
+        self.select_picker = .{
+            .element_ptr = field.element_ptr,
+            .cursor = cursor,
+            .options = options,
+        };
+    }
+
+    /// Close the picker without keeping the highlighted option.
+    /// Triggered by Esc or by re-pressing Space on the same select. T-83.
+    pub fn cancelSelectPicker(self: *BrowserSession) void {
+        if (self.select_picker) |*picker| {
+            self.page.freeOptions(picker.options);
+            self.select_picker = null;
+        }
+    }
+
+    /// Move the cursor in the open picker. Wraps top↔bottom so the
+    /// user can scroll through a long option list without thinking
+    /// about boundaries. T-83.
+    pub fn movePickerCursor(self: *BrowserSession, delta: isize) void {
+        var picker = if (self.select_picker) |*p| p else return;
+        const n = picker.options.len;
+        if (n == 0) return;
+        const cur: isize = @intCast(picker.cursor);
+        const next = @mod(cur + delta, @as(isize, @intCast(n)));
+        picker.cursor = @intCast(next);
+    }
+
+    /// Commit the highlighted option as the select's value, then
+    /// close the picker. T-83.
+    pub fn commitSelectPicker(self: *BrowserSession) !void {
+        const picker = self.select_picker orelse return;
+        if (picker.cursor < picker.options.len) {
+            const opt = picker.options[picker.cursor];
+            try self.setSelectedOption(picker.element_ptr, opt.value, opt.label);
+        }
+        // Free the snapshot regardless of whether commit succeeded.
+        self.cancelSelectPicker();
     }
 
     pub fn navigateTo(self: *BrowserSession, url: []const u8) !void {
@@ -486,6 +651,22 @@ pub const BrowserSession = struct {
                 continue;
             }
 
+            // T-83: `<select>` priority is user-picked → DOM
+            // `<option selected>` value → first option's value →
+            // empty. Falls through to the generic edited/value path
+            // when nothing has been picked AND no `selected` option
+            // exists (covers `<select>` with no markup help — rare).
+            if (std.mem.eql(u8, field.field_type, "select")) {
+                const picked = self.selectedOptionValue(field.element_ptr);
+                const val_sel: []const u8 = picked orelse (self.page.firstSelectedOptionValue(field) orelse "");
+                if (!first) try body.append(self.allocator, '&');
+                first = false;
+                try self.appendUrlEncoded(&body, field.name);
+                try body.append(self.allocator, '=');
+                try self.appendUrlEncoded(&body, val_sel);
+                continue;
+            }
+
             const edited = self.getFieldValue(field.name);
             const val: []const u8 = edited orelse self.page.fieldValueAttr(field) orelse "";
             if (!first) try body.append(self.allocator, '&');
@@ -750,6 +931,10 @@ pub const BrowserSession = struct {
             .ctx = self,
             .lookup_fn = isCheckedLookupCallback,
         };
+        const sol: page_mod.SelectedOptionLookup = .{
+            .ctx = self,
+            .lookup_fn = selectedOptionLookupCallback,
+        };
         var rendered = try self.page.renderBrowseModel(self.allocator, &local_result, .{
             .max_width = self.render_width,
             .ansi_colors = true,
@@ -757,6 +942,7 @@ pub const BrowserSession = struct {
             .show_images = true,
             .field_value_lookup = fvl,
             .is_checked_lookup = icl,
+            .selected_option_lookup = sol,
             // First render of a fresh page — no focus yet (Tab will set
             // it, then the next rerender picks it up).
             .focused_element_ptr = null,
@@ -880,6 +1066,14 @@ pub const BrowserSession = struct {
         return null;
     }
 
+    /// SelectedOptionLookup callback: returns the user-picked option
+    /// label for a `<select>`, or null when no picker commit has
+    /// happened (renderer falls back to DOM `<option selected>`). T-83.
+    fn selectedOptionLookupCallback(ctx: *anyopaque, element_ptr: usize) ?[]const u8 {
+        const self: *const BrowserSession = @ptrCast(@alignCast(ctx));
+        return self.selectedOptionLabel(element_ptr);
+    }
+
     /// Pointer-equality identifier of the currently-focused form
     /// control for the renderer's focus highlight. Returns null when
     /// focus is on a link (or nothing) — link highlighting is a
@@ -905,6 +1099,10 @@ pub const BrowserSession = struct {
             .ctx = self,
             .lookup_fn = isCheckedLookupCallback,
         };
+        const sol: page_mod.SelectedOptionLookup = .{
+            .ctx = self,
+            .lookup_fn = selectedOptionLookupCallback,
+        };
         var rendered = try self.page.renderBrowseModel(self.allocator, &current.result, .{
             .max_width = self.render_width,
             .ansi_colors = true,
@@ -912,6 +1110,7 @@ pub const BrowserSession = struct {
             .show_images = true,
             .field_value_lookup = fvl,
             .is_checked_lookup = icl,
+            .selected_option_lookup = sol,
             .focused_element_ptr = self.focusedElementPtrForRender(),
         });
         errdefer rendered.deinit();
@@ -1008,6 +1207,36 @@ pub fn processKey(
     // mode the session is in (link nav, field editing, prompt). This is
     // the escape hatch when other key bindings don't work as expected.
     if (key == .interrupt) return .exit;
+
+    // T-83: when a `<select>` picker is open it owns all keys. Arrow
+    // keys move the cursor, Enter commits, Esc / Space close. The
+    // picker captures keys *before* the prompt/field-editing switch
+    // so it can't be bypassed by an open URL bar — we never open
+    // a picker while a prompt is active, so this is also safe.
+    if (session.select_picker != null) {
+        switch (key) {
+            .arrow_up => {
+                session.movePickerCursor(-1);
+            },
+            .arrow_down => {
+                session.movePickerCursor(1);
+            },
+            .enter => {
+                session.commitSelectPicker() catch |err| session.reportError("pick failed", err);
+                session.rerenderCurrent() catch {};
+            },
+            .escape => session.cancelSelectPicker(),
+            .char => |ch| switch (ch) {
+                ' ' => session.cancelSelectPicker(),
+                'j' => session.movePickerCursor(1),
+                'k' => session.movePickerCursor(-1),
+                else => {},
+            },
+            else => {},
+        }
+        return .continue_;
+    }
+
     switch (session.prompt_mode) {
         .none => if (session.field_editing) switch (key) {
                 .escape => {
@@ -1087,6 +1316,10 @@ pub fn processKey(
                             // browsers do, vim users expect both Space + Enter).
                             session.toggleCheckedField() catch |err| session.reportError("toggle failed", err);
                             session.rerenderCurrent() catch {};
+                        } else if (field != null and std.mem.eql(u8, field.?.field_type, "select")) {
+                            // T-83: Enter on a select opens the inline picker
+                            // (same as Space; matches Chrome/Firefox).
+                            session.openSelectPicker() catch |err| session.reportError("picker failed", err);
                         } else {
                             session.openSelectedLink() catch |err| session.reportError("open failed", err);
                         }
@@ -1096,12 +1329,18 @@ pub fn processKey(
                 },
                 .char => |ch| switch (ch) {
                     ' ' => {
-                        // T-81: Space toggles checkbox / selects radio when
-                        // the focused field is one of those. Otherwise no-op
-                        // (Space is not a scroll key — that's j/k).
+                        // T-81/T-83: Space activates the focused control.
+                        // Checkbox → toggle. Radio → select. Select → open picker.
+                        // Otherwise no-op (Space is not a scroll key — that's j/k).
                         if (session.focus_target == .field and session.selected_field != null) {
-                            session.toggleCheckedField() catch |err| session.reportError("toggle failed", err);
-                            session.rerenderCurrent() catch {};
+                            if (session.activeField()) |f| {
+                                if (std.mem.eql(u8, f.field_type, "select")) {
+                                    session.openSelectPicker() catch |err| session.reportError("picker failed", err);
+                                } else {
+                                    session.toggleCheckedField() catch |err| session.reportError("toggle failed", err);
+                                    session.rerenderCurrent() catch {};
+                                }
+                            }
                         }
                     },
                     'j' => session.scrollBy(1, viewport_height),
@@ -1170,7 +1409,13 @@ pub fn drawFrame(
     try writeClippedLine(writer, size.cols, url);
     try writer.writeAll("\n");
 
-    if (model) |screen_model| {
+    // T-83: when a `<select>` picker is open it replaces the body
+    // area entirely so the user's attention is on the option list.
+    // Page content stays unchanged underneath — closing the picker
+    // restores it without a rerender.
+    if (session.select_picker) |picker| {
+        try drawSelectPicker(writer, size.cols, viewport_height, picker);
+    } else if (model) |screen_model| {
         var row: usize = 0;
         while (row < viewport_height) : (row += 1) {
             const line_index = session.scroll_row + row;
@@ -1187,6 +1432,72 @@ pub fn drawFrame(
     defer session.allocator.free(footer);
     try writeClippedLine(writer, size.cols, footer);
     try writer.writeAll("\x1b[K");
+}
+
+/// Render the open `<select>` picker as a centered list inside the
+/// body viewport. The cursor row gets reverse-video highlight so
+/// the user sees which option Enter will pick. T-83.
+fn drawSelectPicker(
+    writer: anytype,
+    cols: usize,
+    viewport_height: usize,
+    picker: BrowserSession.SelectPicker,
+) !void {
+    const REVERSE = "\x1b[7m";
+    const BOLD = "\x1b[1m";
+    const DIM = "\x1b[2m";
+    const RESET = "\x1b[0m";
+
+    // Reserve 3 rows of chrome: title, separator, footer-help line.
+    const list_rows = if (viewport_height > 3) viewport_height - 3 else 0;
+    const visible = @min(picker.options.len, list_rows);
+
+    // Scroll window so the cursor stays visible.
+    var top: usize = 0;
+    if (visible > 0 and picker.cursor >= visible) {
+        top = picker.cursor + 1 - visible;
+    }
+
+    var row: usize = 0;
+    // Title row.
+    try writer.writeAll(BOLD);
+    try writeClippedLine(writer, cols, "Select an option — ↑/↓ to move · Enter to pick · Esc to cancel");
+    try writer.writeAll(RESET);
+    try writer.writeAll("\x1b[K\n");
+    row += 1;
+
+    // List rows.
+    var i: usize = 0;
+    while (i < list_rows) : (i += 1) {
+        const opt_idx = top + i;
+        if (opt_idx >= picker.options.len) {
+            try writer.writeAll("\x1b[K\n");
+            row += 1;
+            continue;
+        }
+        const opt = picker.options[opt_idx];
+        const marker: []const u8 = if (opt_idx == picker.cursor) "›" else " ";
+        if (opt_idx == picker.cursor) try writer.writeAll(REVERSE);
+        try writer.writeAll("  ");
+        try writer.writeAll(marker);
+        try writer.writeAll(" ");
+        try writeClippedLine(writer, if (cols > 4) cols - 4 else cols, opt.label);
+        if (opt_idx == picker.cursor) try writer.writeAll(RESET);
+        try writer.writeAll("\x1b[K\n");
+        row += 1;
+    }
+
+    // Pad remaining rows so the frame fills the viewport.
+    while (row < viewport_height - 1) : (row += 1) {
+        try writer.writeAll("\x1b[K\n");
+    }
+    // Status hint as the last row.
+    try writer.writeAll(DIM);
+    var hint_buf: [80]u8 = undefined;
+    const hint = std.fmt.bufPrint(&hint_buf, "{d}/{d} options", .{ picker.cursor + 1, picker.options.len }) catch "";
+    try writeClippedLine(writer, cols, hint);
+    try writer.writeAll(RESET);
+    try writer.writeAll("\x1b[K\n");
 }
 
 fn viewportHeight(size: tui.Size) usize {
@@ -1897,6 +2208,75 @@ test "harness: T-81 Space toggles checkbox, glyph flips [ ] → [x]" {
     // Space again → toggle off.
     _ = try h.pressKey(.{ .char = ' ' });
     try std.testing.expect(try h.frameContains("[ ] I agree"));
+}
+
+test "harness: T-83 Space opens select picker, arrow keys move cursor, Enter commits" {
+    var h = try TuiHarness.init(std.testing.allocator, 80, 24);
+    defer h.deinit();
+
+    const html =
+        \\<html><body>
+        \\<form>
+        \\<select name="color">
+        \\  <option value="red">Red</option>
+        \\  <option value="green" selected>Green (default)</option>
+        \\  <option value="blue">Blue</option>
+        \\</select>
+        \\</form>
+        \\</body></html>
+    ;
+    try h.loadHtml("http://x/", html);
+
+    // Initial: select shows Green (the selected option).
+    try std.testing.expect(try h.frameContains("[Green (default) ▼]"));
+
+    // Tab onto the select. Space opens the picker.
+    _ = try h.pressKey(.tab);
+    try std.testing.expect(h.session.select_picker == null);
+    _ = try h.pressKey(.{ .char = ' ' });
+    try std.testing.expect(h.session.select_picker != null);
+
+    // Picker frame shows the title and all three options.
+    try std.testing.expect(try h.frameContains("Select an option"));
+    try std.testing.expect(try h.frameContains("Red"));
+    try std.testing.expect(try h.frameContains("Green (default)"));
+    try std.testing.expect(try h.frameContains("Blue"));
+
+    // Cursor lands on Green (the currently-selected option). Down → Blue.
+    try std.testing.expectEqual(@as(usize, 1), h.session.select_picker.?.cursor);
+    _ = try h.pressKey(.arrow_down);
+    try std.testing.expectEqual(@as(usize, 2), h.session.select_picker.?.cursor);
+
+    // Enter commits — picker closes, select label updates.
+    _ = try h.pressKey(.enter);
+    try std.testing.expect(h.session.select_picker == null);
+    try std.testing.expect(try h.frameContains("[Blue ▼]"));
+}
+
+test "harness: T-83 Esc cancels picker without changing selection" {
+    var h = try TuiHarness.init(std.testing.allocator, 80, 24);
+    defer h.deinit();
+
+    const html =
+        \\<html><body>
+        \\<form>
+        \\<select name="size">
+        \\<option value="s">Small</option>
+        \\<option value="m" selected>Medium</option>
+        \\<option value="l">Large</option>
+        \\</select>
+        \\</form>
+        \\</body></html>
+    ;
+    try h.loadHtml("http://x/", html);
+    _ = try h.pressKey(.tab);
+    _ = try h.pressKey(.{ .char = ' ' });
+    _ = try h.pressKey(.arrow_down); // move to Large
+    _ = try h.pressKey(.escape);
+
+    // Picker closed; original selection (Medium) intact.
+    try std.testing.expect(h.session.select_picker == null);
+    try std.testing.expect(try h.frameContains("[Medium ▼]"));
 }
 
 test "harness: T-81 radio group — selecting one clears its siblings" {

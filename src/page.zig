@@ -89,6 +89,7 @@ pub const ScreenLink = render.ScreenLink;
 pub const ScreenField = render.ScreenField;
 pub const FieldValueLookup = render.FieldValueLookup;
 pub const IsCheckedLookup = render.IsCheckedLookup;
+pub const SelectedOptionLookup = render.SelectedOptionLookup;
 pub const ImageLookup = render.ImageLookup;
 pub const RenderOptions = render.RenderOptions;
 pub const Element = dom.Element;
@@ -895,6 +896,86 @@ pub const Page = struct {
         if (self.current_doc == null) return false;
         const elem: *const dom.Element = @ptrFromInt(field.element_ptr);
         return elem.getAttribute("checked") != null;
+    }
+
+    /// An `<option>` snapshot used by the TUI's inline `<select>`
+    /// picker (T-83). `value` is what gets submitted; `label` is the
+    /// displayed text. Both slices borrow from the DOM document, so
+    /// they live only as long as the current page.
+    pub const OptionEntry = struct {
+        value: []const u8,
+        label: []const u8,
+        selected: bool,
+    };
+
+    /// Walk a `<select>`'s direct `<option>` children and return them
+    /// in document order. Empty-label options are skipped (rare, but
+    /// authors occasionally use `<option value=""></option>` as a
+    /// placeholder; with no label they're useless in a TUI picker).
+    /// Caller owns the outer slice; option slices borrow from the DOM.
+    pub fn optionsForSelect(self: *Page, field: ScreenField) ![]OptionEntry {
+        if (self.current_doc == null) return &[_]OptionEntry{};
+        const elem: *const dom.Element = @ptrFromInt(field.element_ptr);
+        var out: std.ArrayList(OptionEntry) = .empty;
+        errdefer out.deinit(self.allocator);
+
+        for (elem.children.items) |child| {
+            if (child != .element) continue;
+            if (!std.ascii.eqlIgnoreCase(child.element.tag, "option")) continue;
+
+            const raw = child.element.textContentForExtract(self.allocator) catch continue;
+            defer self.allocator.free(raw);
+            const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+            if (trimmed.len == 0) continue;
+
+            // Label borrows from the DOM via getAttribute fallback; for
+            // text content we need an owned slice (textContentForExtract
+            // allocates). Re-extract by walking again, this time
+            // capturing the slice ownership via dupe so the caller can
+            // free everything uniformly.
+            const value = child.element.getAttribute("value") orelse trimmed;
+            const label_owned = try self.allocator.dupe(u8, trimmed);
+            errdefer self.allocator.free(label_owned);
+            const value_owned = try self.allocator.dupe(u8, value);
+            errdefer self.allocator.free(value_owned);
+
+            try out.append(self.allocator, .{
+                .value = value_owned,
+                .label = label_owned,
+                .selected = child.element.getAttribute("selected") != null,
+            });
+        }
+        return try out.toOwnedSlice(self.allocator);
+    }
+
+    /// Free a slice produced by `optionsForSelect`. Each entry's
+    /// owned `value`/`label` bytes get freed, then the outer slice.
+    pub fn freeOptions(self: *Page, options: []OptionEntry) void {
+        for (options) |opt| {
+            self.allocator.free(opt.value);
+            self.allocator.free(opt.label);
+        }
+        self.allocator.free(options);
+    }
+
+    /// Return the `<option value=...>` of the first `<option selected>`
+    /// child of `field`'s `<select>` element, or the first option's
+    /// value when none is marked selected. Borrowed from the DOM —
+    /// caller must not free. T-83.
+    pub fn firstSelectedOptionValue(self: *Page, field: ScreenField) ?[]const u8 {
+        if (self.current_doc == null) return null;
+        const elem: *const dom.Element = @ptrFromInt(field.element_ptr);
+        var first: ?[]const u8 = null;
+        for (elem.children.items) |child| {
+            if (child != .element) continue;
+            if (!std.ascii.eqlIgnoreCase(child.element.tag, "option")) continue;
+            const val = child.element.getAttribute("value");
+            if (child.element.getAttribute("selected") != null) {
+                return val orelse "";
+            }
+            if (first == null and val != null) first = val;
+        }
+        return first;
     }
 
     /// User-supplied field override for `gatherFormSubmission`.
