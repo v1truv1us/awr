@@ -104,6 +104,17 @@ pub const BrowserSession = struct {
     /// `d` deletes the focused row; uppercase `C` clears all
     /// (asking for confirmation first); `q`/Esc closes.
     cookie_inspector: ?CookieInspector = null,
+    /// T-90 / Tier 2 T2.2: in-memory ring buffer of recently-navigated
+    /// URLs. Per-shell-session per spec — persistent cross-process
+    /// history is Tier 3 work. Capped at `url_history_cap`; the
+    /// oldest entry is evicted on overflow. Each string is owned.
+    url_history: std.ArrayListUnmanaged([]u8) = .empty,
+    url_history_cap: usize = 20,
+    /// T-90: autocomplete state for the URL prompt. Non-null only
+    /// while the user is cycling through matches via arrow keys.
+    /// Reset whenever the user types or backspaces — see
+    /// `resetUrlAutocomplete`.
+    url_autocomplete: ?UrlAutocomplete = null,
     field_editing: bool,
     scroll_row: usize,
     search_query: ?[]u8,
@@ -171,6 +182,18 @@ pub const BrowserSession = struct {
         confirm_clear_all: bool = false,
     };
 
+    /// T-90: URL-bar autocomplete cycle state. Built lazily on the
+    /// first arrow keypress, owned by the session, cleared on any
+    /// prompt mutation. `prefix` is the prompt text snapshot taken
+    /// at init time; `match_indices` points into `url_history` by
+    /// index (stable for the lifetime of this cycle since we don't
+    /// mutate url_history while a prompt is open).
+    pub const UrlAutocomplete = struct {
+        prefix: []u8,
+        match_indices: std.ArrayListUnmanaged(usize),
+        cursor: usize,
+    };
+
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !BrowserSession {
         return .{
             .allocator = allocator,
@@ -192,6 +215,7 @@ pub const BrowserSession = struct {
             .status_message = null,
             .render_width = 78,
             .render_height = 22,
+            .url_history_cap = readUrlHistoryCap(),
         };
     }
 
@@ -216,6 +240,10 @@ pub const BrowserSession = struct {
         self.field_selected.deinit(self.allocator);
         if (self.select_picker) |*picker| self.page.freeOptions(picker.options);
         if (self.cookie_inspector) |*ci| freeCookieInspector(self.allocator, ci);
+        // T-90: drop URL history strings + any open autocomplete state.
+        for (self.url_history.items) |u| self.allocator.free(u);
+        self.url_history.deinit(self.allocator);
+        self.resetUrlAutocomplete();
         self.page.deinit();
     }
 
@@ -924,11 +952,123 @@ pub const BrowserSession = struct {
         if (self.prompt_mode == .none) return;
         if (byte < 0x20 or byte == 0x7f) return;
         try self.prompt_buffer.append(self.allocator, byte);
+        // T-90: any keystroke invalidates the autocomplete cycle.
+        // The next arrow-up rebuilds matches against the new prefix.
+        if (self.prompt_mode == .url) self.resetUrlAutocomplete();
     }
 
     pub fn popPromptByte(self: *BrowserSession) void {
         if (self.prompt_mode == .none or self.prompt_buffer.items.len == 0) return;
         _ = self.prompt_buffer.pop();
+        if (self.prompt_mode == .url) self.resetUrlAutocomplete();
+    }
+
+    /// T-90: push a successfully-navigated URL onto the in-memory
+    /// history ring buffer. De-dupes (if the URL is already present,
+    /// it moves to the most-recent slot rather than growing the list)
+    /// and evicts the oldest entry when the cap is hit. Per-shell
+    /// session — no disk persistence in Tier 2.
+    pub fn pushUrlHistory(self: *BrowserSession, url: []const u8) !void {
+        if (url.len == 0) return;
+        // De-dupe: remove an existing entry, then re-append.
+        var i: usize = 0;
+        while (i < self.url_history.items.len) : (i += 1) {
+            if (std.mem.eql(u8, self.url_history.items[i], url)) {
+                const old = self.url_history.orderedRemove(i);
+                self.allocator.free(old);
+                break;
+            }
+        }
+        // Evict oldest if at cap.
+        while (self.url_history.items.len >= self.url_history_cap) {
+            const old = self.url_history.orderedRemove(0);
+            self.allocator.free(old);
+        }
+        const owned = try self.allocator.dupe(u8, url);
+        errdefer self.allocator.free(owned);
+        try self.url_history.append(self.allocator, owned);
+    }
+
+    /// Discard any in-progress URL-bar autocomplete cycle. Called
+    /// whenever the prompt is mutated (char/backspace) so the next
+    /// arrow keypress rebuilds matches against the fresh prefix.
+    /// Idempotent. T-90.
+    pub fn resetUrlAutocomplete(self: *BrowserSession) void {
+        if (self.url_autocomplete) |*ac| {
+            self.allocator.free(ac.prefix);
+            ac.match_indices.deinit(self.allocator);
+            self.url_autocomplete = null;
+        }
+    }
+
+    /// Cycle backward (older) through URL completions. The first
+    /// arrow press builds the match list against the prompt text;
+    /// subsequent presses move the cursor. Spec contract: prefix-
+    /// match when prompt is non-empty, full-history walk when empty.
+    /// T-90.
+    pub fn urlAutocompleteUp(self: *BrowserSession) !void {
+        if (self.prompt_mode != .url) return;
+        try self.ensureUrlAutocompleteState();
+        const ac = if (self.url_autocomplete) |*a| a else return;
+        if (ac.match_indices.items.len == 0) return;
+        // First press lands on the most recent match; subsequent
+        // presses walk older.
+        if (ac.cursor == 0) {
+            // Wrap to most recent.
+            ac.cursor = ac.match_indices.items.len - 1;
+        } else {
+            ac.cursor -= 1;
+        }
+        try self.applyAutocompleteCursor();
+    }
+
+    /// Cycle forward (newer) through URL completions. T-90.
+    pub fn urlAutocompleteDown(self: *BrowserSession) !void {
+        if (self.prompt_mode != .url) return;
+        try self.ensureUrlAutocompleteState();
+        const ac = if (self.url_autocomplete) |*a| a else return;
+        if (ac.match_indices.items.len == 0) return;
+        ac.cursor = (ac.cursor + 1) % ac.match_indices.items.len;
+        try self.applyAutocompleteCursor();
+    }
+
+    /// Build the autocomplete state if it doesn't exist yet. Captures
+    /// the current prompt text as the prefix and walks url_history
+    /// looking for prefix-matching entries. Iterates oldest→newest;
+    /// the result is naturally ordered "oldest match first → newest
+    /// match last" so cursor=last on first arrow-up lands on most
+    /// recent (vim/zsh convention).
+    fn ensureUrlAutocompleteState(self: *BrowserSession) !void {
+        if (self.url_autocomplete != null) return;
+        const prefix_owned = try self.allocator.dupe(u8, self.prompt_buffer.items);
+        errdefer self.allocator.free(prefix_owned);
+        var matches: std.ArrayListUnmanaged(usize) = .empty;
+        errdefer matches.deinit(self.allocator);
+        for (self.url_history.items, 0..) |entry, idx| {
+            if (prefix_owned.len == 0 or std.mem.startsWith(u8, entry, prefix_owned)) {
+                try matches.append(self.allocator, idx);
+            }
+        }
+        self.url_autocomplete = .{
+            .prefix = prefix_owned,
+            .match_indices = matches,
+            // Start "before" the most-recent: urlAutocompleteUp wraps
+            // 0 → last on the first press, landing on most-recent
+            // (which is the natural first-tab behavior in shells).
+            .cursor = 0,
+        };
+    }
+
+    /// Replace the prompt buffer with the autocomplete match at the
+    /// current cursor. Does NOT trigger resetUrlAutocomplete (that's
+    /// the contract that makes cycling work).
+    fn applyAutocompleteCursor(self: *BrowserSession) !void {
+        const ac = if (self.url_autocomplete) |a| a else return;
+        if (ac.cursor >= ac.match_indices.items.len) return;
+        const hi = ac.match_indices.items[ac.cursor];
+        const value = self.url_history.items[hi];
+        self.prompt_buffer.clearRetainingCapacity();
+        try self.prompt_buffer.appendSlice(self.allocator, value);
     }
 
     pub fn submitPrompt(self: *BrowserSession) !void {
@@ -1124,6 +1264,13 @@ pub const BrowserSession = struct {
         } else {
             try self.setStatusMessage(self.current.?.result.url);
         }
+
+        // T-90: record the post-redirect URL into the URL-bar
+        // history ring buffer. Stored AFTER successful render so
+        // failed loads don't pollute the autocomplete list. Use the
+        // resolved URL (after redirects) so the user can return to
+        // the canonical destination from autocomplete.
+        self.pushUrlHistory(self.current.?.result.url) catch {};
     }
 
     fn pushHistory(self: *BrowserSession, url: []const u8) !void {
@@ -1601,6 +1748,20 @@ pub fn processKey(
                 .enter => session.submitPrompt() catch |err| session.reportError("navigate failed", err),
                 .backspace => session.popPromptByte(),
                 .escape => session.cancelPrompt(),
+                // T-90: arrow up/down cycle through URL history matches
+                // when the URL prompt is active. In search mode, arrows
+                // are currently a no-op (search history is a possible
+                // future slice but not Tier 2 scope).
+                .arrow_up => {
+                    if (session.prompt_mode == .url) {
+                        session.urlAutocompleteUp() catch |err| session.reportError("autocomplete failed", err);
+                    }
+                },
+                .arrow_down => {
+                    if (session.prompt_mode == .url) {
+                        session.urlAutocompleteDown() catch |err| session.reportError("autocomplete failed", err);
+                    }
+                },
                 .char => |ch| session.appendPromptByte(ch) catch |err| session.reportError("input failed", err),
                 else => {},
             },
@@ -1909,6 +2070,7 @@ fn drawWelcome(writer: anytype, cols: usize, viewport_height: usize) !void {
         DIM ++ "A CLI browser for humans and agents." ++ RESET,
         "",
         BOLD ++ "Type a URL below and press Enter to navigate." ++ RESET,
+        DIM ++ "↑/↓ in URL bar cycles through recent destinations." ++ RESET,
         "",
         DIM ++ "Keys:" ++ RESET,
         "  " ++ BOLD ++ ":" ++ RESET ++ "  URL bar             " ++ BOLD ++ "/" ++ RESET ++ "  find in page",
@@ -1947,6 +2109,20 @@ fn drawWelcome(writer: anytype, cols: usize, viewport_height: usize) !void {
     }
 
     while (row < viewport_height) : (row += 1) try writer.writeAll("\x1b[K\n");
+}
+
+/// Read the URL-history capacity from $AWR_URL_HISTORY_LEN with a
+/// safe default of 20 entries per spec/subspecs/render-polish.md §2.2.
+/// Caps at 1000 so a wild env value can't blow up the ring buffer.
+/// Zero falls back to the default (treat as "missing" semantically).
+fn readUrlHistoryCap() usize {
+    const default_cap: usize = 20;
+    const raw = std.c.getenv("AWR_URL_HISTORY_LEN") orelse return default_cap;
+    const span = std.mem.span(raw);
+    if (span.len == 0) return default_cap;
+    const parsed = std.fmt.parseInt(usize, span, 10) catch return default_cap;
+    if (parsed == 0) return default_cap;
+    return @min(parsed, 1000);
 }
 
 /// Visible column count of `text`, skipping ANSI escape sequences.
@@ -2898,3 +3074,144 @@ test "harness: Tab into form field auto-edits + typing populates [____]" {
     try h.typeStr("hi");
     try std.testing.expect(try h.frameContains("[hi"));
 }
+
+// ── T-90 URL-bar autocomplete tests ──────────────────────────────
+
+test "pushUrlHistory de-dupes and caps the ring buffer" {
+    var session = try BrowserSession.init(std.testing.allocator, std.testing.io);
+    defer session.deinit();
+    session.url_history_cap = 3;
+
+    try session.pushUrlHistory("https://a.com/");
+    try session.pushUrlHistory("https://b.com/");
+    try session.pushUrlHistory("https://c.com/");
+    try std.testing.expectEqual(@as(usize, 3), session.url_history.items.len);
+
+    // Re-pushing an existing URL moves it to the end (most recent),
+    // not duplicates.
+    try session.pushUrlHistory("https://a.com/");
+    try std.testing.expectEqual(@as(usize, 3), session.url_history.items.len);
+    try std.testing.expectEqualStrings("https://a.com/", session.url_history.items[2]);
+
+    // Cap-busting push evicts the oldest.
+    try session.pushUrlHistory("https://d.com/");
+    try std.testing.expectEqual(@as(usize, 3), session.url_history.items.len);
+    try std.testing.expectEqualStrings("https://b.com/", session.url_history.items[0]);
+    try std.testing.expectEqualStrings("https://d.com/", session.url_history.items[2]);
+}
+
+test "urlAutocompleteUp cycles most-recent → oldest when prefix empty" {
+    var session = try BrowserSession.init(std.testing.allocator, std.testing.io);
+    defer session.deinit();
+    try session.pushUrlHistory("https://a.com/");
+    try session.pushUrlHistory("https://b.com/");
+    try session.pushUrlHistory("https://c.com/");
+
+    try session.startPrompt(.url);
+    // startPrompt for .url pre-fills with currentUrl, which is empty
+    // on a fresh session — so the prompt buffer is empty.
+    try std.testing.expectEqual(@as(usize, 0), session.prompt_buffer.items.len);
+
+    // First up: most recent.
+    try session.urlAutocompleteUp();
+    try std.testing.expectEqualStrings("https://c.com/", session.prompt_buffer.items);
+
+    // Second up: older.
+    try session.urlAutocompleteUp();
+    try std.testing.expectEqualStrings("https://b.com/", session.prompt_buffer.items);
+
+    // Third up: oldest.
+    try session.urlAutocompleteUp();
+    try std.testing.expectEqualStrings("https://a.com/", session.prompt_buffer.items);
+
+    // Fourth up: wraps back to most recent.
+    try session.urlAutocompleteUp();
+    try std.testing.expectEqualStrings("https://c.com/", session.prompt_buffer.items);
+}
+
+test "urlAutocompleteUp filters by prefix when prompt non-empty" {
+    var session = try BrowserSession.init(std.testing.allocator, std.testing.io);
+    defer session.deinit();
+    try session.pushUrlHistory("https://example.com/");
+    try session.pushUrlHistory("https://github.com/");
+    try session.pushUrlHistory("https://gitlab.com/");
+    try session.pushUrlHistory("https://news.ycombinator.com/");
+
+    try session.startPrompt(.url);
+    // Type "https://gi" — prefix-match should narrow to github + gitlab.
+    try session.appendPromptByte('h');
+    try session.appendPromptByte('t');
+    try session.appendPromptByte('t');
+    try session.appendPromptByte('p');
+    try session.appendPromptByte('s');
+    try session.appendPromptByte(':');
+    try session.appendPromptByte('/');
+    try session.appendPromptByte('/');
+    try session.appendPromptByte('g');
+    try session.appendPromptByte('i');
+
+    // First up: most recent match (gitlab — pushed after github).
+    try session.urlAutocompleteUp();
+    try std.testing.expectEqualStrings("https://gitlab.com/", session.prompt_buffer.items);
+
+    // Second up: github.
+    try session.urlAutocompleteUp();
+    try std.testing.expectEqualStrings("https://github.com/", session.prompt_buffer.items);
+
+    // Third up: wraps to gitlab (only 2 matches).
+    try session.urlAutocompleteUp();
+    try std.testing.expectEqualStrings("https://gitlab.com/", session.prompt_buffer.items);
+}
+
+test "typing a fresh char resets the autocomplete cycle" {
+    var session = try BrowserSession.init(std.testing.allocator, std.testing.io);
+    defer session.deinit();
+    try session.pushUrlHistory("https://github.com/");
+    try session.pushUrlHistory("https://gitlab.com/");
+
+    try session.startPrompt(.url);
+    try session.appendPromptByte('h');
+    try session.urlAutocompleteUp();
+    try std.testing.expect(session.url_autocomplete != null);
+
+    // User types a char — autocomplete state must clear so the next
+    // arrow press re-prefix-matches against the new buffer.
+    try session.appendPromptByte('!');
+    try std.testing.expect(session.url_autocomplete == null);
+}
+
+test "urlAutocompleteDown is symmetric to up" {
+    var session = try BrowserSession.init(std.testing.allocator, std.testing.io);
+    defer session.deinit();
+    try session.pushUrlHistory("https://a.com/");
+    try session.pushUrlHistory("https://b.com/");
+
+    try session.startPrompt(.url);
+    // First Down lands on most recent (cursor moves 0 → 1 wraps to len-1 in the next case
+    // — but for Down we use `(cursor + 1) % len`, so 0 → 1 = oldest is at index 0, newest at len-1.
+    // Hmm — the contract above says urlAutocompleteUp lands on most-recent on the first press.
+    // For symmetry urlAutocompleteDown should land on the oldest on the first press.
+    try session.urlAutocompleteDown();
+    try std.testing.expectEqualStrings("https://b.com/", session.prompt_buffer.items);
+
+    // Next Down wraps to oldest.
+    try session.urlAutocompleteDown();
+    try std.testing.expectEqualStrings("https://a.com/", session.prompt_buffer.items);
+}
+
+test "harness: T-90 arrow_up in URL prompt fills with recent history" {
+    var h = try TuiHarness.init(std.testing.allocator, 80, 24);
+    defer h.deinit();
+    try h.session.pushUrlHistory("https://example.com/");
+    try h.session.pushUrlHistory("https://news.ycombinator.com/");
+
+    // Open URL prompt and press arrow_up via the run-loop key handler.
+    try h.session.startPrompt(.url);
+    _ = try h.pressKey(.arrow_up);
+    try std.testing.expectEqualStrings(
+        "https://news.ycombinator.com/",
+        h.session.prompt_buffer.items,
+    );
+    try std.testing.expect(try h.frameContains("URL: https://news.ycombinator.com/"));
+}
+

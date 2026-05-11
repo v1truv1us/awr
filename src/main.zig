@@ -723,10 +723,12 @@ const USAGE =
     \\                                 URL bar active. `awr browse` is a deprecated alias.
     \\                                 Keys (when reading a page): Tab/Shift-Tab move focus,
     \\                                   Enter activates link/submit, Space toggles
-    \\                                   checkbox/radio or opens <select> picker, : URL bar,
-    \\                                   / find, b/f back/forward, r reload, c cookie inspector
-    \\                                   (in-inspector: arrows move, d delete row, C clear all,
-    \\                                    q close), B bookmark current page, q quit.
+    \\                                   checkbox/radio or opens <select> picker, : URL bar
+    \\                                   (↑/↓ inside cycles recent URLs, AWR_URL_HISTORY_LEN
+    \\                                    sets the ring buffer size), / find, b/f back/forward,
+    \\                                   r reload, c cookie inspector (in-inspector: arrows
+    \\                                   move, d delete row, C clear all, q close),
+    \\                                   B bookmark current page, q quit.
     \\                                 --no-js disables script execution (escape hatch
     \\                                 for sites whose JS strips their own UI in a
     \\                                 non-Chromium env, e.g. Google's homepage).
