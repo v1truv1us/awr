@@ -82,6 +82,12 @@ pub const BrowserSession = struct {
     selected_link: ?usize,
     selected_field: ?usize,
     field_values: std.ArrayListUnmanaged(FieldValue) = .empty,
+    /// T-81: user-toggled checked state for checkbox / radio fields,
+    /// keyed by element_ptr. When a key is missing, the renderer
+    /// (and submitForm) falls back to the DOM's `checked` attribute.
+    /// Radio toggles set this entry and clear other radios sharing
+    /// the same `name`.
+    field_checked: std.ArrayListUnmanaged(CheckedState) = .empty,
     field_editing: bool,
     scroll_row: usize,
     search_query: ?[]u8,
@@ -96,6 +102,14 @@ pub const BrowserSession = struct {
     const FieldValue = struct {
         name: []u8,
         value: std.ArrayList(u8),
+    };
+
+    /// T-81: user-toggled checked state for a single checkbox/radio,
+    /// keyed by element pointer (stable for the lifetime of the
+    /// current page). Cleared on navigation; survives rerenders.
+    const CheckedState = struct {
+        element_ptr: usize,
+        checked: bool,
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !BrowserSession {
@@ -135,7 +149,60 @@ pub const BrowserSession = struct {
             fv.value.deinit(self.allocator);
         }
         self.field_values.deinit(self.allocator);
+        self.field_checked.deinit(self.allocator);
         self.page.deinit();
+    }
+
+    /// Look up user-toggled checked state for a field, falling back
+    /// to the DOM's `checked` attribute when the user hasn't touched
+    /// it. T-81. The renderer and submitForm both query this so the
+    /// displayed glyph and submitted payload stay in sync.
+    pub fn isFieldChecked(self: *BrowserSession, field: page_mod.ScreenField) bool {
+        for (self.field_checked.items) |entry| {
+            if (entry.element_ptr == field.element_ptr) return entry.checked;
+        }
+        return self.page.fieldCheckedAttr(field);
+    }
+
+    /// Toggle (checkbox) or select (radio) the focused field. T-81.
+    /// For radios, also clears the user-toggle of any other radio in
+    /// the same `name` group so only one stays checked at a time.
+    fn toggleCheckedField(self: *BrowserSession) !void {
+        const field = self.activeField() orelse return;
+        const model = self.screenModel() orelse return;
+        const is_checkbox = std.mem.eql(u8, field.field_type, "checkbox");
+        const is_radio = std.mem.eql(u8, field.field_type, "radio");
+        if (!is_checkbox and !is_radio) return;
+
+        if (is_radio) {
+            // Clear all other radios in the same name group. This
+            // guarantees only the just-pressed one ends up checked.
+            for (model.fields) |other| {
+                if (!std.mem.eql(u8, other.field_type, "radio")) continue;
+                if (!std.mem.eql(u8, other.name, field.name)) continue;
+                if (other.element_ptr == field.element_ptr) continue;
+                try self.setCheckedRaw(other.element_ptr, false);
+            }
+            try self.setCheckedRaw(field.element_ptr, true);
+        } else {
+            const current = self.isFieldChecked(field);
+            try self.setCheckedRaw(field.element_ptr, !current);
+        }
+    }
+
+    /// Upsert a checked-state entry. Lower-level than `toggleCheckedField`
+    /// because radio toggles need to clear multiple peers in one go.
+    fn setCheckedRaw(self: *BrowserSession, element_ptr: usize, checked: bool) !void {
+        for (self.field_checked.items) |*entry| {
+            if (entry.element_ptr == element_ptr) {
+                entry.checked = checked;
+                return;
+            }
+        }
+        try self.field_checked.append(self.allocator, .{
+            .element_ptr = element_ptr,
+            .checked = checked,
+        });
     }
 
     pub fn navigateTo(self: *BrowserSession, url: []const u8) !void {
@@ -402,6 +469,23 @@ pub const BrowserSession = struct {
         for (model.fields) |field| {
             if (field.is_submit) continue;
             if (field.name.len == 0) continue;
+
+            // T-81: checkbox/radio submit rules per HTML spec —
+            //   - unchecked: skip entirely (no name=value in payload)
+            //   - checked:   send `name=value` (defaulting "on" when no value attr)
+            const is_check_kind = std.mem.eql(u8, field.field_type, "checkbox") or
+                std.mem.eql(u8, field.field_type, "radio");
+            if (is_check_kind) {
+                if (!self.isFieldChecked(field)) continue;
+                const val_check: []const u8 = self.page.fieldValueAttr(field) orelse "on";
+                if (!first) try body.append(self.allocator, '&');
+                first = false;
+                try self.appendUrlEncoded(&body, field.name);
+                try body.append(self.allocator, '=');
+                try self.appendUrlEncoded(&body, val_check);
+                continue;
+            }
+
             const edited = self.getFieldValue(field.name);
             const val: []const u8 = edited orelse self.page.fieldValueAttr(field) orelse "";
             if (!first) try body.append(self.allocator, '&');
@@ -662,12 +746,17 @@ pub const BrowserSession = struct {
             .ctx = self,
             .lookup_fn = fieldValueLookupCallback,
         };
+        const icl: page_mod.IsCheckedLookup = .{
+            .ctx = self,
+            .lookup_fn = isCheckedLookupCallback,
+        };
         var rendered = try self.page.renderBrowseModel(self.allocator, &local_result, .{
             .max_width = self.render_width,
             .ansi_colors = true,
             .show_links = true,
             .show_images = true,
             .field_value_lookup = fvl,
+            .is_checked_lookup = icl,
             // First render of a fresh page — no focus yet (Tab will set
             // it, then the next rerender picks it up).
             .focused_element_ptr = null,
@@ -780,6 +869,17 @@ pub const BrowserSession = struct {
         return null;
     }
 
+    /// IsCheckedLookup callback: returns the user's toggled checked
+    /// state for a checkbox/radio element, or null when untouched
+    /// (renderer falls back to the DOM attribute). T-81.
+    fn isCheckedLookupCallback(ctx: *anyopaque, element_ptr: usize) ?bool {
+        const self: *const BrowserSession = @ptrCast(@alignCast(ctx));
+        for (self.field_checked.items) |entry| {
+            if (entry.element_ptr == element_ptr) return entry.checked;
+        }
+        return null;
+    }
+
     /// Pointer-equality identifier of the currently-focused form
     /// control for the renderer's focus highlight. Returns null when
     /// focus is on a link (or nothing) — link highlighting is a
@@ -801,12 +901,17 @@ pub const BrowserSession = struct {
             .ctx = self,
             .lookup_fn = fieldValueLookupCallback,
         };
+        const icl: page_mod.IsCheckedLookup = .{
+            .ctx = self,
+            .lookup_fn = isCheckedLookupCallback,
+        };
         var rendered = try self.page.renderBrowseModel(self.allocator, &current.result, .{
             .max_width = self.render_width,
             .ansi_colors = true,
             .show_links = true,
             .show_images = true,
             .field_value_lookup = fvl,
+            .is_checked_lookup = icl,
             .focused_element_ptr = self.focusedElementPtrForRender(),
         });
         errdefer rendered.deinit();
@@ -977,6 +1082,11 @@ pub fn processKey(
                         const field = session.activeField();
                         if (field != null and field.?.is_submit) {
                             session.submitForm() catch |err| session.reportError("submit failed", err);
+                        } else if (field != null and (std.mem.eql(u8, field.?.field_type, "checkbox") or std.mem.eql(u8, field.?.field_type, "radio"))) {
+                            // T-81: Enter also activates checkbox/radio (some
+                            // browsers do, vim users expect both Space + Enter).
+                            session.toggleCheckedField() catch |err| session.reportError("toggle failed", err);
+                            session.rerenderCurrent() catch {};
                         } else {
                             session.openSelectedLink() catch |err| session.reportError("open failed", err);
                         }
@@ -985,6 +1095,15 @@ pub fn processKey(
                     }
                 },
                 .char => |ch| switch (ch) {
+                    ' ' => {
+                        // T-81: Space toggles checkbox / selects radio when
+                        // the focused field is one of those. Otherwise no-op
+                        // (Space is not a scroll key — that's j/k).
+                        if (session.focus_target == .field and session.selected_field != null) {
+                            session.toggleCheckedField() catch |err| session.reportError("toggle failed", err);
+                            session.rerenderCurrent() catch {};
+                        }
+                    },
                     'j' => session.scrollBy(1, viewport_height),
                     'k' => session.scrollBy(-1, viewport_height),
                     'b' => session.goBack() catch |err| session.reportError("back failed", err),
@@ -1754,6 +1873,138 @@ test "harness: Ctrl+C / interrupt exits even mid-prompt" {
 
     const cont = try h.pressKey(.interrupt);
     try std.testing.expect(!cont);
+}
+
+test "harness: T-81 Space toggles checkbox, glyph flips [ ] → [x]" {
+    var h = try TuiHarness.init(std.testing.allocator, 80, 24);
+    defer h.deinit();
+
+    const html =
+        \\<html><body>
+        \\<form><label><input type="checkbox" name="ok"> I agree</label></form>
+        \\</body></html>
+    ;
+    try h.loadHtml("http://x/", html);
+
+    // Initial: unchecked.
+    try std.testing.expect(try h.frameContains("[ ] I agree"));
+
+    // Tab → focus checkbox. Space → toggle on.
+    _ = try h.pressKey(.tab);
+    _ = try h.pressKey(.{ .char = ' ' });
+    try std.testing.expect(try h.frameContains("[x] I agree"));
+
+    // Space again → toggle off.
+    _ = try h.pressKey(.{ .char = ' ' });
+    try std.testing.expect(try h.frameContains("[ ] I agree"));
+}
+
+test "harness: T-81 radio group — selecting one clears its siblings" {
+    var h = try TuiHarness.init(std.testing.allocator, 80, 24);
+    defer h.deinit();
+
+    const html =
+        \\<html><body>
+        \\<form>
+        \\<label><input type="radio" name="size" value="s"> Small</label>
+        \\<label><input type="radio" name="size" value="m"> Medium</label>
+        \\<label><input type="radio" name="size" value="l"> Large</label>
+        \\</form>
+        \\</body></html>
+    ;
+    try h.loadHtml("http://x/", html);
+
+    // Initial: all unchecked.
+    try std.testing.expect(try h.frameContains("( ) Small"));
+    try std.testing.expect(try h.frameContains("( ) Medium"));
+    try std.testing.expect(try h.frameContains("( ) Large"));
+
+    // Tab onto Small, select.
+    _ = try h.pressKey(.tab);
+    _ = try h.pressKey(.{ .char = ' ' });
+    try std.testing.expect(try h.frameContains("(*) Small"));
+    try std.testing.expect(try h.frameContains("( ) Medium"));
+
+    // Tab forward to Medium, select. Small should auto-deselect.
+    _ = try h.pressKey(.tab);
+    _ = try h.pressKey(.{ .char = ' ' });
+    try std.testing.expect(try h.frameContains("( ) Small"));
+    try std.testing.expect(try h.frameContains("(*) Medium"));
+    try std.testing.expect(try h.frameContains("( ) Large"));
+}
+
+test "T-81 submitForm payload: unchecked checkbox skipped, checked sent" {
+    // Drives submitForm's payload builder directly (no network).
+    // Pre-checks payload shape against HTML spec — unchecked controls
+    // disappear from the URL-encoded body entirely.
+    var session = try BrowserSession.init(std.testing.allocator, std.testing.io);
+    defer session.deinit();
+
+    const html =
+        \\<html><body>
+        \\<form>
+        \\<input type="text" name="user" value="alice">
+        \\<input type="checkbox" name="agree" value="yes">
+        \\<input type="checkbox" name="newsletter" value="weekly">
+        \\<input type="radio" name="plan" value="free">
+        \\<input type="radio" name="plan" value="pro">
+        \\</form>
+        \\</body></html>
+    ;
+    var result = try session.page.processHtml("http://x/", 200, html);
+    const screen = try session.page.renderBrowseModel(std.testing.allocator, &result, .{
+        .max_width = 78,
+        .ansi_colors = false,
+        .show_links = true,
+        .show_images = true,
+    });
+    session.current = .{ .result = result, .screen = screen };
+
+    // Toggle `agree` on, leave `newsletter` off; pick `plan=pro`.
+    const model = session.screenModel().?;
+    for (model.fields) |f| {
+        if (std.mem.eql(u8, f.name, "agree")) try session.setCheckedRaw(f.element_ptr, true);
+        if (std.mem.eql(u8, f.name, "plan") and std.mem.eql(u8, f.field_type, "radio")) {
+            // Pick the "pro" radio: read value attr.
+            if (std.mem.eql(u8, session.page.fieldValueAttr(f) orelse "", "pro")) {
+                try session.setCheckedRaw(f.element_ptr, true);
+            }
+        }
+    }
+
+    // Build the payload the same way submitForm does. We inline the
+    // loop here so the test doesn't trigger a real navigation.
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(std.testing.allocator);
+    var first = true;
+    for (model.fields) |field| {
+        if (field.is_submit) continue;
+        if (field.name.len == 0) continue;
+        const is_check_kind = std.mem.eql(u8, field.field_type, "checkbox") or
+            std.mem.eql(u8, field.field_type, "radio");
+        if (is_check_kind) {
+            if (!session.isFieldChecked(field)) continue;
+            const val_check: []const u8 = session.page.fieldValueAttr(field) orelse "on";
+            if (!first) try body.append(std.testing.allocator, '&');
+            first = false;
+            try session.appendUrlEncoded(&body, field.name);
+            try body.append(std.testing.allocator, '=');
+            try session.appendUrlEncoded(&body, val_check);
+            continue;
+        }
+        const edited = session.getFieldValue(field.name);
+        const val: []const u8 = edited orelse session.page.fieldValueAttr(field) orelse "";
+        if (!first) try body.append(std.testing.allocator, '&');
+        first = false;
+        try session.appendUrlEncoded(&body, field.name);
+        try body.append(std.testing.allocator, '=');
+        try session.appendUrlEncoded(&body, val);
+    }
+
+    // Expected: user=alice & agree=yes & plan=pro. newsletter is
+    // skipped because unchecked. The free radio is skipped because
+    // unchecked; only the "pro" radio appears.
+    try std.testing.expectEqualStrings("user=alice&agree=yes&plan=pro", body.items);
 }
 
 test "harness: Tab into form field auto-edits + typing populates [____]" {

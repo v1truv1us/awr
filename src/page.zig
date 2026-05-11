@@ -88,6 +88,7 @@ pub const ScreenModel = render.ScreenModel;
 pub const ScreenLink = render.ScreenLink;
 pub const ScreenField = render.ScreenField;
 pub const FieldValueLookup = render.FieldValueLookup;
+pub const IsCheckedLookup = render.IsCheckedLookup;
 pub const ImageLookup = render.ImageLookup;
 pub const RenderOptions = render.RenderOptions;
 pub const Element = dom.Element;
@@ -838,6 +839,16 @@ pub const Page = struct {
         if (self.current_doc == null) return null;
         const elem: *const dom.Element = @ptrFromInt(field.element_ptr);
         return elem.getAttribute("value");
+    }
+
+    /// Read a checkbox/radio's initial `checked` attribute. True when
+    /// the attribute is present (HTML allows `<input checked>` or
+    /// `<input checked="checked">`; both mean checked). False when
+    /// absent. Caller layers the user's runtime toggle over this. T-81.
+    pub fn fieldCheckedAttr(self: *Page, field: ScreenField) bool {
+        if (self.current_doc == null) return false;
+        const elem: *const dom.Element = @ptrFromInt(field.element_ptr);
+        return elem.getAttribute("checked") != null;
     }
 
     /// User-supplied field override for `gatherFormSubmission`.

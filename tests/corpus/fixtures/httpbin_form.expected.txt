@@ -1,9 +1,9 @@
 Customer name:[____________________]
 Telephone:[____________________]
 E-mail address:[____________________]
-Pizza Size[ ]Small
-[ ]Medium
-[ ]Large
+Pizza Size( )Small
+( )Medium
+( )Large
 Pizza Toppings[ ]Bacon
 [ ]Extra Cheese
 [ ]Onion

@@ -94,6 +94,12 @@ pub const RenderOptions = struct {
     /// highlight" — non-interactive `awr render` and corpus output
     /// stays clean.
     focused_element_ptr: ?usize = null,
+    /// T-81: per-element checked-state override for checkbox / radio.
+    /// When non-null, `renderInput` queries this with the input's
+    /// `element_ptr`; non-null result wins over the DOM's `checked`
+    /// attribute. Used by `awr browse` so toggled state shows
+    /// immediately (`[x]` / `(*)`) without a re-fetch.
+    is_checked_lookup: ?IsCheckedLookup = null,
 };
 
 pub const FieldValueLookup = struct {
@@ -102,6 +108,19 @@ pub const FieldValueLookup = struct {
 
     pub fn lookup(self: FieldValueLookup, name: []const u8) ?[]const u8 {
         return self.lookup_fn(self.ctx, name);
+    }
+};
+
+pub const IsCheckedLookup = struct {
+    ctx: *anyopaque,
+    /// Returns true if the user has toggled this element ON, false if
+    /// they've toggled it OFF, or null if they haven't touched it
+    /// (in which case the renderer falls back to the DOM `checked`
+    /// attribute).
+    lookup_fn: *const fn (ctx: *anyopaque, element_ptr: usize) ?bool,
+
+    pub fn lookup(self: IsCheckedLookup, element_ptr: usize) ?bool {
+        return self.lookup_fn(self.ctx, element_ptr);
     }
 };
 
@@ -1111,8 +1130,23 @@ fn renderInput(state: *RenderState, w: anytype, elem: *const dom.Element) anyerr
     }
 
     if (eql(input_type, "checkbox") or eql(input_type, "radio")) {
+        const is_radio = eql(input_type, "radio");
+        // Resolve checked state: user toggle wins; otherwise DOM
+        // `checked` attribute. T-81.
+        const checked: bool = if (state.opts.is_checked_lookup) |l|
+            l.lookup(@intFromPtr(elem)) orelse (elem.getAttribute("checked") != null)
+        else
+            (elem.getAttribute("checked") != null);
+
+        const focused = focusMatches(state.opts.focused_element_ptr, elem);
         try state.prepareForContent(w);
-        try state.writeAll(w, "[ ]");
+        if (focused and state.opts.ansi_colors) try state.ansi(w, REVERSE);
+        const glyph: []const u8 = if (is_radio)
+            (if (checked) "(*)" else "( )")
+        else
+            (if (checked) "[x]" else "[ ]");
+        try state.writeAll(w, glyph);
+        if (focused and state.opts.ansi_colors) try state.ansi(w, RESET);
         _ = state.registerField(
             @intFromPtr(elem),
             name,
