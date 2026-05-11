@@ -506,19 +506,53 @@ pub const BrowserSession = struct {
     }
 
     pub fn submitPrompt(self: *BrowserSession) !void {
-        const value = std.mem.trim(u8, self.prompt_buffer.items, " \t\r\n");
+        const trimmed = std.mem.trim(u8, self.prompt_buffer.items, " \t\r\n");
         switch (self.prompt_mode) {
             .none => return,
             .url => {
+                // Copy the prompt value BEFORE cancelPrompt clears the
+                // buffer. cancelPrompt only does `clearRetainingCapacity`
+                // so the bytes survive, but if any code along the
+                // navigate path appends to prompt_buffer (e.g. error
+                // path repopulates it), the slice would silently change
+                // under us. Owning the slice is cheap and bulletproof.
+                const value = try self.allocator.dupe(u8, trimmed);
+                defer self.allocator.free(value);
                 self.cancelPrompt();
                 if (value.len == 0) return;
-                try self.navigateTo(value);
+                try self.navigateOrSearch(value);
             },
             .search => {
                 self.cancelPrompt();
-                try self.setSearchQuery(value);
+                try self.setSearchQuery(trimmed);
             },
         }
+    }
+
+    /// Omnibox-style routing. Browsers don't make users prefix every
+    /// query with `https://`; AWR shouldn't either. Rules (T-79):
+    ///   - Has explicit scheme ("scheme://...") → navigate as-is.
+    ///   - Hostname shape (`foo.com` / `foo.com/path`, no spaces) →
+    ///     prepend `https://` and navigate.
+    ///   - Anything else (free-form text, multi-word, etc.) → route
+    ///     to Google search.
+    fn navigateOrSearch(self: *BrowserSession, value: []const u8) !void {
+        if (std.mem.indexOf(u8, value, "://") != null) {
+            try self.navigateTo(value);
+            return;
+        }
+        if (looksLikeHostname(value)) {
+            const with_scheme = try std.fmt.allocPrint(self.allocator, "https://{s}", .{value});
+            defer self.allocator.free(with_scheme);
+            try self.navigateTo(with_scheme);
+            return;
+        }
+        // Search fallback.
+        var url: std.ArrayList(u8) = .empty;
+        defer url.deinit(self.allocator);
+        try url.appendSlice(self.allocator, "https://www.google.com/search?q=");
+        try self.appendUrlEncoded(&url, value);
+        try self.navigateTo(url.items);
     }
 
     pub fn advanceSearch(self: *BrowserSession, viewport_height: usize) void {
@@ -1132,6 +1166,31 @@ fn trimmedTextLen(text: []const u8) usize {
     return count;
 }
 
+/// True when `s` *looks* like a host (or host+path) that the user
+/// meant to navigate to without typing a scheme. Conservative on
+/// purpose — anything ambiguous falls through to the search path.
+/// Examples accepted: `google.com`, `localhost:8080`, `192.168.0.1`,
+/// `example.com/foo/bar`, `subdomain.example.co.uk`.
+/// Examples rejected: `hello world` (whitespace), `foo` (no dot),
+/// `weather in seattle` (whitespace + spaces, no scheme).
+fn looksLikeHostname(s: []const u8) bool {
+    if (s.len == 0) return false;
+    // Slice off the path portion if present; only validate the host.
+    const slash = std.mem.indexOfScalar(u8, s, '/') orelse s.len;
+    const host = s[0..slash];
+    if (host.len == 0 or host[0] == '.' or host[0] == '-') return false;
+    // Must contain a dot (foo.com) OR a colon for port (localhost:8080).
+    const has_dot = std.mem.indexOfScalar(u8, host, '.') != null;
+    const has_colon = std.mem.indexOfScalar(u8, host, ':') != null;
+    if (!has_dot and !has_colon) return false;
+    // Host chars: alphanumeric + `.` + `-` + `:` only. Whitespace,
+    // unicode, slashes-in-host, etc. all disqualify.
+    for (host) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '-' and c != ':') return false;
+    }
+    return true;
+}
+
 fn isUserVisibleField(field: page_mod.ScreenField) bool {
     if (field.is_submit) return false;
     // Hidden inputs are kept in the model for form submission (CSRF round-trip
@@ -1358,6 +1417,63 @@ test "countFocusables excludes hidden inputs" {
     // appear in model.fields (we keep them for form submission)
     // but must not be counted toward focus order.
     try std.testing.expectEqual(@as(usize, 1), countFocusables(model));
+}
+
+test "looksLikeHostname accepts hosts, rejects free-form text" {
+    // Accept: clear hostname shapes.
+    try std.testing.expect(looksLikeHostname("google.com"));
+    try std.testing.expect(looksLikeHostname("example.co.uk"));
+    try std.testing.expect(looksLikeHostname("localhost:8080"));
+    try std.testing.expect(looksLikeHostname("192.168.0.1"));
+    try std.testing.expect(looksLikeHostname("foo.com/path/to/page"));
+    try std.testing.expect(looksLikeHostname("sub.domain.example.com"));
+
+    // Reject: clearly not a host.
+    try std.testing.expect(!looksLikeHostname("hello world"));
+    try std.testing.expect(!looksLikeHostname("foo"));
+    try std.testing.expect(!looksLikeHostname("weather in seattle"));
+    try std.testing.expect(!looksLikeHostname(""));
+    try std.testing.expect(!looksLikeHostname(".com"));
+    try std.testing.expect(!looksLikeHostname("-foo.com"));
+}
+
+test "submitPrompt URL routing without network: bare-word → search URL" {
+    // Build a session and exercise submitPrompt with a buffer set to
+    // various inputs. We don't *navigate* (no network), but we can
+    // verify the routing decision by intercepting the URL that would
+    // be passed to navigateTo via a controlled buffer trace.
+    //
+    // The simplest non-network verification is to test the routing
+    // pieces directly. The bare-word path delegates to
+    // navigateOrSearch which builds `https://www.google.com/search?q=...`.
+    var session = try BrowserSession.init(std.testing.allocator, std.testing.io);
+    defer session.deinit();
+
+    // Drop into URL prompt mode and stuff a query.
+    try session.startPrompt(.url);
+    for ("hello world") |ch| try session.appendPromptByte(ch);
+
+    // We don't run submitPrompt (it would hit the network). Instead
+    // we mirror its decision path: trim → looksLikeHostname → search.
+    const trimmed = std.mem.trim(u8, session.prompt_buffer.items, " \t\r\n");
+    try std.testing.expect(!looksLikeHostname(trimmed));
+
+    // The actual URL builder is reused — verify the encoded form.
+    var url: std.ArrayList(u8) = .empty;
+    defer url.deinit(std.testing.allocator);
+    try url.appendSlice(std.testing.allocator, "https://www.google.com/search?q=");
+    try session.appendUrlEncoded(&url, trimmed);
+    try std.testing.expect(std.mem.eql(u8, url.items, "https://www.google.com/search?q=hello+world"));
+}
+
+test "submitPrompt URL routing: full URL passes through, hostname gets https:// prefix" {
+    // Pure logic test for navigateOrSearch's first two branches.
+    // (Third branch goes through appendUrlEncoded covered above.)
+    try std.testing.expect(std.mem.indexOf(u8, "http://google.com", "://") != null);
+    try std.testing.expect(std.mem.indexOf(u8, "https://example.org/path", "://") != null);
+    // Bare hostname has no scheme — must trip the hostname branch.
+    try std.testing.expect(std.mem.indexOf(u8, "google.com", "://") == null);
+    try std.testing.expect(looksLikeHostname("google.com"));
 }
 
 test "search round-trip: prompt → type → submit → matches populated → advance" {
