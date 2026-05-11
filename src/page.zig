@@ -769,6 +769,14 @@ pub const Page = struct {
     /// Fetch `url`, parse the HTML, execute inline <script> tags, and return
     /// the post-JS document state.  Caller must call result.deinit().
     pub fn navigate(self: *Page, url: []const u8) !PageResult {
+        // T-82: local-file support. `file://...` and bare relative
+        // paths skip the network entirely and load HTML off disk —
+        // useful for `awr tui ./tests/playground/form.html` and for
+        // exercising the renderer against authored fixtures without
+        // standing up a mock server.
+        if (isLocalPath(url)) {
+            return self.navigateLocalFile(url);
+        }
         const timing_on = std.c.getenv("AWR_TIMING") != null;
         const measure = timing_on or self.metrics_sink != null;
         const t_fetch_start = if (measure) time_util.wallClockMillis() else 0;
@@ -785,6 +793,44 @@ pub const Page = struct {
         }
         if (self.metrics_sink) |s| s.protocol_main = resp.protocol.tag();
         return self.processHtml(resp.url, resp.status, resp.body);
+    }
+
+    /// True when `url` should resolve as a local filesystem read
+    /// rather than an HTTP/HTTPS fetch. Accepts `file://...` URLs
+    /// and bare paths that aren't valid HTTP URLs (e.g. `./foo.html`,
+    /// `foo.html`, `/abs/path.html`). HTTP/HTTPS schemes always win.
+    fn isLocalPath(url: []const u8) bool {
+        if (std.mem.startsWith(u8, url, "http://")) return false;
+        if (std.mem.startsWith(u8, url, "https://")) return false;
+        if (std.mem.startsWith(u8, url, "file://")) return true;
+        // Anything without "://" with a `.` or `/` is treated as a path.
+        // Pure tokens like "foo" stay in the network branch so the
+        // omnibox's search fallback still triggers for them.
+        if (std.mem.indexOf(u8, url, "://") != null) return false;
+        return std.mem.indexOfAny(u8, url, "./") != null;
+    }
+
+    /// Read an HTML file off disk and run it through the same
+    /// processHtml pipeline an HTTP response would. Synthesizes a
+    /// `file://` URL so relative-link resolution works.
+    fn navigateLocalFile(self: *Page, url: []const u8) !PageResult {
+        const path: []const u8 = if (std.mem.startsWith(u8, url, "file://"))
+            url[7..]
+        else
+            url;
+        const html = try std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(16 * 1024 * 1024));
+        defer self.allocator.free(html);
+
+        // Synthesize a file:// URL so the rendered page has a stable
+        // base for relative-link resolution and the history stack has
+        // something to display.
+        const synthetic_url = if (std.mem.startsWith(u8, url, "file://"))
+            try self.allocator.dupe(u8, url)
+        else
+            try std.fmt.allocPrint(self.allocator, "file://{s}", .{path});
+        defer self.allocator.free(synthetic_url);
+
+        return self.processHtml(synthetic_url, 200, html);
     }
 
     /// POST `body` to `url` with `Content-Type: application/x-www-form-urlencoded`,

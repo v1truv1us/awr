@@ -1248,21 +1248,34 @@ fn renderButton(state: *RenderState, w: anytype, elem: *const dom.Element) anyer
 }
 
 fn renderSelect(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
+    // Prefer the option marked `selected`; fall back to the first
+    // non-empty option (HTML default behavior for single-select). T-82.
     var first_option: ?[]const u8 = null;
+    var selected_option: ?[]const u8 = null;
     for (elem.children.items) |child| {
-        if (child == .element and eql(child.element.tag, "option")) {
-            const text = child.element.textContentForExtract(state.allocator) catch continue;
-            defer state.allocator.free(text);
-            const trimmed = std.mem.trim(u8, text, " \t\r\n");
-            if (trimmed.len > 0) {
-                first_option = try state.allocator.dupe(u8, trimmed);
-                break;
-            }
+        if (child != .element) continue;
+        if (!eql(child.element.tag, "option")) continue;
+        const text = child.element.textContentForExtract(state.allocator) catch continue;
+        defer state.allocator.free(text);
+        const trimmed = std.mem.trim(u8, text, " \t\r\n");
+        if (trimmed.len == 0) continue;
+
+        if (child.element.getAttribute("selected") != null) {
+            if (selected_option) |opt| state.allocator.free(opt);
+            selected_option = try state.allocator.dupe(u8, trimmed);
+            // First `selected` wins (per HTML5 if multiple, only the
+            // last would, but real browsers vary — first is simpler
+            // and matches authoring intent in practice).
+            break;
+        }
+        if (first_option == null) {
+            first_option = try state.allocator.dupe(u8, trimmed);
         }
     }
     defer if (first_option) |opt| state.allocator.free(opt);
+    defer if (selected_option) |opt| state.allocator.free(opt);
 
-    const display = first_option orelse "";
+    const display = selected_option orelse first_option orelse "";
     const col = state.col;
     try state.prepareForContent(w);
     try state.writeAll(w, "[");

@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AWR Form Playground</title>
+</head>
+<body>
+
+<h1>AWR Form Playground</h1>
+
+<p>
+  This page exercises every form element AWR's Tier 1 TUI is supposed
+  to handle. Tab moves focus, Shift-Tab moves it backward. In text
+  fields, just type. On checkboxes / radios, press Space (or Enter)
+  to toggle. On buttons, press Enter to activate.
+</p>
+
+<p>
+  Jump to: <a href="#text-inputs">Text inputs</a> ·
+  <a href="#choices">Choices</a> ·
+  <a href="#textarea-select">Textarea &amp; select</a> ·
+  <a href="#buttons">Buttons</a> ·
+  <a href="#full-form">Full form (GET)</a> ·
+  <a href="#post-form">Full form (POST)</a>
+</p>
+
+<hr>
+
+<h2 id="text-inputs">1. Text inputs</h2>
+<p>
+  Each input below should accept typing once you Tab to it. The
+  focused field is highlighted in reverse video, and the box fills
+  with what you type.
+</p>
+<form action="/echo" method="get">
+  <p>
+    <label>Username (text):
+      <input type="text" name="username" value="alice" placeholder="enter your name">
+    </label>
+  </p>
+  <p>
+    <label>Password:
+      <input type="password" name="password">
+    </label>
+  </p>
+  <p>
+    <label>Email:
+      <input type="email" name="email" placeholder="me@example.com">
+    </label>
+  </p>
+  <p>
+    <label>Website URL:
+      <input type="url" name="site" value="https://example.com">
+    </label>
+  </p>
+  <p>
+    <label>Search query:
+      <input type="search" name="q">
+    </label>
+  </p>
+  <p>
+    <label>Phone:
+      <input type="tel" name="phone" value="555-0100">
+    </label>
+  </p>
+  <p>
+    <label>Quantity (number):
+      <input type="number" name="qty" value="1" min="0" max="99">
+    </label>
+  </p>
+  <input type="hidden" name="csrf_token" value="abc123-do-not-touch">
+  <p><input type="submit" value="Submit text-inputs form"></p>
+</form>
+
+<hr>
+
+<h2 id="choices">2. Choices — checkboxes and radios</h2>
+<p>
+  Checkboxes render as <code>[ ]</code> / <code>[x]</code>. Radios
+  render as <code>( )</code> / <code>(*)</code>. Selecting one radio
+  in a group clears the others.
+</p>
+<form action="/echo" method="get">
+  <fieldset>
+    <legend>Toppings (checkboxes — multi-select)</legend>
+    <p>
+      <label><input type="checkbox" name="topping" value="cheese" checked> Cheese (pre-checked)</label>
+    </p>
+    <p>
+      <label><input type="checkbox" name="topping" value="pepperoni"> Pepperoni</label>
+    </p>
+    <p>
+      <label><input type="checkbox" name="topping" value="mushroom"> Mushroom</label>
+    </p>
+    <p>
+      <label><input type="checkbox" name="topping" value="olive"> Olive</label>
+    </p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Crust (radios — single-select)</legend>
+    <p>
+      <label><input type="radio" name="crust" value="thin"> Thin</label>
+    </p>
+    <p>
+      <label><input type="radio" name="crust" value="hand-tossed" checked> Hand-tossed (pre-selected)</label>
+    </p>
+    <p>
+      <label><input type="radio" name="crust" value="deep-dish"> Deep dish</label>
+    </p>
+  </fieldset>
+
+  <p>
+    <label><input type="checkbox" name="agree" required> I agree to the Terms of Service</label>
+  </p>
+  <p><input type="submit" value="Submit choices"></p>
+</form>
+
+<hr>
+
+<h2 id="textarea-select">3. Textarea and select</h2>
+<form action="/echo" method="get">
+  <p>
+    <label for="bio">Bio (textarea):</label><br>
+    <textarea id="bio" name="bio" rows="4" cols="40">Tell us about yourself.
+
+Multiple paragraphs are fine here.</textarea>
+  </p>
+  <p>
+    <label>Favorite color (select, single):
+      <select name="color">
+        <option value="red">Red</option>
+        <option value="green" selected>Green (default)</option>
+        <option value="blue">Blue</option>
+        <option value="yellow">Yellow</option>
+      </select>
+    </label>
+  </p>
+  <p><input type="submit" value="Submit textarea + select"></p>
+</form>
+
+<hr>
+
+<h2 id="buttons">4. Button kinds</h2>
+<p>
+  These all show as <code>[Label]</code>. The submit button submits
+  its parent form. The reset button is currently a no-op visually.
+  The plain <code>&lt;button&gt;</code> with no JS handler does
+  nothing — but should still focus and accept Enter without crashing.
+</p>
+<form action="/echo" method="get">
+  <input type="text" name="payload" value="testing buttons">
+  <input type="submit" value="Submit (input)">
+  <button type="submit">Submit (button)</button>
+  <input type="reset" value="Reset">
+  <button type="button">Plain button (no submit)</button>
+</form>
+
+<hr>
+
+<h2 id="full-form">5. Full form via GET</h2>
+<p>
+  This combines every element type into one form so you can see the
+  full URL-encoded payload after a Tab-through and submit. Hidden
+  inputs are round-tripped invisibly. Unchecked boxes are skipped
+  from the payload; only the selected radio appears.
+</p>
+<form action="/echo" method="get">
+  <input type="hidden" name="form_id" value="full-get">
+  <p>Name: <input type="text" name="name" value="alice"></p>
+  <p>Age: <input type="number" name="age" value="30"></p>
+  <p>
+    Newsletter:
+    <label><input type="checkbox" name="news" value="weekly"> Weekly</label>
+    <label><input type="checkbox" name="news" value="monthly" checked> Monthly</label>
+  </p>
+  <p>
+    Plan:
+    <label><input type="radio" name="plan" value="free"> Free</label>
+    <label><input type="radio" name="plan" value="pro" checked> Pro</label>
+    <label><input type="radio" name="plan" value="enterprise"> Enterprise</label>
+  </p>
+  <p>
+    Theme:
+    <select name="theme">
+      <option value="auto" selected>Auto</option>
+      <option value="light">Light</option>
+      <option value="dark">Dark</option>
+    </select>
+  </p>
+  <p><input type="submit" value="Submit full GET form"></p>
+</form>
+
+<hr>
+
+<h2 id="post-form">6. Full form via POST</h2>
+<p>
+  Same fields, but the form's <code>method=post</code>. AWR should
+  serialize the body as <code>application/x-www-form-urlencoded</code>
+  and POST it to the action URL.
+</p>
+<form action="/echo" method="post">
+  <input type="hidden" name="form_id" value="full-post">
+  <p>Comment: <input type="text" name="comment" value="hello via POST"></p>
+  <p><label><input type="checkbox" name="urgent"> Mark urgent</label></p>
+  <p><input type="submit" value="Submit full POST form"></p>
+</form>
+
+<hr>
+
+<h2>Bonus: a small table</h2>
+<table>
+  <thead>
+    <tr><th>Key</th><th>Action</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Tab</td><td>Focus next form field or link</td></tr>
+    <tr><td>Shift-Tab</td><td>Focus previous</td></tr>
+    <tr><td>Space</td><td>Toggle checkbox / select radio</td></tr>
+    <tr><td>Enter</td><td>Submit form / activate button / follow link</td></tr>
+    <tr><td>:</td><td>Open URL bar</td></tr>
+    <tr><td>/</td><td>Search within page</td></tr>
+    <tr><td>q</td><td>Quit AWR</td></tr>
+  </tbody>
+</table>
+
+<p>
+  <a href="#text-inputs">Back to top</a>
+</p>
+
+</body>
+</html>
