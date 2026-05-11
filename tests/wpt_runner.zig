@@ -718,6 +718,24 @@ const curated_cases = [_]WptCase{
         .html = "<html><body><div id=\"node\"></div></body></html>",
         .script = @embedFile("wpt/event_listener_options.js"),
     },
+    // T-87 / Tier 1 §4.2 closure gate: form input/change semantics,
+    // keyboard event key/code preservation, and submit-via-Enter
+    // implicit-submission JS surface.
+    .{
+        .filename = "keyboard_event_key_code.js",
+        .html = "<html><body><input id=\"t\" type=\"text\"></body></html>",
+        .script = @embedFile("wpt/keyboard_event_key_code.js"),
+    },
+    .{
+        .filename = "form_submit_event.js",
+        .html = "<html><body><form id=\"f\" action=\"/echo\" method=\"get\"><input id=\"user\" name=\"user\" type=\"text\"></form></body></html>",
+        .script = @embedFile("wpt/form_submit_event.js"),
+    },
+    .{
+        .filename = "form_input_change_semantics.js",
+        .html = "<html><body><form id=\"f\"><input id=\"t\" type=\"text\"><input id=\"cb\" type=\"checkbox\"><select id=\"s\"><option value=\"a\">A</option><option value=\"b\">B</option></select></form></body></html>",
+        .script = @embedFile("wpt/form_input_change_semantics.js"),
+    },
 };
 
 fn buildCaseHtml(allocator: std.mem.Allocator, case: WptCase) ![]u8 {

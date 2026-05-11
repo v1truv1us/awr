@@ -1410,6 +1410,29 @@ const BRIDGE_POLYFILL =
     \\        }
     \\        return out;
     \\      },
+    \\      // ── HTMLFormElement.requestSubmit() ────────────────────────
+    \\      // Per HTML spec: dispatch a cancelable `submit` event. If the
+    \\      // listener calls preventDefault() the actual submission is
+    \\      // skipped; otherwise the engine would navigate the form.
+    \\      // AWR's WPT/TUI environment doesn't navigate — the test
+    \\      // observes via the dispatched event. The TUI's Enter-in-text
+    \\      // implicit-submission path lives in browser.zig and follows
+    \\      // the same event contract. T-87 / Tier 1 §4.2 closure gate.
+    \\      requestSubmit: function(submitter) {
+    \\        if (this.tagName !== 'FORM') return;
+    \\        const ev = new globalThis.Event('submit', { bubbles: true, cancelable: true });
+    \\        ev.submitter = submitter || null;
+    \\        this.dispatchEvent(ev);
+    \\      },
+    \\      // HTMLFormElement.submit() — per spec, does NOT dispatch a
+    \\      // submit event; goes straight to the submission algorithm.
+    \\      // In AWR's environment that's a no-op (no navigation surface
+    \\      // visible from JS); kept as a method so feature-detection
+    \\      // (`typeof form.submit === 'function'`) returns true.
+    \\      submit: function() {
+    \\        if (this.tagName !== 'FORM') return;
+    \\        // intentionally no event, no navigation in the WPT env
+    \\      },
     \\      _dirtyValue: false,
     \\      _value: null,
     \\      get dataset() {
@@ -1759,7 +1782,29 @@ const BRIDGE_POLYFILL =
     \\  globalThis.CustomEvent.prototype = Object.create(globalThis.Event.prototype);
     \\  globalThis.CustomEvent.prototype.constructor = globalThis.CustomEvent;
     \\  globalThis.MouseEvent = globalThis.Event;
-    \\  globalThis.KeyboardEvent = globalThis.Event;
+    \\  // KeyboardEvent — proper constructor preserving the init-dict
+    \\  // fields the spec calls out so JS handlers can branch on key/code.
+    \\  // Without these the existing element_interaction_events.js test
+    \\  // documents the limitation; this constructor closes that gap and
+    \\  // unblocks the Tier 1 §4.2 keyboard-events WPT case (T-87).
+    \\  globalThis.KeyboardEvent = function(type, opts) {
+    \\    opts = opts || {};
+    \\    globalThis.Event.call(this, type, opts);
+    \\    this.key = opts.key == null ? '' : String(opts.key);
+    \\    this.code = opts.code == null ? '' : String(opts.code);
+    \\    this.which = opts.which == null ? 0 : (opts.which | 0);
+    \\    this.keyCode = opts.keyCode == null ? this.which : (opts.keyCode | 0);
+    \\    this.charCode = opts.charCode == null ? 0 : (opts.charCode | 0);
+    \\    this.altKey = !!opts.altKey;
+    \\    this.ctrlKey = !!opts.ctrlKey;
+    \\    this.shiftKey = !!opts.shiftKey;
+    \\    this.metaKey = !!opts.metaKey;
+    \\    this.repeat = !!opts.repeat;
+    \\    this.isComposing = !!opts.isComposing;
+    \\    this.location = opts.location == null ? 0 : (opts.location | 0);
+    \\  };
+    \\  globalThis.KeyboardEvent.prototype = Object.create(globalThis.Event.prototype);
+    \\  globalThis.KeyboardEvent.prototype.constructor = globalThis.KeyboardEvent;
     \\  globalThis.TouchEvent = globalThis.Event;
     \\  globalThis.FocusEvent = globalThis.Event;
     \\

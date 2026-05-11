@@ -105,7 +105,7 @@ This tier is the foundation everything else stands on.
 
 ---
 
-### Tier 1 — Interactive TUI parity (ACTIVE)
+### Tier 1 — Interactive TUI parity (CLOSED 2026-05-11)
 
 **Scope sentence**: A human can use `awr browse <url>` to read,
 log into, and interact with traditional web apps as easily as

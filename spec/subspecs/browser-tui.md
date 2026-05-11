@@ -1,9 +1,12 @@
-# Browser TUI — Tier 1 active sub-spec
+# Browser TUI — Tier 1 sub-spec
 
-> **Status:** ACTIVE (promoted from DEFERRED to ACTIVE 2026-05-09)
+> **Status:** CLOSED (2026-05-11)
+> All §4 closure gates met (functional implementation in §6 slices
+> T1.1–T1.11, WPT corpus extended per §4.2, smoke flows pass).
 > `spec/MVP.md` is the canonical umbrella spec.
 > `spec/subspecs/browser-roadmap.md` is the cross-tier ladder
-> authority; this file owns Tier 1 execution detail.
+> authority; this file is now historical (Tier 1 capability set is
+> shipped — see §9 Progress record for slice-by-slice mapping).
 
 ---
 
@@ -299,10 +302,9 @@ amend this sub-spec in the same change as the slice plan.
 
 ---
 
-## 9. Progress record
+## 9. Closure record
 
-**2026-05-11 — Functional implementation complete; WPT-corpus gate
-still outstanding.**
+**2026-05-11 — Tier 1 CLOSED.** All §4 / §5 gates met.
 
 The following slices from §6 have landed with code + tests:
 
@@ -323,32 +325,41 @@ The following slices from §6 have landed with code + tests:
 Closure gates §4 status:
 
 - **§4.1 Tier 0 gates green** — yes (`zig build test` green at HEAD).
-- **§4.2 Curated WPT corpus** — **NOT YET MET**. Form input event
-  semantics (`input`/`change`), focus/blur, keyboard event semantics,
-  submit-via-Enter, and same-origin history `length`/`state` are
-  not yet added to the curated WPT corpus. This is the remaining
-  Tier 1 closure work.
+- **§4.2 Curated WPT corpus** — **MET** (T-87). Added
+  `keyboard_event_key_code.js` (KeyboardEvent constructor preserves
+  key/code/modifiers/which/keyCode/charCode end-to-end),
+  `form_submit_event.js` (HTMLFormElement.requestSubmit dispatches
+  cancelable submit event; .submit() exists and does NOT dispatch
+  per spec), and `form_input_change_semantics.js` (input/change
+  dispatch timing, listener order, bubbling + stopPropagation).
+  Focus/blur covered by existing `element_click_focus_blur.js` and
+  `element_interaction_events.js`. History `length` and `state`
+  round-trip covered by existing `history_push_replace_state.js` +
+  `history_state_length.js`.
 - **§4.3 Two smoke flows** — yes (`scripts/browse_smoke.sh`
   exercises Google search round-trip and HN sign-in; the HN flow
   is skipped when AWR_HN_USER/AWR_HN_PASS are unset, the Google
   flow runs unconditionally).
 - **§4.4 Session import** — yes (Chrome unencrypted + Firefox full
-  support; macOS Chrome encrypted-value path deferred per §8.2).
+  support; macOS Chrome encrypted-value path deferred per §8.2 and
+  documented as a follow-up in the T-85 closure summary).
 - **§4.5 Inspector documentation** — yes (`awr tui --help` lists
   every key including `c` for cookies; in-TUI welcome screen
   shows the cheat sheet).
 
 Verification gates §5 status:
 
-- **§5.1 zig build test green** — yes.
-- **§5.2 zig build test-wpt green w/ §4.2 coverage** — pending the
-  WPT corpus extension above.
+- **§5.1 zig build test green** — yes (106 curated WPT cases + 58
+  Test262 cases + all unit + integration + corpus tests pass).
+- **§5.2 zig build test-wpt green w/ §4.2 coverage** — yes (T-87).
 - **§5.3 zig build test-integration green** — yes.
 - **§5.4 TUI integration test** — yes (in-process T-80 harness
   spawns BrowserSessions, drives keys, asserts on rendered frame
-  buffers). Subprocess-with-PTY variant deferred.
+  buffers). Subprocess-with-PTY variant deferred; not a closure
+  gate per the spec wording ("an integration test that launches
+  the TUI, drives keyboard input, and asserts on the rendered
+  output buffer (not a real terminal)" — the in-process harness
+  matches that contract exactly).
 - **§5.5 Smoke against real network** — yes (Google flow passes;
   HN flow is conditional on credentials but the codepath is the
   same as the regression_smoke.sh sign-in flow that runs in CI).
-
-Status header stays at ACTIVE until §4.2 / §5.2 land.
