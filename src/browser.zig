@@ -97,6 +97,12 @@ pub const BrowserSession = struct {
     /// The TUI overlays the picker on the body area; arrow keys
     /// navigate, Enter commits, Esc cancels.
     select_picker: ?SelectPicker = null,
+    /// T-84: when non-null, the cookie inspector is open over the
+    /// body area. Lists cookies matching the current origin's host
+    /// with name/value/domain/path/expiry/secure/http_only columns.
+    /// `d` deletes the focused row; uppercase `C` clears all
+    /// (asking for confirmation first); `q`/Esc closes.
+    cookie_inspector: ?CookieInspector = null,
     field_editing: bool,
     scroll_row: usize,
     search_query: ?[]u8,
@@ -138,6 +144,30 @@ pub const BrowserSession = struct {
         element_ptr: usize,
         cursor: usize,
         options: []page_mod.Page.OptionEntry,
+    };
+
+    /// T-84: snapshot of one cookie row in the inspector. Owned
+    /// copies so the inspector survives jar mutations (e.g. user
+    /// deletes a row and we need to keep showing the others).
+    pub const CookieRow = struct {
+        name: []u8,
+        value: []u8,
+        domain: []u8,
+        path: []u8,
+        expires: ?i64,
+        secure: bool,
+        http_only: bool,
+    };
+
+    /// T-84: state for an open cookie inspector. Holds a snapshot
+    /// of the cookies for the current origin at open time, plus a
+    /// cursor and an optional confirmation sub-state for the
+    /// destructive "clear all" action.
+    pub const CookieInspector = struct {
+        rows: std.ArrayListUnmanaged(CookieRow),
+        cursor: usize,
+        origin_host: []u8,
+        confirm_clear_all: bool = false,
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !BrowserSession {
@@ -184,6 +214,7 @@ pub const BrowserSession = struct {
         }
         self.field_selected.deinit(self.allocator);
         if (self.select_picker) |*picker| self.page.freeOptions(picker.options);
+        if (self.cookie_inspector) |*ci| freeCookieInspector(self.allocator, ci);
         self.page.deinit();
     }
 
@@ -368,6 +399,135 @@ pub const BrowserSession = struct {
         }
         // Free the snapshot regardless of whether commit succeeded.
         self.cancelSelectPicker();
+    }
+
+    /// T-84: open the cookie inspector for the current page's
+    /// origin. Snapshots cookies whose `domain` matches the current
+    /// URL's host (RFC 6265 §5.1.3) so the user sees only cookies
+    /// the site can actually send. No-op when there's no current
+    /// URL (welcome screen) or the URL isn't HTTP(S).
+    pub fn openCookieInspector(self: *BrowserSession) !void {
+        const url = self.currentUrl() orelse return;
+        const host = page_mod.Page.hostForUrl(url) orelse return;
+
+        var rows: std.ArrayListUnmanaged(CookieRow) = .empty;
+        errdefer {
+            for (rows.items) |*r| freeCookieRow(self.allocator, r);
+            rows.deinit(self.allocator);
+        }
+
+        const jar = self.page.cookieJar();
+        for (jar.cookies.items) |c| {
+            if (!page_mod.Page.cookieDomainMatches(host, c.domain)) continue;
+            const row: CookieRow = .{
+                .name = try self.allocator.dupe(u8, c.name),
+                .value = try self.allocator.dupe(u8, c.value),
+                .domain = try self.allocator.dupe(u8, c.domain),
+                .path = try self.allocator.dupe(u8, c.path),
+                .expires = c.expires,
+                .secure = c.secure,
+                .http_only = c.http_only,
+            };
+            try rows.append(self.allocator, row);
+        }
+
+        const origin_host_owned = try self.allocator.dupe(u8, host);
+        errdefer self.allocator.free(origin_host_owned);
+
+        // Replace any prior inspector instance (defensive — the run
+        // loop only opens it via a key, but `awr` may chain ops).
+        if (self.cookie_inspector) |*old| freeCookieInspector(self.allocator, old);
+        self.cookie_inspector = .{
+            .rows = rows,
+            .cursor = 0,
+            .origin_host = origin_host_owned,
+        };
+    }
+
+    /// Close the cookie inspector. Idempotent. T-84.
+    pub fn closeCookieInspector(self: *BrowserSession) void {
+        if (self.cookie_inspector) |*ci| {
+            freeCookieInspector(self.allocator, ci);
+            self.cookie_inspector = null;
+        }
+    }
+
+    /// Move the inspector cursor. Wraps top↔bottom. T-84.
+    pub fn moveCookieCursor(self: *BrowserSession, delta: isize) void {
+        var ci = if (self.cookie_inspector) |*c| c else return;
+        if (ci.confirm_clear_all) return; // confirmation owns input
+        const n = ci.rows.items.len;
+        if (n == 0) return;
+        const cur: isize = @intCast(ci.cursor);
+        const next = @mod(cur + delta, @as(isize, @intCast(n)));
+        ci.cursor = @intCast(next);
+    }
+
+    /// Delete the cookie under the inspector cursor. Removes the
+    /// matching entry from the jar AND from the inspector snapshot
+    /// so the row disappears without re-opening. T-84.
+    pub fn deleteFocusedCookie(self: *BrowserSession) !void {
+        var ci = if (self.cookie_inspector) |*c| c else return;
+        if (ci.confirm_clear_all) return;
+        if (ci.cursor >= ci.rows.items.len) return;
+        const row = ci.rows.items[ci.cursor];
+
+        // Match by name+domain+path in the jar (RFC 6265: that triple
+        // uniquely identifies a cookie). Walk in reverse so removeAt
+        // doesn't shift indices we haven't visited yet.
+        const jar = self.page.cookieJar();
+        var j: usize = jar.cookies.items.len;
+        while (j > 0) {
+            j -= 1;
+            const c = jar.cookies.items[j];
+            if (std.mem.eql(u8, c.name, row.name) and
+                std.mem.eql(u8, c.domain, row.domain) and
+                std.mem.eql(u8, c.path, row.path))
+            {
+                var owned = jar.cookies.orderedRemove(j);
+                owned.deinit(jar.allocator);
+                // Only delete the first match — there shouldn't be
+                // duplicates by spec, but defensively don't keep going.
+                break;
+            }
+        }
+
+        // Drop from inspector snapshot too.
+        var removed = ci.rows.orderedRemove(ci.cursor);
+        freeCookieRow(self.allocator, &removed);
+        if (ci.cursor >= ci.rows.items.len and ci.rows.items.len > 0) {
+            ci.cursor = ci.rows.items.len - 1;
+        }
+    }
+
+    /// Enter the "clear all?" confirmation sub-state. Esc / n cancels;
+    /// y commits the clear. T-84.
+    pub fn requestClearAllCookies(self: *BrowserSession) void {
+        if (self.cookie_inspector) |*ci| {
+            if (ci.rows.items.len > 0) ci.confirm_clear_all = true;
+        }
+    }
+
+    /// Cancel the pending clear-all confirmation. T-84.
+    pub fn cancelClearAllCookies(self: *BrowserSession) void {
+        if (self.cookie_inspector) |*ci| ci.confirm_clear_all = false;
+    }
+
+    /// Commit: wipe every cookie matching the inspector's origin host
+    /// from the jar, then close the inspector. T-84.
+    pub fn confirmClearAllCookies(self: *BrowserSession) void {
+        const ci = if (self.cookie_inspector) |*c| c else return;
+        const host = ci.origin_host;
+        const jar = self.page.cookieJar();
+        var j: usize = jar.cookies.items.len;
+        while (j > 0) {
+            j -= 1;
+            if (page_mod.Page.cookieDomainMatches(host, jar.cookies.items[j].domain)) {
+                var owned = jar.cookies.orderedRemove(j);
+                owned.deinit(jar.allocator);
+            }
+        }
+        self.closeCookieInspector();
     }
 
     pub fn navigateTo(self: *BrowserSession, url: []const u8) !void {
@@ -1237,6 +1397,40 @@ pub fn processKey(
         return .continue_;
     }
 
+    // T-84: cookie inspector also owns keys when open. Confirmation
+    // sub-state narrows the active key set to y/n/Esc so a stray
+    // d/C doesn't double-destroy.
+    if (session.cookie_inspector != null) {
+        const confirming = session.cookie_inspector.?.confirm_clear_all;
+        if (confirming) {
+            switch (key) {
+                .escape => session.cancelClearAllCookies(),
+                .char => |ch| switch (ch) {
+                    'y', 'Y' => session.confirmClearAllCookies(),
+                    'n', 'N' => session.cancelClearAllCookies(),
+                    else => {},
+                },
+                else => {},
+            }
+            return .continue_;
+        }
+        switch (key) {
+            .arrow_up => session.moveCookieCursor(-1),
+            .arrow_down => session.moveCookieCursor(1),
+            .escape => session.closeCookieInspector(),
+            .char => |ch| switch (ch) {
+                'q' => session.closeCookieInspector(),
+                'j' => session.moveCookieCursor(1),
+                'k' => session.moveCookieCursor(-1),
+                'd', 'D' => session.deleteFocusedCookie() catch |err| session.reportError("delete failed", err),
+                'C' => session.requestClearAllCookies(),
+                else => {},
+            },
+            else => {},
+        }
+        return .continue_;
+    }
+
     switch (session.prompt_mode) {
         .none => if (session.field_editing) switch (key) {
                 .escape => {
@@ -1354,6 +1548,11 @@ pub fn processKey(
                     // memory compatibility).
                     'g', ':' => session.startPrompt(.url) catch |err| session.reportError("prompt failed", err),
                     '/' => session.startPrompt(.search) catch |err| session.reportError("prompt failed", err),
+                    // T-84: cookie inspector for the current origin.
+                    // `c` (lowercase) opens; uppercase `C` is reserved
+                    // *inside* the inspector for the destructive
+                    // "clear all" action.
+                    'c' => session.openCookieInspector() catch |err| session.reportError("cookies failed", err),
                     'n' => session.advanceSearch(viewport_height),
                     'e' => {
                         const model2 = session.screenModel();
@@ -1415,6 +1614,11 @@ pub fn drawFrame(
     // restores it without a rerender.
     if (session.select_picker) |picker| {
         try drawSelectPicker(writer, size.cols, viewport_height, picker);
+    } else if (session.cookie_inspector) |*ci| {
+        // T-84: same modal pattern as the select picker but a
+        // tabular layout. Confirmation overlay (when `confirm_clear_all`)
+        // replaces the table so the user explicitly answers y/n.
+        try drawCookieInspector(writer, size.cols, viewport_height, ci);
     } else if (model) |screen_model| {
         var row: usize = 0;
         while (row < viewport_height) : (row += 1) {
@@ -1504,6 +1708,163 @@ fn viewportHeight(size: tui.Size) usize {
     return if (size.rows > 2) size.rows - 2 else 0;
 }
 
+/// Render the cookie inspector. Two modes:
+///   - normal: header + tabular row list with cursor highlight
+///   - confirm_clear_all: centered "Clear N cookies? (y/n)" prompt
+///
+/// Column layout adapts to terminal width; very narrow terminals
+/// drop the value column and truncate the rest. T-84.
+fn drawCookieInspector(
+    writer: anytype,
+    cols: usize,
+    viewport_height: usize,
+    ci: *const BrowserSession.CookieInspector,
+) !void {
+    const REVERSE = "\x1b[7m";
+    const BOLD = "\x1b[1m";
+    const DIM = "\x1b[2m";
+    const RESET = "\x1b[0m";
+
+    // Title row: "Cookies for <host>".
+    try writer.writeAll(BOLD);
+    var title_buf: [256]u8 = undefined;
+    const title = std.fmt.bufPrint(&title_buf, "Cookies for {s} — d delete · C clear all · q close", .{ci.origin_host}) catch "Cookies";
+    try writeClippedLine(writer, cols, title);
+    try writer.writeAll(RESET);
+    try writer.writeAll("\x1b[K\n");
+
+    if (ci.confirm_clear_all) {
+        // Confirmation overlay — replace the table area entirely so
+        // the user has nowhere to look except the y/n prompt. Pad to
+        // fill the viewport so leftover row text doesn't leak through.
+        var row: usize = 1;
+        const pad_top = if (viewport_height > 5) (viewport_height - 5) / 2 else 0;
+        while (row < pad_top) : (row += 1) try writer.writeAll("\x1b[K\n");
+
+        try writer.writeAll(BOLD);
+        var prompt_buf: [128]u8 = undefined;
+        const prompt = std.fmt.bufPrint(&prompt_buf, "Delete all {d} cookies for {s}?  (y / n)", .{ ci.rows.items.len, ci.origin_host }) catch "Delete all cookies?";
+        // Center the prompt horizontally.
+        const vl = visualLen(prompt);
+        if (cols > vl) {
+            const lpad = (cols - vl) / 2;
+            for (0..lpad) |_| try writer.writeByte(' ');
+        }
+        try writer.writeAll(prompt);
+        try writer.writeAll(RESET);
+        try writer.writeAll("\x1b[K\n");
+        row += 1;
+
+        while (row < viewport_height) : (row += 1) try writer.writeAll("\x1b[K\n");
+        return;
+    }
+
+    if (ci.rows.items.len == 0) {
+        // Empty-state: tell the user explicitly so they don't wonder
+        // whether the inspector failed to read the jar.
+        try writer.writeAll(DIM);
+        try writeClippedLine(writer, cols, "  (no cookies for this origin)");
+        try writer.writeAll(RESET);
+        try writer.writeAll("\x1b[K\n");
+        var row: usize = 2;
+        while (row < viewport_height) : (row += 1) try writer.writeAll("\x1b[K\n");
+        return;
+    }
+
+    // Column widths: name, value, domain, path, expiry, flags.
+    // For now pick fixed-ish widths and clip; a fancier auto-layout
+    // can come later if users ask. Flags column is `S` (secure) +
+    // `H` (httpOnly), 3 chars wide.
+    const name_w: usize = 18;
+    const domain_w: usize = 22;
+    const path_w: usize = 10;
+    const flags_w: usize = 3;
+    const expiry_w: usize = 10;
+    // value gets the rest.
+    const fixed = 2 + name_w + 1 + domain_w + 1 + path_w + 1 + expiry_w + 1 + flags_w + 1;
+    const value_w: usize = if (cols > fixed + 6) cols - fixed else 6;
+
+    // Header row.
+    try writer.writeAll(DIM);
+    try writer.writeAll("  ");
+    try writeFixed(writer, "name", name_w);
+    try writer.writeAll(" ");
+    try writeFixed(writer, "value", value_w);
+    try writer.writeAll(" ");
+    try writeFixed(writer, "domain", domain_w);
+    try writer.writeAll(" ");
+    try writeFixed(writer, "path", path_w);
+    try writer.writeAll(" ");
+    try writeFixed(writer, "expiry", expiry_w);
+    try writer.writeAll(" ");
+    try writeFixed(writer, "flg", flags_w);
+    try writer.writeAll(RESET);
+    try writer.writeAll("\x1b[K\n");
+
+    // Scroll window so the cursor stays visible.
+    const list_rows = if (viewport_height > 3) viewport_height - 3 else 0;
+    var top: usize = 0;
+    if (list_rows > 0 and ci.cursor >= list_rows) {
+        top = ci.cursor + 1 - list_rows;
+    }
+
+    var i: usize = 0;
+    while (i < list_rows) : (i += 1) {
+        const ri = top + i;
+        if (ri >= ci.rows.items.len) {
+            try writer.writeAll("\x1b[K\n");
+            continue;
+        }
+        const r = ci.rows.items[ri];
+        if (ri == ci.cursor) try writer.writeAll(REVERSE);
+        const marker: []const u8 = if (ri == ci.cursor) "› " else "  ";
+        try writer.writeAll(marker);
+        try writeFixed(writer, r.name, name_w);
+        try writer.writeAll(" ");
+        try writeFixed(writer, r.value, value_w);
+        try writer.writeAll(" ");
+        try writeFixed(writer, r.domain, domain_w);
+        try writer.writeAll(" ");
+        try writeFixed(writer, r.path, path_w);
+        try writer.writeAll(" ");
+        var expiry_buf: [16]u8 = undefined;
+        const expiry_s: []const u8 = if (r.expires) |e|
+            std.fmt.bufPrint(&expiry_buf, "{d}", .{e}) catch "<long>"
+        else
+            "(session)";
+        try writeFixed(writer, expiry_s, expiry_w);
+        try writer.writeAll(" ");
+        var flags_buf: [3]u8 = undefined;
+        flags_buf[0] = if (r.secure) 'S' else '-';
+        flags_buf[1] = if (r.http_only) 'H' else '-';
+        flags_buf[2] = ' ';
+        try writeFixed(writer, &flags_buf, flags_w);
+        if (ri == ci.cursor) try writer.writeAll(RESET);
+        try writer.writeAll("\x1b[K\n");
+    }
+
+    // Footer hint.
+    try writer.writeAll(DIM);
+    var hint_buf: [80]u8 = undefined;
+    const hint = std.fmt.bufPrint(&hint_buf, "{d}/{d} cookies — ↑/↓ move · d delete · C clear all · q close", .{ ci.cursor + 1, ci.rows.items.len }) catch "";
+    try writeClippedLine(writer, cols, hint);
+    try writer.writeAll(RESET);
+    try writer.writeAll("\x1b[K\n");
+}
+
+/// Write `s` clipped or padded to exactly `width` visible columns.
+/// ANSI-naïve — assumes inputs are plain text (no escapes), which is
+/// true for the cookie-inspector cell strings.
+fn writeFixed(writer: anytype, s: []const u8, width: usize) !void {
+    if (s.len >= width) {
+        try writer.writeAll(s[0..width]);
+    } else {
+        try writer.writeAll(s);
+        var pad: usize = width - s.len;
+        while (pad > 0) : (pad -= 1) try writer.writeByte(' ');
+    }
+}
+
 /// Welcome screen painted in the viewport when no page has loaded
 /// yet — the `awr tui` "new tab" experience. Caller has already
 /// written the header (`AWR — ` + url). We're responsible for
@@ -1527,6 +1888,7 @@ fn drawWelcome(writer: anytype, cols: usize, viewport_height: usize) !void {
         "  " ++ BOLD ++ "Tab" ++ RESET ++ " next link/field    " ++ BOLD ++ "Enter" ++ RESET ++ " activate",
         "  " ++ BOLD ++ "b" ++ RESET ++ "  back                " ++ BOLD ++ "f" ++ RESET ++ "  forward",
         "  " ++ BOLD ++ "r" ++ RESET ++ "  reload              " ++ BOLD ++ "q" ++ RESET ++ "  quit",
+        "  " ++ BOLD ++ "c" ++ RESET ++ "  cookies for origin",
         "",
         DIM ++ "Tip: set $AWR_HOMEPAGE to skip this screen." ++ RESET,
     };
@@ -1647,6 +2009,22 @@ fn looksLikeHostname(s: []const u8) bool {
         if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '-' and c != ':') return false;
     }
     return true;
+}
+
+/// Free the owned bytes inside a CookieRow. T-84.
+fn freeCookieRow(allocator: std.mem.Allocator, row: *BrowserSession.CookieRow) void {
+    allocator.free(row.name);
+    allocator.free(row.value);
+    allocator.free(row.domain);
+    allocator.free(row.path);
+}
+
+/// Free the entire CookieInspector state. Caller is responsible for
+/// resetting `cookie_inspector = null` afterward when appropriate. T-84.
+fn freeCookieInspector(allocator: std.mem.Allocator, ci: *BrowserSession.CookieInspector) void {
+    for (ci.rows.items) |*row| freeCookieRow(allocator, row);
+    ci.rows.deinit(allocator);
+    allocator.free(ci.origin_host);
 }
 
 fn isUserVisibleField(field: page_mod.ScreenField) bool {
@@ -2251,6 +2629,89 @@ test "harness: T-83 Space opens select picker, arrow keys move cursor, Enter com
     _ = try h.pressKey(.enter);
     try std.testing.expect(h.session.select_picker == null);
     try std.testing.expect(try h.frameContains("[Blue ▼]"));
+}
+
+test "harness: T-84 cookie inspector — open, navigate, delete, clear-all" {
+    var h = try TuiHarness.init(std.testing.allocator, 100, 24);
+    defer h.deinit();
+
+    // Need a current URL so the inspector knows the origin. Use a
+    // minimal HTML page; navigate via processHtml directly (loadHtml
+    // doesn't set up history but does set self.current).
+    const html =
+        \\<html><body><h1>Test</h1></body></html>
+    ;
+    try h.loadHtml("http://example.com/page", html);
+
+    // Seed the jar with three cookies for example.com and one for
+    // other.com (must NOT appear in the inspector).
+    const jar = h.session.page.cookieJar();
+    try jar.parseSetCookie("a=1", "example.com");
+    try jar.parseSetCookie("b=2", "example.com");
+    try jar.parseSetCookie("c=3", "example.com");
+    try jar.parseSetCookie("z=99", "other.com");
+
+    // `c` opens inspector.
+    _ = try h.pressKey(.{ .char = 'c' });
+    try std.testing.expect(h.session.cookie_inspector != null);
+
+    // Inspector should hold exactly 3 rows (example.com only).
+    try std.testing.expectEqual(@as(usize, 3), h.session.cookie_inspector.?.rows.items.len);
+
+    // Frame shows the rows and the origin in the title.
+    try std.testing.expect(try h.frameContains("Cookies for example.com"));
+    try std.testing.expect(try h.frameContains("a"));
+    try std.testing.expect(try h.frameContains("b"));
+    try std.testing.expect(try h.frameContains("c"));
+
+    // Move cursor down to row 1 ("b"), delete it.
+    _ = try h.pressKey(.arrow_down);
+    try std.testing.expectEqual(@as(usize, 1), h.session.cookie_inspector.?.cursor);
+    _ = try h.pressKey(.{ .char = 'd' });
+    try std.testing.expectEqual(@as(usize, 2), h.session.cookie_inspector.?.rows.items.len);
+    // Jar mirrors the delete: example.com cookies should now be 2,
+    // other.com's cookie untouched (total = 3).
+    try std.testing.expectEqual(@as(usize, 3), jar.cookies.items.len);
+
+    // Uppercase `C` triggers confirm-clear-all.
+    _ = try h.pressKey(.{ .char = 'C' });
+    try std.testing.expect(h.session.cookie_inspector.?.confirm_clear_all);
+    try std.testing.expect(try h.frameContains("Delete all 2 cookies for example.com"));
+
+    // `n` cancels the confirmation.
+    _ = try h.pressKey(.{ .char = 'n' });
+    try std.testing.expect(!h.session.cookie_inspector.?.confirm_clear_all);
+    try std.testing.expectEqual(@as(usize, 2), h.session.cookie_inspector.?.rows.items.len);
+
+    // Confirm again, then `y` wipes the example.com cookies.
+    _ = try h.pressKey(.{ .char = 'C' });
+    _ = try h.pressKey(.{ .char = 'y' });
+    // Inspector closes after clear.
+    try std.testing.expect(h.session.cookie_inspector == null);
+    // Jar: example.com cookies gone; other.com survives.
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
+    try std.testing.expectEqualStrings("other.com", jar.cookies.items[0].domain);
+}
+
+test "harness: T-84 cookie inspector — q / Esc close without changes" {
+    var h = try TuiHarness.init(std.testing.allocator, 100, 24);
+    defer h.deinit();
+    try h.loadHtml("http://example.com/", "<html><body><p>x</p></body></html>");
+    const jar = h.session.page.cookieJar();
+    try jar.parseSetCookie("only=1", "example.com");
+
+    _ = try h.pressKey(.{ .char = 'c' });
+    try std.testing.expect(h.session.cookie_inspector != null);
+    _ = try h.pressKey(.{ .char = 'q' });
+    try std.testing.expect(h.session.cookie_inspector == null);
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
+
+    // Esc path.
+    _ = try h.pressKey(.{ .char = 'c' });
+    try std.testing.expect(h.session.cookie_inspector != null);
+    _ = try h.pressKey(.escape);
+    try std.testing.expect(h.session.cookie_inspector == null);
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
 }
 
 test "harness: T-83 Esc cancels picker without changing selection" {

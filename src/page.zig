@@ -882,6 +882,30 @@ pub const Page = struct {
     /// Used as a fallback for hidden fields and pre-populated text inputs the
     /// user did not edit (CSRF tokens depend on this round-trip).
     /// Returned slice is borrowed from the DOM.
+    /// Direct accessor for the cookie jar in use. Used by the TUI's
+    /// cookie inspector (T-84) to read + delete cookies for the
+    /// current origin without going through the network round-trip.
+    /// Borrows from the underlying client — never free.
+    pub fn cookieJar(self: *Page) *cookie_mod.CookieJar {
+        return self.client.cookieJar();
+    }
+
+    /// Extract the host portion of an HTTP(S) URL string. Returns
+    /// null for non-HTTP URLs (file://, mailto:, etc.) so callers
+    /// can degrade gracefully. T-84.
+    pub fn hostForUrl(url: []const u8) ?[]const u8 {
+        const u = url_mod.Url.parse(url) catch return null;
+        return u.host;
+    }
+
+    /// True when `host` (the current page's host) matches `cookie_domain`
+    /// per RFC 6265 §5.1.3 (exact match or proper subdomain). Re-exported
+    /// so the TUI can filter cookies by origin without importing the
+    /// cookie module directly. T-84.
+    pub fn cookieDomainMatches(host: []const u8, cookie_domain: []const u8) bool {
+        return cookie_mod.domainMatches(host, cookie_domain);
+    }
+
     pub fn fieldValueAttr(self: *Page, field: ScreenField) ?[]const u8 {
         if (self.current_doc == null) return null;
         const elem: *const dom.Element = @ptrFromInt(field.element_ptr);
