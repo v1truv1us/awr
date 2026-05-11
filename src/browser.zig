@@ -878,22 +878,43 @@ pub fn runWith(
         const maybe_key = try terminal.readKeyTimeout(SIZE_POLL_MS);
         const key = maybe_key orelse continue;
         needs_draw = true;
-        // Universal quit: Ctrl+C / Ctrl+D always exits, regardless of which
-        // mode the session is in (link nav, field editing, prompt). This is
-        // the escape hatch when other key bindings don't work as expected.
-        if (key == .interrupt) return;
-        switch (session.prompt_mode) {
-            .none => if (session.field_editing) switch (key) {
+        switch (try processKey(&session, key, viewportHeight(size))) {
+            .continue_ => {},
+            .exit => return,
+        }
+    }
+}
+
+/// Outcome of `processKey` — `.exit` tells the run loop to break out
+/// of the read/draw cycle. Used for Ctrl+C / Ctrl+D / `q` keys.
+pub const KeyOutcome = enum { continue_, exit };
+
+/// T-80 / Tier 1 slice T1.10: the run loop's key-handling logic
+/// extracted to a standalone function so the TUI integration test
+/// harness can synthesize keypresses without spawning a subprocess
+/// and PTY-wrangling. The real terminal I/O lives in `runWith`;
+/// everything testable lives here.
+pub fn processKey(
+    session: *BrowserSession,
+    key: tui.Key,
+    viewport_height: usize,
+) !KeyOutcome {
+    // Universal quit: Ctrl+C / Ctrl+D always exits, regardless of which
+    // mode the session is in (link nav, field editing, prompt). This is
+    // the escape hatch when other key bindings don't work as expected.
+    if (key == .interrupt) return .exit;
+    switch (session.prompt_mode) {
+        .none => if (session.field_editing) switch (key) {
                 .escape => {
                     session.exitFieldEditing();
                     session.rerenderCurrent() catch {};
                 },
                 .tab => {
-                    session.nextFocusable(false, viewportHeight(terminal.size()));
+                    session.nextFocusable(false, viewport_height);
                     session.rerenderCurrent() catch {};
                 },
                 .shift_tab => {
-                    session.nextFocusable(true, viewportHeight(terminal.size()));
+                    session.nextFocusable(true, viewport_height);
                     session.rerenderCurrent() catch {};
                 },
                 .enter => {
@@ -939,16 +960,16 @@ pub fn runWith(
                 },
                 else => {},
             } else switch (key) {
-                .arrow_down => session.scrollBy(1, viewportHeight(terminal.size())),
-                .arrow_up => session.scrollBy(-1, viewportHeight(terminal.size())),
+                .arrow_down => session.scrollBy(1, viewport_height),
+                .arrow_up => session.scrollBy(-1, viewport_height),
                 .tab => {
-                    session.nextFocusable(false, viewportHeight(terminal.size()));
+                    session.nextFocusable(false, viewport_height);
                     // Rerender so the focus highlight moves with the
                     // cursor. T-73.
                     session.rerenderCurrent() catch {};
                 },
                 .shift_tab => {
-                    session.nextFocusable(true, viewportHeight(terminal.size()));
+                    session.nextFocusable(true, viewport_height);
                     session.rerenderCurrent() catch {};
                 },
                 .enter => {
@@ -964,8 +985,8 @@ pub fn runWith(
                     }
                 },
                 .char => |ch| switch (ch) {
-                    'j' => session.scrollBy(1, viewportHeight(terminal.size())),
-                    'k' => session.scrollBy(-1, viewportHeight(terminal.size())),
+                    'j' => session.scrollBy(1, viewport_height),
+                    'k' => session.scrollBy(-1, viewport_height),
                     'b' => session.goBack() catch |err| session.reportError("back failed", err),
                     'f' => session.goForward() catch |err| session.reportError("forward failed", err),
                     'r' => session.reload() catch |err| session.reportError("reload failed", err),
@@ -975,19 +996,19 @@ pub fn runWith(
                     // memory compatibility).
                     'g', ':' => session.startPrompt(.url) catch |err| session.reportError("prompt failed", err),
                     '/' => session.startPrompt(.search) catch |err| session.reportError("prompt failed", err),
-                    'n' => session.advanceSearch(viewportHeight(terminal.size())),
+                    'n' => session.advanceSearch(viewport_height),
                     'e' => {
                         const model2 = session.screenModel();
                         if (model2 != null) {
                             for (model2.?.fields) |f| {
                                 if (!f.is_submit) {
-                                    session.selectNextField(false, viewportHeight(terminal.size()));
+                                    session.selectNextField(false, viewport_height);
                                     break;
                                 }
                             }
                         }
                     },
-                    'q' => return,
+                    'q' => return .exit,
                     else => {},
                 },
                 else => {},
@@ -1000,46 +1021,53 @@ pub fn runWith(
                 else => {},
             },
         }
-    }
+    return .continue_;
 }
 
 fn draw(terminal: *tui.Terminal, io: std.Io, session: *BrowserSession) !void {
-    const size = terminal.size();
-    const viewport_height = viewportHeight(size);
     try terminal.clearScreen();
-
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = terminal.stdout_file.writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
+    try drawFrame(stdout, session, terminal.size());
+    try stdout.flush();
+}
+
+/// T-80 / Tier 1 slice T1.10: render one frame to any writer.
+/// Extracted from `draw` so the TUI integration test harness can
+/// capture frames to a buffer for assertions. The real `draw`
+/// wraps this with terminal clear + stdout flush; tests skip both
+/// (the clear escape is the writer's responsibility — tests can
+/// snapshot raw output without it).
+pub fn drawFrame(
+    writer: anytype,
+    session: *BrowserSession,
+    size: tui.Size,
+) !void {
+    const viewport_height = viewportHeight(size);
     const model = session.screenModel();
     const url = session.currentUrl() orelse "";
-    try writeClippedLine(stdout, size.cols, "AWR — ");
-    try writeClippedLine(stdout, size.cols, url);
-    try stdout.writeAll("\n");
+    try writeClippedLine(writer, size.cols, "AWR — ");
+    try writeClippedLine(writer, size.cols, url);
+    try writer.writeAll("\n");
 
     if (model) |screen_model| {
         var row: usize = 0;
         while (row < viewport_height) : (row += 1) {
             const line_index = session.scroll_row + row;
             if (line_index < screen_model.lines.len) {
-                try writeClippedLine(stdout, size.cols, screen_model.lineText(line_index));
+                try writeClippedLine(writer, size.cols, screen_model.lineText(line_index));
             }
-            try stdout.writeAll("\x1b[K\n");
+            try writer.writeAll("\x1b[K\n");
         }
     } else {
-        // T-77: fresh-tab welcome. With no page loaded, paint a
-        // welcome screen in the body so `awr tui` (no URL) looks
-        // like a "new tab" rather than a broken-page blank. The
-        // URL prompt stays in the footer (vim-style) — startPrompt
-        // is already active so typing here goes straight to it.
-        try drawWelcome(stdout, size.cols, viewport_height);
+        try drawWelcome(writer, size.cols, viewport_height);
     }
 
     const footer = try session.footerText(session.allocator);
     defer session.allocator.free(footer);
-    try writeClippedLine(stdout, size.cols, footer);
-    try stdout.writeAll("\x1b[K");
-    try stdout.flush();
+    try writeClippedLine(writer, size.cols, footer);
+    try writer.writeAll("\x1b[K");
 }
 
 fn viewportHeight(size: tui.Size) usize {
@@ -1582,4 +1610,172 @@ test "Tab onto Google-shaped textarea enters edit mode and accepts typing" {
     try session.appendFieldByte('i');
     const stored = session.getFieldValue("q") orelse "";
     try std.testing.expect(std.mem.eql(u8, stored, "hi"));
+}
+
+// ── T1.10 TUI integration harness ─────────────────────────────────
+//
+// `processKey` + `drawFrame` are the seams the harness drives. The
+// tests below use a real `BrowserSession` (no fake), pump synthetic
+// keys through `processKey`, and snapshot frames into a memory
+// buffer via `drawFrame`. No subprocess, no PTY, no real terminal —
+// just the same code paths `runWith` exercises with the I/O removed.
+
+/// In-memory TUI driver. Holds a session + a viewport + a captured
+/// frame buffer. Tests construct one, drive keys, then `frame()` to
+/// inspect what `runWith` would have painted.
+const TuiHarness = struct {
+    allocator: std.mem.Allocator,
+    session: BrowserSession,
+    size: tui.Size,
+    last_frame: std.ArrayList(u8),
+
+    fn init(allocator: std.mem.Allocator, cols: usize, rows: usize) !TuiHarness {
+        return .{
+            .allocator = allocator,
+            .session = try BrowserSession.init(allocator, std.testing.io),
+            .size = .{ .cols = cols, .rows = rows },
+            .last_frame = .empty,
+        };
+    }
+
+    fn deinit(self: *TuiHarness) void {
+        self.last_frame.deinit(self.allocator);
+        self.session.deinit();
+    }
+
+    /// Load HTML directly without going through the network. Mirrors
+    /// what `runWith` does when given a URL, but synthetically.
+    fn loadHtml(self: *TuiHarness, url: []const u8, html: []const u8) !void {
+        var result = try self.session.page.processHtml(url, 200, html);
+        const screen = try self.session.page.renderBrowseModel(
+            self.allocator,
+            &result,
+            .{
+                .max_width = self.size.cols,
+                .ansi_colors = false,
+                .show_links = true,
+                .show_images = true,
+            },
+        );
+        self.session.current = .{ .result = result, .screen = screen };
+        try self.session.setViewportSize(self.size.cols, self.size.rows);
+    }
+
+    /// Synthesize a keypress through the same key-handling logic as
+    /// the run loop. Returns false when the key would have exited
+    /// the TUI (Ctrl+C, `q` outside prompts).
+    fn pressKey(self: *TuiHarness, key: tui.Key) !bool {
+        const outcome = try processKey(&self.session, key, viewportHeight(self.size));
+        return outcome == .continue_;
+    }
+
+    /// Convenience: send a sequence of ASCII chars as `.char` keys.
+    fn typeStr(self: *TuiHarness, s: []const u8) !void {
+        for (s) |ch| {
+            const cont = try self.pressKey(.{ .char = ch });
+            try std.testing.expect(cont);
+        }
+    }
+
+    /// Render the current state into `last_frame` so tests can
+    /// inspect it. Idempotent — call multiple times to re-snapshot.
+    fn render(self: *TuiHarness) ![]const u8 {
+        self.last_frame.clearRetainingCapacity();
+        const w = self.last_frame.writer(self.allocator);
+        try drawFrame(w, &self.session, self.size);
+        return self.last_frame.items;
+    }
+
+    /// True when the most recent frame contains `needle` after
+    /// stripping ANSI escape sequences. Tests assert on visible
+    /// text, not on the byte stream that contains color codes.
+    fn frameContains(self: *TuiHarness, needle: []const u8) !bool {
+        const raw = try self.render();
+        var stripped: std.ArrayList(u8) = .empty;
+        defer stripped.deinit(self.allocator);
+        var i: usize = 0;
+        while (i < raw.len) {
+            if (raw[i] == '\x1b') {
+                while (i < raw.len and raw[i] != 'm') : (i += 1) {}
+                if (i < raw.len) i += 1;
+                continue;
+            }
+            try stripped.append(self.allocator, raw[i]);
+            i += 1;
+        }
+        return std.mem.indexOf(u8, stripped.items, needle) != null;
+    }
+};
+
+test "harness: welcome screen paints on fresh session" {
+    var h = try TuiHarness.init(std.testing.allocator, 80, 24);
+    defer h.deinit();
+
+    // Welcome screen needs prompt active to mirror runWith's fresh-tab path.
+    try h.session.startPrompt(.url);
+
+    try std.testing.expect(try h.frameContains("AWR — Agentic Web Runtime"));
+    try std.testing.expect(try h.frameContains("URL bar"));
+    try std.testing.expect(try h.frameContains("URL: "));
+}
+
+test "harness: URL prompt accepts typed chars and shows them in footer" {
+    var h = try TuiHarness.init(std.testing.allocator, 80, 24);
+    defer h.deinit();
+    try h.session.startPrompt(.url);
+
+    try h.typeStr("example.com");
+
+    try std.testing.expect(try h.frameContains("URL: example.com"));
+}
+
+test "harness: 'q' outside a prompt exits the loop" {
+    var h = try TuiHarness.init(std.testing.allocator, 80, 24);
+    defer h.deinit();
+
+    const html =
+        \\<html><body><p>Hello</p></body></html>
+    ;
+    try h.loadHtml("http://x/", html);
+
+    // Sanity: page loaded.
+    try std.testing.expect(try h.frameContains("Hello"));
+
+    // `q` should request exit.
+    const cont = try h.pressKey(.{ .char = 'q' });
+    try std.testing.expect(!cont);
+}
+
+test "harness: Ctrl+C / interrupt exits even mid-prompt" {
+    var h = try TuiHarness.init(std.testing.allocator, 80, 24);
+    defer h.deinit();
+    try h.session.startPrompt(.url);
+    try h.typeStr("half-typed");
+
+    const cont = try h.pressKey(.interrupt);
+    try std.testing.expect(!cont);
+}
+
+test "harness: Tab into form field auto-edits + typing populates [____]" {
+    var h = try TuiHarness.init(std.testing.allocator, 80, 24);
+    defer h.deinit();
+
+    const html =
+        \\<html><body>
+        \\<form action="/go"><input type="text" name="q"></form>
+        \\</body></html>
+    ;
+    try h.loadHtml("http://x/", html);
+
+    // Empty box before typing.
+    try std.testing.expect(try h.frameContains("[____________________]"));
+
+    // Tab → focus the text input → auto-edit.
+    _ = try h.pressKey(.tab);
+    try std.testing.expect(h.session.field_editing);
+
+    // Type "hi" — frame should reflect the typed value inside the box,
+    // not just appear in the status line.
+    try h.typeStr("hi");
+    try std.testing.expect(try h.frameContains("[hi"));
 }
