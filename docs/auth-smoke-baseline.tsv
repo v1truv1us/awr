@@ -1,0 +1,16 @@
+category	url	status	title	has_form	notes
+easy	https://news.ycombinator.com/login	200	 	yes	OK — HN — server-rendered, no JS gating
+easy	https://httpbin.org/forms/post	200	 	no	page loaded, no form detected (SPA?) — httpbin test form
+easy	https://example.com/	200	Example Domain 	no	page loaded, no form detected (SPA?) — baseline sanity
+medium	https://github.com/login	200	Sign in to GitHub · GitHub 	yes	OK — GitHub login — server-rendered
+medium	https://gitlab.com/users/sign_in	403	Just a moment... 	no	status=403 — GitLab login
+medium	https://mastodon.social/auth/sign_in	200	Log in  - Mastodon 	yes	OK — Mastodon
+medium	https://meta.sr.ht/login	200	Log in to sourcehut 	yes	page loaded, marker missing — Sourcehut (small audience, server-rendered)
+medium	https://www.codeproject.com/script/Membership/LogOn.aspx	200	 	no	page loaded, marker missing — CodeProject — older .NET form
+medium	https://old.reddit.com/login	200	Welcome to Reddit 	no	page loaded, marker missing — old Reddit (server-rendered)
+hard	https://www.reddit.com/login/	200	Welcome to Reddit 	no	page loaded, marker missing — new Reddit — likely Cloudflare / React SPA
+hard	https://x.com/login	200	 	no	page loaded, no form detected (SPA?) — X.com login — full SPA
+hard	https://app.linear.app/login	FAIL		no	fetch failed (timeout or error)
+hard	https://login.notion.so/	FAIL		no	fetch failed (timeout or error)
+hard	https://accounts.google.com/signin	200	Sign in - Google Accounts 	yes	OK — Google sign-in (heavy JS)
+hard	https://discord.com/login	200	Discord 	no	page loaded, marker missing — Discord login (SPA)
