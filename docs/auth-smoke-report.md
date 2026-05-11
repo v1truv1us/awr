@@ -98,6 +98,31 @@ In order of effort/value (assume each is its own slice):
 
 ---
 
+## Quick-wins follow-up (2026-05-11, post-T-92)
+
+After the baseline survey, four quick-win slices landed under T-92.
+Net result on the smoke output: identical TSV (the script measures
+end-state, not script-error count). Net result *under the surface*:
+
+| Quick win | Status | Effect |
+|---|---|---|
+| **TUI image rendering** (T-92.1) | ✅ shipped | `awr tui` now emits Kitty/iTerm/sixel/braille images same as `awr render`. New `--images=MODE` flag. Doesn't move any smoke row (smoke is JSON-envelope only), but visible to humans using the TUI. |
+| **data: URL scheme support** (T-92.2) | ✅ shipped | Reddit (old + new) went from ~20 `external script fetch failed: UnsupportedScheme` errors per page load to 3 `EvalException` errors. The 3 remaining are because Reddit's polyfills reference web-component / shadow-DOM APIs we don't fully implement (Tier 5 work). |
+| **Linear DNS** (T-92.3) | ⚠️ deferred | Survey used `app.linear.app` which doesn't resolve (NXDOMAIN — likely an internal hostname). The real public login is `linear.app/login`. Switching the URL: curl gets HTTP 200 in <1s, but AWR hangs at the TLS/H2 layer for 25s+. Real AWR bug, but: (a) hard to diagnose without protocol-trace tools; (b) fixing it doesn't render the React SPA login form anyway. Defer to Tier 5 fingerprint / Tier 4 layout work. |
+| **Notion TLS** (T-92.4) | ⚠️ environmental | Re-tested with curl: also fails (`FAILED 000`). `login.notion.so` CNAME-chains to Okta edge (`ok7-custom-crtrs.oktaedge.okta.com`); Okta's edge rejects requests from this network entirely (not AWR-specific). Out of scope — fix the network or use a different test endpoint. |
+
+So 2/4 wins landed; the other 2 turned out to be (one) a real bug
+beyond Tier 2 scope and (one) environmental. Updated TSV is byte-
+identical because the smoke's pass criteria are "form renders" —
+Reddit still fails on that criterion even with the data-URL fix.
+
+The honest update: **TUI image rendering is the headline change**;
+the Reddit/Linear/Notion items confirmed the survey's verdicts that
+those sites need Tier 4/5 work to be usable, regardless of the small
+fixes underneath.
+
+---
+
 ## Re-running this survey
 
 Future sessions should re-run the smoke after each major slice to track progress:
