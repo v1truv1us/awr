@@ -169,7 +169,7 @@ state across same-origin navigations.
 
 ---
 
-### Tier 2 — Render + UX polish (DEFERRED)
+### Tier 2 — Render + UX polish (ACTIVE 2026-05-11)
 
 **Scope sentence**: The terminal-rendered page is good enough that
 a human can do daily reading and form work without missing
@@ -193,13 +193,15 @@ visual signals.
 - cookie inspector enriched (per-cookie expiry, scope, secure
   flag visible)
 
-**Sub-spec(s)**: TBD — split from `browser-tui.md` when this tier
-activates.
+**Sub-spec(s)**: `spec/subspecs/render-polish.md` (ACTIVE since
+2026-05-11; owns slice-level execution detail).
 
-**WPT corpus area**: minimal new coverage — Tier 2 is rendering
-polish, not API surface.
+**WPT corpus area**: minimal new coverage — a few `<pre>` /
+Content-Type cases per `render-polish.md §4`.
 
-**Closure gates**: deferred-track gates defined when activated.
+**Closure gates**: see `render-polish.md §4` (bookmarks +
+autocomplete + form/table/code/diff/image polish + cookie
+inspector enrichment, each with a code-side test + smoke flow).
 
 ---
 

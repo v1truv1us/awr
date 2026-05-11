@@ -376,6 +376,54 @@ documentation governance.
   experience list), `AGENTS.md` (global framing + execution
   specs list), this ADR.
 
+### 2026-05-11 — Tier 1 CLOSED; Tier 2 promoted to ACTIVE
+
+- Change:
+  - `spec/subspecs/browser-tui.md` status header flips from
+    ACTIVE → CLOSED. All §4 closure gates met: Tier 0 baseline
+    green, curated WPT corpus extended for §4.2 (form input
+    events, focus/blur, keyboard event semantics, submit-via-Enter,
+    history `length`/`state` round-trip), two end-to-end smoke
+    flows in `scripts/browse_smoke.sh`, `awr session import
+    <browser>` ships, cookie inspector + clear-cookies documented
+    in `awr tui --help` + welcome screen. §9 Progress record
+    renamed to Closure record with the slice-by-slice mapping.
+  - `spec/subspecs/browser-roadmap.md` Tier 1 line flips to
+    `(CLOSED 2026-05-11)`; Tier 2 line flips from `(DEFERRED)`
+    to `(ACTIVE 2026-05-11)` and gains a pointer to the new
+    sub-spec.
+  - **New file `spec/subspecs/render-polish.md`** — Tier 2
+    execution authority. §1 purpose, §2 in-scope (bookmarks,
+    URL-bar autocomplete, form-render polish, table sticky
+    headers, code-block rendering + opt-in syntax highlighting,
+    diff/patch rendering, image polish, cookie-inspector
+    enrichment), §4 closure gates, §6 nine-slice ordering
+    (T2.1–T2.9) starting with bookmarks (T2.1 — T-89 backlog
+    item).
+  - `spec/subspecs/wpt-conformance.md` previously bumped 103 →
+    106 cases in the Tier 1 closure change; Tier 2 adds a small
+    number of `<pre>` / Content-Type cases per `render-polish.md`
+    when each slice lands.
+- Reason: Tier 1 functional slices (T1.1–T1.11) shipped over
+  T-60…T-86, with T-87 closing the §4.2 WPT-corpus gap. The
+  natural next surface is the "feel finished" gap — bookmarks
+  + URL history + diff/code/table polish — which the roadmap
+  always called out as Tier 2 but parked at DEFERRED. The
+  promotion is uncontroversial (no strategic forking point like
+  Tier 4 has), so it lands as a normal ADR amendment.
+  Tier 2 deliberately stays out of dynamic-page territory (no
+  `History` API, no WebSocket, no real layout); those remain
+  in Tier 3/4/5.
+- Tier 0/1 closure gates UNCHANGED. All existing tests
+  (`zig build test`, `test-wpt`, `test-test262`,
+  `test-integration`, `smoke`) remain green.
+- Documents updated: `spec/subspecs/browser-tui.md` (status
+  flipped to CLOSED, §9 became Closure record),
+  `spec/subspecs/browser-roadmap.md` (Tier 1 → CLOSED, Tier 2
+  → ACTIVE with sub-spec pointer), `spec/subspecs/render-polish.md`
+  (new), `spec/subspecs/wpt-conformance.md` (status banner
+  updated in the T-87 change), this ADR.
+
 ### Template for future amendments
 
 - Date:
