@@ -957,9 +957,25 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         const subcmd = args[1];
         var url_arg: ?[]const u8 = null;
         var disable_scripts = false;
-        for (args[2..]) |arg| {
+        // T-92: --images=MODE accepts auto/kitty/iterm/sixel/braille/none,
+        // mirroring `awr render`. Default `.auto` probes the terminal
+        // and lands on the right protocol; `.none` skips entirely.
+        var image_mode: image_protocol.Mode = .auto;
+        var ai: usize = 2;
+        while (ai < args.len) : (ai += 1) {
+            const arg = args[ai];
             if (std.mem.eql(u8, arg, "--no-js") or std.mem.eql(u8, arg, "--no-script")) {
                 disable_scripts = true;
+            } else if (std.mem.startsWith(u8, arg, "--images=")) {
+                const value = arg["--images=".len..];
+                image_mode = image_protocol.parseMode(value) orelse {
+                    std.process.fatal("{s}: --images expected auto|kitty|iterm|sixel|braille|none, got '{s}'", .{ subcmd, value });
+                };
+            } else if (std.mem.eql(u8, arg, "--images") and ai + 1 < args.len) {
+                image_mode = image_protocol.parseMode(args[ai + 1]) orelse {
+                    std.process.fatal("{s}: --images expected auto|kitty|iterm|sixel|braille|none, got '{s}'", .{ subcmd, args[ai + 1] });
+                };
+                ai += 1;
             } else if (std.mem.startsWith(u8, arg, "--")) {
                 try stdoutWrite(io, subcmd);
                 try stdoutWrite(io, ": unknown flag: ");
@@ -982,7 +998,21 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
             }
         }
 
-        try browser_mod.runWith(alloc, io, url_arg, .{ .disable_scripts = disable_scripts });
+        // T-92: resolve the image protocol once before entering the TUI loop.
+        // Same precedence as `awr render`: stdout-is-tty check, explicit mode,
+        // then env-based detection (kitty / iterm / sixel) with braille
+        // fallback.
+        const resolved_protocol = image_protocol.resolve(.{
+            .mode = image_mode,
+            .stdout_is_tty = image_protocol.stdoutIsTty(),
+            .env = image_protocol.realEnvSnapshot(),
+            .probe_sixel = if (image_mode == .auto) &image_protocol.probeSixel else null,
+        });
+
+        try browser_mod.runWith(alloc, io, url_arg, .{
+            .disable_scripts = disable_scripts,
+            .image_protocol = resolved_protocol,
+        });
         return;
     }
 

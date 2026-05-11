@@ -2,6 +2,8 @@ const std = @import("std");
 const page_mod = @import("page");
 const tui = @import("tui.zig");
 const bookmarks_mod = @import("bookmarks.zig");
+const image_protocol = @import("image_protocol");
+const image_pipeline = @import("image_pipeline");
 
 /// Hard ceiling for the browse renderer. Defends against terminals that lie
 /// about width (some iOS SSH apps + tmux chains) or report extreme values that
@@ -115,6 +117,11 @@ pub const BrowserSession = struct {
     /// Reset whenever the user types or backspaces — see
     /// `resetUrlAutocomplete`.
     url_autocomplete: ?UrlAutocomplete = null,
+    /// T-92: terminal image protocol resolved at startup. `.none`
+    /// keeps the existing alt-text fallback; any other value triggers
+    /// per-page pipeline construction in installLoadedPage so the
+    /// renderer's image_lookup hook gets real bytes to emit.
+    image_protocol: image_protocol.Protocol = .none,
     field_editing: bool,
     scroll_row: usize,
     search_query: ?[]u8,
@@ -1236,6 +1243,25 @@ pub const BrowserSession = struct {
             .ctx = self,
             .lookup_fn = selectedOptionLookupCallback,
         };
+        // T-92: build the per-page image pipeline so renderBrowseModel
+        // can emit Kitty/iTerm/sixel/braille bytes inline. Pipeline is
+        // owned for the duration of the render call; the screen's
+        // owned text already holds a COPY of any emitted image bytes,
+        // so we deinit immediately after. `.none` short-circuits to a
+        // no-op pipeline.
+        var pipeline_storage: ?image_pipeline.Pipeline = null;
+        defer if (pipeline_storage) |*pl| pl.deinit();
+        var image_lookup_opt: ?page_mod.ImageLookup = null;
+        if (self.image_protocol != .none) {
+            if (image_pipeline.build(self.allocator, &self.page, local_result.url, self.image_protocol, .{
+                .max_width_cells = @intCast(self.render_width),
+            })) |pl| {
+                pipeline_storage = pl;
+                image_lookup_opt = pipeline_storage.?.lookup();
+            } else |_| {
+                // Pipeline build failed; render falls back to alt-text.
+            }
+        }
         var rendered = try self.page.renderBrowseModel(self.allocator, &local_result, .{
             .max_width = self.render_width,
             .ansi_colors = true,
@@ -1244,6 +1270,8 @@ pub const BrowserSession = struct {
             .field_value_lookup = fvl,
             .is_checked_lookup = icl,
             .selected_option_lookup = sol,
+            .image_protocol = self.image_protocol,
+            .image_lookup = image_lookup_opt,
             // First render of a fresh page — no focus yet (Tab will set
             // it, then the next rerender picks it up).
             .focused_element_ptr = null,
@@ -1433,6 +1461,22 @@ pub const BrowserSession = struct {
             .ctx = self,
             .lookup_fn = selectedOptionLookupCallback,
         };
+        // T-92: same per-render pipeline build as installLoadedPage.
+        // Rerender happens on focus changes / typing, so this runs
+        // potentially many times per page — the pipeline's per-image
+        // disk-or-network fetch is cached via the allocator-owned
+        // bytes table inside Pipeline (single page lifetime is fine).
+        var pipeline_storage: ?image_pipeline.Pipeline = null;
+        defer if (pipeline_storage) |*pl| pl.deinit();
+        var image_lookup_opt: ?page_mod.ImageLookup = null;
+        if (self.image_protocol != .none) {
+            if (image_pipeline.build(self.allocator, &self.page, current.result.url, self.image_protocol, .{
+                .max_width_cells = @intCast(self.render_width),
+            })) |pl| {
+                pipeline_storage = pl;
+                image_lookup_opt = pipeline_storage.?.lookup();
+            } else |_| {}
+        }
         var rendered = try self.page.renderBrowseModel(self.allocator, &current.result, .{
             .max_width = self.render_width,
             .ansi_colors = true,
@@ -1441,6 +1485,8 @@ pub const BrowserSession = struct {
             .field_value_lookup = fvl,
             .is_checked_lookup = icl,
             .selected_option_lookup = sol,
+            .image_protocol = self.image_protocol,
+            .image_lookup = image_lookup_opt,
             .focused_element_ptr = self.focusedElementPtrForRender(),
         });
         errdefer rendered.deinit();
@@ -1467,6 +1513,13 @@ pub const RunOptions = struct {
     /// against pages whose JS strips its own UI in non-Chromium
     /// environments (Google's homepage, similar SPAs). T-72.
     disable_scripts: bool = false,
+    /// T-92: terminal image protocol to use when rendering pages.
+    /// `.none` (the default) keeps the existing alt-text fallback —
+    /// safe for non-TTY environments and the test suite. `.kitty`,
+    /// `.iterm`, `.sixel`, `.braille` route to the matching encoder
+    /// per `src/image/pipeline.zig`. Resolved in main.zig before the
+    /// runWith call so we don't probe inside the TUI loop.
+    image_protocol: image_protocol.Protocol = .none,
 };
 
 pub fn runWith(
@@ -1481,6 +1534,7 @@ pub fn runWith(
     var session = try BrowserSession.init(allocator, io);
     defer session.deinit();
     session.page.disable_scripts = opts.disable_scripts;
+    session.image_protocol = opts.image_protocol;
     const initial_size = terminal.size();
     try session.setViewportSize(initial_size.cols, initial_size.rows);
     // T-75: when launched without a URL (`awr tui` with no args and no
