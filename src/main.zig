@@ -3,6 +3,7 @@ const build_opts = @import("build_opts");
 const page_mod = @import("page");
 const mock_mod = @import("mock.zig");
 const browser_mod = @import("browser.zig");
+const session_import = @import("session_import.zig");
 const telemetry = @import("telemetry");
 const image_protocol = @import("image_protocol");
 const image_pipeline = @import("image_pipeline");
@@ -896,6 +897,12 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         return;
     }
 
+    // Subcommand: awr session import <browser> [--out PATH] [--profile N] [--source PATH]
+    if (std.mem.eql(u8, args[1], "session")) {
+        try runSessionSubcommand(alloc, io, args);
+        return;
+    }
+
     // Subcommand: awr mock [--port N] [--root DIR]
     if (std.mem.eql(u8, args[1], "mock")) {
         var port: u16 = 7777;
@@ -1540,6 +1547,141 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         metrics.json_emit_ms = elapsed;
         metrics.envelope_bytes = buf.items.len;
     }
+}
+
+/// T-85 / Tier 1 slice T1.9: `awr session import <browser>` reads
+/// cookies from Chrome/Firefox SQLite stores and writes a Netscape
+/// `cookies.txt` that subsequent AWR runs can pick up via
+/// $AWR_COOKIE_JAR. Useful for "log into the site in my real browser,
+/// then let AWR drive it as me."
+fn runSessionSubcommand(alloc: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
+    if (args.len < 3 or !std.mem.eql(u8, args[2], "import")) {
+        try stdoutWrite(io, "usage: awr session import <chrome|chromium|firefox> [--out PATH] [--profile NAME] [--source PATH]\n");
+        std.process.exit(1);
+    }
+    if (args.len < 4) {
+        try stdoutWrite(io, "usage: awr session import <chrome|chromium|firefox> [--out PATH] [--profile NAME] [--source PATH]\n");
+        std.process.exit(1);
+    }
+
+    const browser_arg = args[3];
+    const browser: session_import.Browser =
+        if (std.mem.eql(u8, browser_arg, "chrome")) .chrome
+        else if (std.mem.eql(u8, browser_arg, "chromium")) .chromium
+        else if (std.mem.eql(u8, browser_arg, "firefox")) .firefox
+        else {
+            try stdoutWrite(io, "session import: unknown browser '");
+            try stdoutWrite(io, browser_arg);
+            try stdoutWrite(io, "' (want chrome|chromium|firefox)\n");
+            std.process.exit(1);
+        };
+
+    var out_path: ?[]const u8 = null;
+    var profile: ?[]const u8 = null;
+    var source: ?[]const u8 = null;
+    var ai: usize = 4;
+    while (ai < args.len) : (ai += 1) {
+        if (std.mem.eql(u8, args[ai], "--out") and ai + 1 < args.len) {
+            out_path = args[ai + 1];
+            ai += 1;
+        } else if (std.mem.eql(u8, args[ai], "--profile") and ai + 1 < args.len) {
+            profile = args[ai + 1];
+            ai += 1;
+        } else if (std.mem.eql(u8, args[ai], "--source") and ai + 1 < args.len) {
+            source = args[ai + 1];
+            ai += 1;
+        } else {
+            std.process.fatal("session import: unknown arg '{s}'", .{args[ai]});
+        }
+    }
+
+    // Resolve source DB path.
+    var source_owned: ?[]u8 = null;
+    defer if (source_owned) |s| alloc.free(s);
+    const source_path: []const u8 = if (source) |s| s else blk: {
+        const p = session_import.defaultPath(alloc, io, browser, profile) catch |err| {
+            std.process.fatal("session import: could not resolve default path: {t}", .{err});
+        };
+        source_owned = p;
+        break :blk p;
+    };
+
+    // Resolve output path: --out > $AWR_COOKIE_JAR > ./awr-cookies.txt.
+    var out_owned: ?[]u8 = null;
+    defer if (out_owned) |o| alloc.free(o);
+    const out_resolved: []const u8 = if (out_path) |o| o else blk: {
+        if (std.c.getenv("AWR_COOKIE_JAR")) |env_z| {
+            const env_s = std.mem.span(env_z);
+            if (env_s.len > 0) {
+                out_owned = try alloc.dupe(u8, env_s);
+                break :blk out_owned.?;
+            }
+        }
+        out_owned = try alloc.dupe(u8, "awr-cookies.txt");
+        break :blk out_owned.?;
+    };
+
+    var result = session_import.importFromDb(alloc, io, browser, source_path) catch |err| {
+        std.process.fatal("session import: read failed ({t}). Is sqlite3 installed and is the DB readable?", .{err});
+    };
+    defer result.deinit(alloc);
+
+    // Translate ImportedCookies → in-memory CookieJar via parseSetCookie
+    // so the parsed result hits the same validation path normal traffic
+    // does (skips expired, name-empty, etc.). Then serialize to disk.
+    var jar = page_mod.CookieJar.init(alloc);
+    defer jar.deinit();
+    var imported_count: usize = 0;
+    for (result.cookies) |c| {
+        // Build a synthetic Set-Cookie header. Format:
+        //   <name>=<value>; Path=<path>; Domain=<host>; Secure?; HttpOnly?; Expires=<rfc1123>
+        var hdr: std.ArrayList(u8) = .empty;
+        defer hdr.deinit(alloc);
+        try hdr.appendSlice(alloc, c.name);
+        try hdr.append(alloc, '=');
+        try hdr.appendSlice(alloc, c.value);
+        try hdr.appendSlice(alloc, "; Path=");
+        try hdr.appendSlice(alloc, c.path);
+        try hdr.appendSlice(alloc, "; Domain=");
+        try hdr.appendSlice(alloc, c.host);
+        if (c.secure) try hdr.appendSlice(alloc, "; Secure");
+        if (c.http_only) try hdr.appendSlice(alloc, "; HttpOnly");
+        if (c.expires) |exp| {
+            // Use Max-Age (seconds from now) for portability — the jar
+            // parses both Expires and Max-Age, and Max-Age is the
+            // simpler round-trip target.
+            // Inline wall-clock seconds (avoids a duplicate util/time import
+            // that would collide with page.zig's own `@import` of the same file).
+            var ts2: std.posix.timespec = undefined;
+            _ = std.posix.system.clock_gettime(.REALTIME, &ts2);
+            const now: i64 = @intCast(ts2.sec);
+            const remaining = exp - now;
+            if (remaining > 0) {
+                var ma_buf: [40]u8 = undefined;
+                const ma = try std.fmt.bufPrint(&ma_buf, "; Max-Age={d}", .{remaining});
+                try hdr.appendSlice(alloc, ma);
+            }
+        }
+        // request_domain doesn't matter when Domain= is explicit; pass
+        // the host as a sane default.
+        jar.parseSetCookie(hdr.items, c.host) catch continue;
+        imported_count += 1;
+    }
+
+    // Write Netscape format.
+    var out_file = std.Io.Dir.cwd().createFile(io, out_resolved, .{}) catch |err| {
+        std.process.fatal("session import: could not open --out '{s}' for write: {t}", .{ out_resolved, err });
+    };
+    defer out_file.close(io);
+    var wbuf: [4096]u8 = undefined;
+    var fw = out_file.writer(io, &wbuf);
+    try jar.serialize(&fw.interface);
+    try fw.interface.flush();
+
+    // Summary line — agent-parseable but human-readable.
+    var msg: [256]u8 = undefined;
+    const summary = try std.fmt.bufPrint(&msg, "imported {d} cookies → {s} (skipped {d} encrypted)\n", .{ imported_count, out_resolved, result.skipped_encrypted });
+    try stdoutWrite(io, summary);
 }
 
 test "isFailedCallEnvelope detects {ok:false}" {
