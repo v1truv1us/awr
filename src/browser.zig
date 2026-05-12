@@ -122,6 +122,11 @@ pub const BrowserSession = struct {
     /// per-page pipeline construction in installLoadedPage so the
     /// renderer's image_lookup hook gets real bytes to emit.
     image_protocol: image_protocol.Protocol = .none,
+    /// T2.9: session-level decoded-image LRU cache. Persists across
+    /// rerenders and back/forward navigations so the fetch+decode path
+    /// only runs once per unique image URL per session. 32 MiB / 32
+    /// entry cap; iTerm2 protocol bypasses it (raw bytes, not pixels).
+    img_cache: image_pipeline.Cache,
     /// T2.4: mirrors RenderOptions.code_line_numbers. Set from RunOptions.
     code_line_numbers: usize = 5,
     /// T2.4/T2.5: mirrors RenderOptions.code_style. Set from RunOptions.
@@ -208,6 +213,8 @@ pub const BrowserSession = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !BrowserSession {
+        var img_c = image_pipeline.Cache.init(allocator, image_pipeline.default_cache_cap_bytes);
+        img_c.max_entries = 32;
         return .{
             .allocator = allocator,
             .page = try page_mod.Page.init(allocator, io),
@@ -229,6 +236,7 @@ pub const BrowserSession = struct {
             .render_width = 78,
             .render_height = 22,
             .url_history_cap = readUrlHistoryCap(),
+            .img_cache = img_c,
         };
     }
 
@@ -257,6 +265,7 @@ pub const BrowserSession = struct {
         for (self.url_history.items) |u| self.allocator.free(u);
         self.url_history.deinit(self.allocator);
         self.resetUrlAutocomplete();
+        self.img_cache.deinit();
         self.page.deinit();
     }
 
@@ -1266,7 +1275,7 @@ pub const BrowserSession = struct {
         if (self.image_protocol != .none) {
             if (image_pipeline.build(self.allocator, &self.page, local_result.url, self.image_protocol, .{
                 .max_width_cells = @intCast(self.render_width),
-            })) |pl| {
+            }, &self.img_cache)) |pl| {
                 pipeline_storage = pl;
                 image_lookup_opt = pipeline_storage.?.lookup();
             } else |_| {
@@ -1485,7 +1494,7 @@ pub const BrowserSession = struct {
         if (self.image_protocol != .none) {
             if (image_pipeline.build(self.allocator, &self.page, current.result.url, self.image_protocol, .{
                 .max_width_cells = @intCast(self.render_width),
-            })) |pl| {
+            }, &self.img_cache)) |pl| {
                 pipeline_storage = pl;
                 image_lookup_opt = pipeline_storage.?.lookup();
             } else |_| {}

@@ -48,6 +48,9 @@ pub const Cache = struct {
     tail: ?*Node = null, // least recently used (next to evict)
     bytes_resident: usize = 0,
     cap_bytes: usize,
+    /// T2.9: maximum number of cached entries regardless of byte budget.
+    /// Evicts LRU tail when count would exceed this on put.
+    max_entries: usize = 32,
     hits: usize = 0,
     misses: usize = 0,
 
@@ -106,8 +109,12 @@ pub const Cache = struct {
             self.dropNode(existing);
         }
 
-        // Evict from LRU tail until the new entry fits.
+        // Evict from LRU tail until the new entry fits bytes budget.
         while (self.bytes_resident + want > self.cap_bytes) {
+            if (!self.evictTail()) break;
+        }
+        // T2.9: enforce entry-count cap independently of byte budget.
+        while (self.map.count() >= self.max_entries) {
             if (!self.evictTail()) break;
         }
 
@@ -285,6 +292,25 @@ test "Cache: clear empties without resetting counters" {
     try testing.expectEqual(@as(usize, 0), c.bytes_resident);
     try testing.expectEqual(@as(usize, 1), c.hits); // counters preserved
     try testing.expectEqual(@as(usize, 1), c.misses);
+}
+
+test "Cache: max_entries evicts LRU when count exceeds cap" {
+    var c = Cache.init(testing.allocator, default_cap_bytes);
+    defer c.deinit();
+    c.max_entries = 3; // override to a small cap for this test
+
+    try c.put("a", try makeImage(testing.allocator, 64));
+    try c.put("b", try makeImage(testing.allocator, 64));
+    try c.put("c", try makeImage(testing.allocator, 64));
+    try testing.expectEqual(@as(usize, 3), c.len());
+
+    // "a" is the LRU (oldest, never accessed). Adding "d" should evict "a".
+    try c.put("d", try makeImage(testing.allocator, 64));
+    try testing.expectEqual(@as(usize, 3), c.len());
+    try testing.expect(c.get("a") == null);
+    try testing.expect(c.get("b") != null);
+    try testing.expect(c.get("c") != null);
+    try testing.expect(c.get("d") != null);
 }
 
 test "Cache: get promotes to head, repeated access keeps in cache" {

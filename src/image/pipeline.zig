@@ -26,10 +26,16 @@ const std = @import("std");
 const page_mod = @import("page");
 const decode = @import("decode.zig");
 const protocol = @import("image_protocol");
+const image_cache = @import("cache.zig");
 const kitty = @import("kitty.zig");
 const iterm = @import("iterm.zig");
 const braille = @import("braille.zig");
 const sixel = @import("sixel.zig");
+
+/// T2.9: re-export so browser.zig can use `image_pipeline.Cache` without
+/// a separate named module (avoids a decode.zig file-ownership conflict).
+pub const Cache = image_cache.Cache;
+pub const default_cache_cap_bytes = image_cache.default_cap_bytes;
 
 pub const PipelineOptions = struct {
     /// Hard cap on images fetched per page. §3.1.
@@ -43,6 +49,14 @@ pub const PipelineOptions = struct {
     /// favicon-sized icons from collapsing to a single dot of garble.
     min_cols: u32 = 4,
     min_rows: u32 = 2,
+    /// T2.9: cumulative wall-time budget for all image decodes on this
+    /// page. Once the total time spent in decode.decode() exceeds this
+    /// value, remaining images are counted as overflow_skipped rather
+    /// than fetched. Does not apply to cache hits (no decode occurs).
+    decode_budget_ms: u64 = 250,
+    /// T2.9: palette size passed to the Sixel encoder. Smaller values
+    /// trade color accuracy for output-byte size (useful on slow ttys).
+    sixel_palette_size: u32 = 256,
 };
 
 pub const PipelineError = error{
@@ -93,12 +107,17 @@ pub const Pipeline = struct {
 /// all — there's nothing to do. `.sixel` returns
 /// `error.UnsupportedProtocol` until Step 7 lands the encoder; main.zig
 /// catches and falls back to text alt-refs.
+/// `session_cache` is an optional cross-page decoded-image cache (T2.9).
+/// On a cache hit the fetch + decode step is skipped; the cached RGBA
+/// pixels are re-encoded directly. Pass null for one-shot CLI invocations
+/// that have no session to attach state to.
 pub fn build(
     allocator: std.mem.Allocator,
     page: *page_mod.Page,
     page_url: []const u8,
     proto: protocol.Protocol,
     opts: PipelineOptions,
+    session_cache: ?*image_cache.Cache,
 ) !Pipeline {
     if (proto == .none) {
         return .{
@@ -124,6 +143,9 @@ pub fn build(
     // Viewport pixels for the `<picture>` / srcset picker. Per §5
     // fallback estimate: cell_pixel_width × cells.
     const viewport_w_px: u32 = opts.cell_pixel_width * opts.max_width_cells;
+
+    // T2.9: tracks cumulative decode wall-time across all images this page.
+    var budget_ms_used: u64 = 0;
 
     var fetched: u32 = 0;
     for (imgs) |img_elem| {
@@ -153,7 +175,13 @@ pub fn build(
 
         if (pl.bytes_by_url.contains(lookup_key)) continue;
 
-        encodeOne(allocator, page, abs_url, lookup_key, proto, opts, &pl) catch {
+        // T2.9: skip decode-bound images once the budget is exhausted.
+        if (budget_ms_used >= opts.decode_budget_ms) {
+            pl.overflow_skipped += 1;
+            continue;
+        }
+
+        encodeOne(allocator, page, abs_url, lookup_key, proto, opts, &pl, session_cache, &budget_ms_used) catch {
             pl.failed += 1;
             continue;
         };
@@ -182,7 +210,12 @@ pub fn build(
         defer allocator.free(abs_url);
         if (pl.bytes_by_url.contains(bg_url)) continue;
 
-        encodeOne(allocator, page, abs_url, bg_url, proto, opts, &pl) catch {
+        if (budget_ms_used >= opts.decode_budget_ms) {
+            pl.overflow_skipped += 1;
+            continue;
+        }
+
+        encodeOne(allocator, page, abs_url, bg_url, proto, opts, &pl, session_cache, &budget_ms_used) catch {
             pl.failed += 1;
             continue;
         };
@@ -264,6 +297,8 @@ fn encodeOne(
     proto: protocol.Protocol,
     opts: PipelineOptions,
     pl: *Pipeline,
+    session_cache: ?*image_cache.Cache,
+    budget_ms_used: *u64,
 ) !void {
     // Only http(s) image URLs go through the network. Skip data:, mailto:,
     // file:, etc. — supporting them is out of scope for the MVP.
@@ -271,21 +306,67 @@ fn encodeOne(
         return;
     }
 
+    // T2.9: check session cache for a previously-decoded image.
+    // iTerm2 encoding uses the raw compressed bytes rather than RGBA
+    // pixels, so cache hits can only serve kitty / braille / sixel.
+    const cache_eligible = proto != .iterm;
+    if (cache_eligible) {
+        if (session_cache) |sc| {
+            if (sc.get(abs_url)) |cached_img| {
+                const dims = estimateCellDims(cached_img.width, cached_img.height, opts);
+                const encoded: []u8 = switch (proto) {
+                    .kitty => try kitty.encode(allocator, cached_img, .{ .cols = dims.cols, .rows = dims.rows }),
+                    .braille => try encodeBraille(allocator, cached_img, dims.cols, dims.rows),
+                    .sixel => try sixel.encode(allocator, cached_img, .{ .palette_size = opts.sixel_palette_size }),
+                    .none, .iterm => unreachable,
+                };
+                errdefer allocator.free(encoded);
+                const url_owned = try allocator.dupe(u8, raw_key);
+                errdefer allocator.free(url_owned);
+                try pl.bytes_by_url.put(url_owned, encoded);
+                return;
+            }
+        }
+    }
+
     var resp = page.client.fetch(abs_url) catch return error.FetchFailed;
     defer resp.deinit();
     if (resp.status < 200 or resp.status >= 300) return error.NonOkStatus;
     if (resp.body.len == 0) return error.EmptyBody;
 
+    // T2.9: time the decode call and accumulate into the caller's budget.
+    const t0 = milliTimestamp();
     var img = decode.decode(allocator, resp.body) catch return error.DecodeFailed;
+    const t1 = milliTimestamp();
+    const elapsed: u64 = if (t1 > t0) @intCast(t1 - t0) else 0;
+    budget_ms_used.* +|= elapsed;
     defer img.deinit();
 
     const dims = estimateCellDims(img.width, img.height, opts);
+
+    // T2.9: store a clone in the session cache so the next rerender (or
+    // back-navigation) skips the fetch+decode path. Best-effort: if the
+    // clone allocation fails or the cache rejects it (oversize), we
+    // continue with the local `img` and the miss is silent.
+    if (cache_eligible) {
+        if (session_cache) |sc| {
+            if (allocator.dupe(u8, img.pixels)) |px| {
+                const clone: decode.Image = .{
+                    .width = img.width,
+                    .height = img.height,
+                    .pixels = px,
+                    .allocator = allocator,
+                };
+                sc.put(abs_url, clone) catch {};
+            } else |_| {}
+        }
+    }
 
     const encoded: []u8 = switch (proto) {
         .kitty => try kitty.encode(allocator, &img, .{ .cols = dims.cols, .rows = dims.rows }),
         .iterm => try iterm.encode(allocator, resp.body, .{ .cols = dims.cols, .rows = dims.rows }),
         .braille => try encodeBraille(allocator, &img, dims.cols, dims.rows),
-        .sixel => try sixel.encode(allocator, &img, .{}),
+        .sixel => try sixel.encode(allocator, &img, .{ .palette_size = opts.sixel_palette_size }),
         .none => unreachable,
     };
     errdefer allocator.free(encoded);
@@ -294,6 +375,14 @@ fn encodeOne(
     errdefer allocator.free(url_owned);
 
     try pl.bytes_by_url.put(url_owned, encoded);
+}
+
+// Zig 0.16 removed std.time.milliTimestamp; mirror the pattern in pool.zig.
+fn milliTimestamp() i64 {
+    var ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.REALTIME, &ts);
+    return @as(i64, @intCast(ts.sec)) * std.time.ms_per_s +
+        @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
 }
 
 const CellDims = struct { cols: u32, rows: u32 };
@@ -495,6 +584,12 @@ fn evalFeature(feature: []const u8, viewport_w_px: u32) bool {
 // ── Tests ───────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+test "PipelineOptions: T2.9 fields have correct defaults" {
+    const opts: PipelineOptions = .{};
+    try testing.expectEqual(@as(u64, 250), opts.decode_budget_ms);
+    try testing.expectEqual(@as(u32, 256), opts.sixel_palette_size);
+}
 
 test "estimateCellDims: scales aspect-preserving when wider than budget" {
     const dims = estimateCellDims(1000, 500, .{ .max_width_cells = 80 });

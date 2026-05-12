@@ -1131,7 +1131,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         if (resolved_protocol != .none) {
             if (image_pipeline.build(alloc, &p, args[2], resolved_protocol, .{
                 .max_width_cells = @intCast(width),
-            })) |pl| {
+            }, null)) |pl| {
                 pipeline_storage = pl;
                 image_lookup_opt = pipeline_storage.?.lookup();
             } else |_| {
