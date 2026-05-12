@@ -56,6 +56,9 @@ pub const ImageLookup = struct {
 /// `.tag`  — always highlight using only the class-hint tag, no fallback.
 pub const CodeStyle = enum { none, auto, tag };
 
+/// T2.5: programming language inferred from `class="language-XYZ"`.
+const Language = enum { unknown, zig, rust, js, ts, python, html, json, sh };
+
 pub const RenderOptions = struct {
     max_width: usize = 80,
     ansi_colors: bool = true,
@@ -439,6 +442,8 @@ const DIM = "\x1b[2m";
 const UNDERLINE = "\x1b[4m";
 const ITALIC = "\x1b[3m";
 const CYAN = "\x1b[36m";
+const GREEN = "\x1b[32m";   // T2.5: string literals
+const YELLOW = "\x1b[33m";  // T2.5: numeric literals
 
 // ── Public API ────────────────────────────────────────────────────────────
 
@@ -983,7 +988,8 @@ fn renderBlockquote(state: *RenderState, w: anytype, elem: *const dom.Element) a
 fn renderPre(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
     try state.ensureNewline(w);
 
-    // T2.4: `<pre><code>` blocks with enough lines get a numbered gutter.
+    // T2.4/T2.5: `<pre><code>` blocks with enough lines get a numbered gutter
+    // and (when code_style != .none) syntax highlighting.
     line_numbers: {
         if (state.opts.code_line_numbers == std.math.maxInt(usize)) break :line_numbers;
         const code = elem.firstChildByTag("code") orelse break :line_numbers;
@@ -991,7 +997,11 @@ fn renderPre(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror
         defer state.allocator.free(text);
         const line_count = std.mem.count(u8, text, "\n") + 1;
         if (line_count <= state.opts.code_line_numbers) break :line_numbers;
-        try renderCodeBlockWithLineNumbers(state, w, text, line_count);
+        const lang: Language = if (state.opts.code_style != .none)
+            detectLanguage(code)
+        else
+            .unknown;
+        try renderCodeBlockWithLineNumbers(state, w, text, line_count, lang);
         try state.ensureNewline(w);
         return;
     }
@@ -1002,39 +1012,224 @@ fn renderPre(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror
     try state.ensureNewline(w);
 }
 
-/// Render a code-block text with line-number gutter (T2.4).
-/// Gutter is dim; code lines follow with no wrapping (pre semantics).
+/// Render a code-block text with line-number gutter (T2.4) and optional
+/// syntax highlighting (T2.5).  `lang` is `.unknown` when highlighting
+/// is disabled; the gutter is always dim regardless of language.
 fn renderCodeBlockWithLineNumbers(
     state: *RenderState,
     w: anytype,
     text: []const u8,
     line_count: usize,
+    lang: Language,
 ) !void {
-
-    // Width of the line-number field (number of digits in total line count).
     var digit_count: usize = 1;
     {
         var n = line_count;
         while (n >= 10) : (n /= 10) digit_count += 1;
     }
 
+    const highlight = state.opts.code_style != .none and lang != .unknown;
+
     var line_num: usize = 1;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
-        // Dim gutter: right-aligned line number + " │ ".
         if (state.opts.ansi_colors) try w.writeAll(DIM);
         var num_buf: [20]u8 = undefined;
         const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{line_num}) catch "";
-        // Pad to digit_count width.
         var pad = if (digit_count > num_str.len) digit_count - num_str.len else 0;
         while (pad > 0) : (pad -= 1) try w.writeByte(' ');
         try w.writeAll(num_str);
         try w.writeAll(" \u{2502} "); // │
         if (state.opts.ansi_colors) try w.writeAll(RESET);
-        try w.writeAll(line);
+        if (highlight) {
+            try writeHighlightedLine(w, line, lang, state.opts.ansi_colors);
+        } else {
+            try w.writeAll(line);
+        }
         try w.writeByte('\n');
         state.col = 0;
         line_num += 1;
+    }
+}
+
+/// Return true if `word` is a reserved keyword in `lang`.
+fn isKeyword(word: []const u8, lang: Language) bool {
+    return switch (lang) {
+        .zig => isIn(word, &.{
+            "const", "var", "fn", "pub", "return", "if", "else", "while", "for",
+            "switch", "break", "continue", "defer", "errdefer", "try", "catch",
+            "error", "union", "struct", "enum", "packed", "extern", "export",
+            "inline", "noreturn", "void", "bool", "anytype", "comptime",
+            "usingnamespace", "test", "orelse", "and", "or", "not",
+            "true", "false", "null", "undefined", "unreachable",
+        }),
+        .rust => isIn(word, &.{
+            "fn", "let", "mut", "const", "pub", "use", "mod", "struct", "enum",
+            "impl", "trait", "for", "if", "else", "while", "loop", "match",
+            "return", "break", "continue", "where", "self", "Self", "super",
+            "async", "await", "move", "ref", "type", "dyn", "unsafe", "extern",
+            "true", "false", "None", "Some", "Ok", "Err",
+        }),
+        .js, .ts => isIn(word, &.{
+            "const", "let", "var", "function", "return", "if", "else", "for",
+            "while", "do", "switch", "case", "break", "continue", "class",
+            "extends", "import", "export", "default", "from", "async", "await",
+            "try", "catch", "finally", "throw", "new", "this", "typeof",
+            "instanceof", "true", "false", "null", "undefined", "void", "delete",
+            "in", "of", "type", "interface", "enum", "implements",
+        }),
+        .python => isIn(word, &.{
+            "def", "class", "return", "if", "elif", "else", "for", "while",
+            "import", "from", "as", "with", "try", "except", "finally", "raise",
+            "pass", "break", "continue", "lambda", "yield", "global", "nonlocal",
+            "and", "or", "not", "in", "is", "True", "False", "None",
+        }),
+        .sh => isIn(word, &.{
+            "if", "then", "else", "elif", "fi", "for", "while", "do", "done",
+            "case", "esac", "in", "function", "return", "local", "export",
+            "echo", "exit", "true", "false",
+        }),
+        .json => isIn(word, &.{"true", "false", "null"}),
+        .html, .unknown => false,
+    };
+}
+
+fn isIn(word: []const u8, list: []const []const u8) bool {
+    for (list) |kw| {
+        if (std.mem.eql(u8, word, kw)) return true;
+    }
+    return false;
+}
+
+/// Detect language from `class="language-XYZ"` on a `<code>` element.
+fn detectLanguage(code: *const dom.Element) Language {
+    const cls = code.getAttribute("class") orelse return .unknown;
+    var it = std.mem.splitScalar(u8, cls, ' ');
+    while (it.next()) |tok| {
+        if (!std.mem.startsWith(u8, tok, "language-")) continue;
+        const name = tok["language-".len..];
+        if (std.mem.eql(u8, name, "zig")) return .zig;
+        if (std.mem.eql(u8, name, "rust")) return .rust;
+        if (std.mem.eql(u8, name, "js") or std.mem.eql(u8, name, "javascript")) return .js;
+        if (std.mem.eql(u8, name, "ts") or std.mem.eql(u8, name, "typescript")) return .ts;
+        if (std.mem.eql(u8, name, "py") or std.mem.eql(u8, name, "python")) return .python;
+        if (std.mem.eql(u8, name, "html") or std.mem.eql(u8, name, "xml")) return .html;
+        if (std.mem.eql(u8, name, "json")) return .json;
+        if (std.mem.eql(u8, name, "sh") or std.mem.eql(u8, name, "bash") or
+            std.mem.eql(u8, name, "shell")) return .sh;
+    }
+    return .unknown;
+}
+
+/// Emit one line of source code with simple token-based highlighting.
+///
+/// State machine: normal → string (on quote) → back; normal → comment
+/// (on // or #) → rest of line dim.  Keywords get BOLD; strings GREEN;
+/// numbers YELLOW; comments DIM.  When `ansi` is false, all control
+/// sequences are suppressed and plain text is emitted.
+fn writeHighlightedLine(w: anytype, line: []const u8, lang: Language, ansi: bool) !void {
+    var i: usize = 0;
+    var word_start: ?usize = null;
+
+    while (i <= line.len) {
+        const at_end = i == line.len;
+        const ch: u8 = if (at_end) 0 else line[i];
+
+        // Flush accumulated identifier/keyword word on boundary.
+        if (word_start) |ws| {
+            const continuing = !at_end and (std.ascii.isAlphanumeric(ch) or ch == '_');
+            if (!continuing) {
+                const word = line[ws..i];
+                if (ansi and isKeyword(word, lang)) {
+                    try w.writeAll(BOLD);
+                    try w.writeAll(word);
+                    try w.writeAll(RESET);
+                } else {
+                    try w.writeAll(word);
+                }
+                word_start = null;
+                // Fall through to process ch without advancing i.
+            } else {
+                i += 1;
+                continue;
+            }
+        }
+
+        if (at_end) break;
+
+        // Line comments.
+        if ((lang == .zig or lang == .rust or lang == .js or lang == .ts) and
+            ch == '/' and i + 1 < line.len and line[i + 1] == '/')
+        {
+            if (ansi) try w.writeAll(DIM);
+            try w.writeAll(line[i..]);
+            if (ansi) try w.writeAll(RESET);
+            break;
+        }
+        if ((lang == .python or lang == .sh) and ch == '#') {
+            if (ansi) try w.writeAll(DIM);
+            try w.writeAll(line[i..]);
+            if (ansi) try w.writeAll(RESET);
+            break;
+        }
+
+        // String literals (' or ").
+        if (ch == '"' or ch == '\'') {
+            const quote = ch;
+            const str_start = i;
+            i += 1;
+            while (i < line.len) : (i += 1) {
+                if (line[i] == '\\') {
+                    i += 1; // skip escape char (loop will add one more)
+                } else if (line[i] == quote) {
+                    i += 1;
+                    break;
+                }
+            }
+            if (ansi) try w.writeAll(GREEN);
+            try w.writeAll(line[str_start..i]);
+            if (ansi) try w.writeAll(RESET);
+            continue;
+        }
+        // Template literals (JS/TS only).
+        if ((lang == .js or lang == .ts) and ch == '`') {
+            const str_start = i;
+            i += 1;
+            while (i < line.len and line[i] != '`') {
+                if (line[i] == '\\') i += 1;
+                i += 1;
+            }
+            if (i < line.len) i += 1;
+            if (ansi) try w.writeAll(GREEN);
+            try w.writeAll(line[str_start..i]);
+            if (ansi) try w.writeAll(RESET);
+            continue;
+        }
+
+        // Numeric literals.
+        if (std.ascii.isDigit(ch)) {
+            const num_start = i;
+            while (i < line.len and
+                (std.ascii.isAlphanumeric(line[i]) or line[i] == '.' or line[i] == '_'))
+            {
+                i += 1;
+            }
+            if (ansi) try w.writeAll(YELLOW);
+            try w.writeAll(line[num_start..i]);
+            if (ansi) try w.writeAll(RESET);
+            continue;
+        }
+
+        // Identifier start → accumulate for keyword check.
+        if (std.ascii.isAlphabetic(ch) or ch == '_') {
+            word_start = i;
+            i += 1;
+            continue;
+        }
+
+        // Punctuation / whitespace — emit verbatim.
+        try w.writeByte(ch);
+        i += 1;
     }
 }
 
@@ -2562,4 +2757,81 @@ test "T2.4: pre/code line numbers appear when block exceeds threshold" {
     });
     defer without_nums.deinit();
     try std.testing.expect(std.mem.indexOf(u8, without_nums.text, "\u{2502}") == null);
+}
+
+test "T2.5: detectLanguage parses language-XYZ class tokens" {
+    // We test detectLanguage indirectly via the DOM: create a minimal
+    // document with a <code class="language-XYZ"> element and verify
+    // that the rendered output contains BOLD escape sequences for
+    // language-specific keywords.
+    const cases = [_]struct { lang_cls: []const u8, code: []const u8, keyword: []const u8 }{
+        .{ .lang_cls = "language-zig", .code = "const x = 1;", .keyword = "const" },
+        .{ .lang_cls = "language-rust", .code = "fn main() {}", .keyword = "fn" },
+        .{ .lang_cls = "language-javascript", .code = "const a = 1;", .keyword = "const" },
+        .{ .lang_cls = "language-python", .code = "def foo(): pass", .keyword = "def" },
+    };
+    for (cases) |c| {
+        // Build HTML with 6+ lines so the line-number gutter fires.
+        var buf: [512]u8 = undefined;
+        const html = try std.fmt.bufPrint(&buf,
+            "<html><body><pre><code class=\"{s}\">{s}\na\nb\nc\nd\ne\n</code></pre></body></html>",
+            .{ c.lang_cls, c.code },
+        );
+        var doc = try dom.parseDocument(std.testing.allocator, html);
+        defer doc.deinit();
+
+        var model = try renderBrowseModel(std.testing.allocator, &doc, .{
+            .ansi_colors = true,
+            .code_line_numbers = 5,
+            .code_style = .auto,
+        });
+        defer model.deinit();
+
+        // The rendered output should contain BOLD + keyword + RESET.
+        const bold_kw = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{s}{s}{s}",
+            .{ BOLD, c.keyword, RESET },
+        );
+        defer std.testing.allocator.free(bold_kw);
+        try std.testing.expect(std.mem.indexOf(u8, model.text, bold_kw) != null);
+    }
+}
+
+test "T2.5: writeHighlightedLine — comments dim, strings green, numbers yellow" {
+    const alloc = std.testing.allocator;
+
+    // Each sub-case gets its own list so clearing is simple.
+    {
+        var list: std.ArrayList(u8) = .empty;
+        defer list.deinit(alloc);
+        var bw = BufferWriter{ .allocator = alloc, .list = &list };
+        try writeHighlightedLine(&bw, "x := 1; // comment here", .zig, true);
+        try std.testing.expect(std.mem.indexOf(u8, list.items, DIM) != null);
+        try std.testing.expect(std.mem.indexOf(u8, list.items, "comment here") != null);
+    }
+    {
+        var list: std.ArrayList(u8) = .empty;
+        defer list.deinit(alloc);
+        var bw = BufferWriter{ .allocator = alloc, .list = &list };
+        try writeHighlightedLine(&bw, "s := \"hello\";", .zig, true);
+        try std.testing.expect(std.mem.indexOf(u8, list.items, GREEN) != null);
+        try std.testing.expect(std.mem.indexOf(u8, list.items, "\"hello\"") != null);
+    }
+    {
+        var list: std.ArrayList(u8) = .empty;
+        defer list.deinit(alloc);
+        var bw = BufferWriter{ .allocator = alloc, .list = &list };
+        try writeHighlightedLine(&bw, "x := 42;", .zig, true);
+        try std.testing.expect(std.mem.indexOf(u8, list.items, YELLOW) != null);
+        try std.testing.expect(std.mem.indexOf(u8, list.items, "42") != null);
+    }
+    {
+        var list: std.ArrayList(u8) = .empty;
+        defer list.deinit(alloc);
+        var bw = BufferWriter{ .allocator = alloc, .list = &list };
+        try writeHighlightedLine(&bw, "const x = 1;", .zig, false);
+        try std.testing.expect(std.mem.indexOf(u8, list.items, "\x1b[") == null);
+        try std.testing.expect(std.mem.indexOf(u8, list.items, "const") != null);
+    }
 }
