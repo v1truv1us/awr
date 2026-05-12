@@ -123,6 +123,10 @@ pub const RenderOptions = struct {
     /// `.auto` / `.tag` activate highlighting (T2.5). Stored here so
     /// `awr render --code-style=auto` round-trips through RenderOptions.
     code_style: CodeStyle = .none,
+    /// T2.6: treat every `<pre>` block as a unified diff. Set when
+    /// `Content-Type: text/x-diff` or `text/x-patch` is present.
+    /// Auto-detection via `looksLikeDiff` runs regardless.
+    is_diff: bool = false,
 };
 
 pub const FieldValueLookup = struct {
@@ -442,8 +446,9 @@ const DIM = "\x1b[2m";
 const UNDERLINE = "\x1b[4m";
 const ITALIC = "\x1b[3m";
 const CYAN = "\x1b[36m";
-const GREEN = "\x1b[32m";   // T2.5: string literals
+const GREEN = "\x1b[32m";   // T2.5: string literals / diff additions
 const YELLOW = "\x1b[33m";  // T2.5: numeric literals
+const RED = "\x1b[31m";     // T2.6: diff deletions
 
 // ── Public API ────────────────────────────────────────────────────────────
 
@@ -988,6 +993,16 @@ fn renderBlockquote(state: *RenderState, w: anytype, elem: *const dom.Element) a
 fn renderPre(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
     try state.ensureNewline(w);
 
+    // T2.6: diff/patch coloring — checked first so diffs skip the gutter.
+    diff: {
+        const text = elem.textContent(state.allocator) catch break :diff;
+        defer state.allocator.free(text);
+        if (!state.opts.is_diff and !looksLikeDiff(text)) break :diff;
+        try renderDiffBlock(state, w, text);
+        try state.ensureNewline(w);
+        return;
+    }
+
     // T2.4/T2.5: `<pre><code>` blocks with enough lines get a numbered gutter
     // and (when code_style != .none) syntax highlighting.
     line_numbers: {
@@ -1049,6 +1064,54 @@ fn renderCodeBlockWithLineNumbers(
         try w.writeByte('\n');
         state.col = 0;
         line_num += 1;
+    }
+}
+
+/// True if `text` contains unified-diff markers in its first 10 lines.
+/// Detects `--- `, `+++ `, `diff --git`, and `@@ ` as unambiguous signals.
+fn looksLikeDiff(text: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var n: usize = 0;
+    while (lines.next()) |line| : (n += 1) {
+        if (n >= 10) break;
+        if (std.mem.startsWith(u8, line, "--- ") or
+            std.mem.startsWith(u8, line, "+++ ") or
+            std.mem.startsWith(u8, line, "diff --") or
+            std.mem.startsWith(u8, line, "@@ ")) return true;
+    }
+    return false;
+}
+
+/// Render a unified diff block with ANSI color: additions green, deletions
+/// red, hunk headers bold, file headers bold.  Falls back to plain text when
+/// `ansi_colors` is false.
+fn renderDiffBlock(state: *RenderState, w: anytype, text: []const u8) !void {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "+++ ") or
+            std.mem.startsWith(u8, line, "--- ") or
+            std.mem.startsWith(u8, line, "diff --"))
+        {
+            if (state.opts.ansi_colors) try w.writeAll(BOLD);
+            try w.writeAll(line);
+            if (state.opts.ansi_colors) try w.writeAll(RESET);
+        } else if (std.mem.startsWith(u8, line, "@@")) {
+            if (state.opts.ansi_colors) try w.writeAll(BOLD);
+            try w.writeAll(line);
+            if (state.opts.ansi_colors) try w.writeAll(RESET);
+        } else if (line.len > 0 and line[0] == '+') {
+            if (state.opts.ansi_colors) try w.writeAll(GREEN);
+            try w.writeAll(line);
+            if (state.opts.ansi_colors) try w.writeAll(RESET);
+        } else if (line.len > 0 and line[0] == '-') {
+            if (state.opts.ansi_colors) try w.writeAll(RED);
+            try w.writeAll(line);
+            if (state.opts.ansi_colors) try w.writeAll(RESET);
+        } else {
+            try w.writeAll(line);
+        }
+        try w.writeByte('\n');
+        state.col = 0;
     }
 }
 
@@ -2834,4 +2897,56 @@ test "T2.5: writeHighlightedLine — comments dim, strings green, numbers yellow
         try std.testing.expect(std.mem.indexOf(u8, list.items, "\x1b[") == null);
         try std.testing.expect(std.mem.indexOf(u8, list.items, "const") != null);
     }
+}
+
+test "T2.6: diff blocks auto-detected and colored" {
+    const diff_html =
+        \\<html><body><pre>--- a/foo.zig
+        \\+++ b/foo.zig
+        \\@@ -1,3 +1,4 @@
+        \\ unchanged line
+        \\-removed line
+        \\+added line
+        \\+another addition
+        \\ context
+        \\</pre></body></html>
+    ;
+    var doc = try dom.parseDocument(std.testing.allocator, diff_html);
+    defer doc.deinit();
+
+    var model = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = true,
+        .max_width = 80,
+    });
+    defer model.deinit();
+
+    // File header lines are bold.
+    try std.testing.expect(std.mem.indexOf(u8, model.text, BOLD) != null);
+    // Additions are green.
+    try std.testing.expect(std.mem.indexOf(u8, model.text, GREEN) != null);
+    // Deletions are red.
+    try std.testing.expect(std.mem.indexOf(u8, model.text, RED) != null);
+    // Content preserved.
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "added line") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "removed line") != null);
+}
+
+test "T2.6: non-diff pre blocks are not colored as diffs" {
+    const non_diff_html =
+        \\<html><body><pre>Hello world
+        \\This is plain text.
+        \\No diff markers here.
+        \\</pre></body></html>
+    ;
+    var doc = try dom.parseDocument(std.testing.allocator, non_diff_html);
+    defer doc.deinit();
+
+    var model = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = true,
+    });
+    defer model.deinit();
+
+    // No RED escape should appear — this is not a diff.
+    try std.testing.expect(std.mem.indexOf(u8, model.text, RED) == null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Hello world") != null);
 }
