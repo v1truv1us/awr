@@ -1885,8 +1885,25 @@ pub fn drawFrame(
         // replaces the table so the user explicitly answers y/n.
         try drawCookieInspector(writer, size.cols, viewport_height, ci);
     } else if (model) |screen_model| {
+        // T2.7: if the scroll position is past a table header row but still
+        // inside the table body, pin the header at the top of the viewport.
+        var sticky_lines: usize = 0;
+        for (screen_model.sticky_headers) |sh| {
+            const past_header = session.scroll_row >= sh.header_line_end;
+            const inside_table = session.scroll_row < sh.table_line_end;
+            if (past_header and inside_table) {
+                var hi = sh.header_line_start;
+                while (hi < sh.header_line_end and sticky_lines < viewport_height) : (hi += 1) {
+                    try writeClippedLine(writer, size.cols, screen_model.lineText(hi));
+                    try writer.writeAll("\x1b[K\n");
+                    sticky_lines += 1;
+                }
+                break; // at most one sticky header at a time
+            }
+        }
         var row: usize = 0;
-        while (row < viewport_height) : (row += 1) {
+        const body_rows = if (viewport_height > sticky_lines) viewport_height - sticky_lines else 0;
+        while (row < body_rows) : (row += 1) {
             const line_index = session.scroll_row + row;
             if (line_index < screen_model.lines.len) {
                 try writeClippedLine(writer, size.cols, screen_model.lineText(line_index));

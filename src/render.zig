@@ -207,6 +207,18 @@ pub const ScreenLine = struct {
     end: usize,
 };
 
+/// T2.7: position of a table header row in the ScreenModel line array.
+/// The TUI viewport shows the header as a sticky overlay when scrolled past it.
+pub const StickyHeader = struct {
+    /// Line range [start, end) of the rendered header row (inclusive of
+    /// any separator line that immediately follows the header cells).
+    header_line_start: usize,
+    header_line_end: usize,
+    /// Exclusive end of the table body. Sticky is shown while
+    /// `scroll_row ∈ [header_line_end, table_line_end)`.
+    table_line_end: usize,
+};
+
 pub const ScreenModel = struct {
     allocator: std.mem.Allocator,
     text: []u8,
@@ -214,6 +226,7 @@ pub const ScreenModel = struct {
     links: []ScreenLink,
     boxes: []ScreenBox,
     fields: []ScreenField,
+    sticky_headers: []StickyHeader,
 
     pub fn deinit(self: *ScreenModel) void {
         for (self.links) |link| {
@@ -228,6 +241,7 @@ pub const ScreenModel = struct {
         self.allocator.free(self.links);
         self.allocator.free(self.lines);
         self.allocator.free(self.text);
+        self.allocator.free(self.sticky_headers);
     }
 
     pub fn lineText(self: *const ScreenModel, index: usize) []const u8 {
@@ -302,6 +316,7 @@ const RenderState = struct {
     fields: std.ArrayListUnmanaged(FieldRef) = .empty,
     boxes: std.ArrayListUnmanaged(BoxRef) = .empty,
     active_boxes: std.ArrayListUnmanaged(usize) = .empty,
+    sticky_hdrs: std.ArrayListUnmanaged(StickyHeader) = .empty,
 
     fn deinit(self: *RenderState) void {
         for (self.links.items) |link| {
@@ -317,6 +332,7 @@ const RenderState = struct {
         self.fields.deinit(self.allocator);
         self.boxes.deinit(self.allocator);
         self.active_boxes.deinit(self.allocator);
+        self.sticky_hdrs.deinit(self.allocator);
     }
 
     fn beginElementBox(self: *RenderState, elem: *const dom.Element) !void {
@@ -560,7 +576,7 @@ fn renderModelFromRoot(
         }
     }
 
-    return buildScreenModel(allocator, try buf.toOwnedSlice(allocator), state.links.items, state.fields.items, state.boxes.items);
+    return buildScreenModel(allocator, try buf.toOwnedSlice(allocator), state.links.items, state.fields.items, state.boxes.items, state.sticky_hdrs.items);
 }
 
 pub fn renderHtmlModel(
@@ -579,6 +595,7 @@ fn buildScreenModel(
     link_refs: []const LinkRef,
     field_refs: []const FieldRef,
     box_refs: []const BoxRef,
+    sticky_header_refs: []const StickyHeader,
 ) !ScreenModel {
     errdefer allocator.free(text);
 
@@ -659,6 +676,9 @@ fn buildScreenModel(
         built_fields += 1;
     }
 
+    const sticky_headers = try allocator.dupe(StickyHeader, sticky_header_refs);
+    errdefer allocator.free(sticky_headers);
+
     return .{
         .allocator = allocator,
         .text = text,
@@ -666,6 +686,7 @@ fn buildScreenModel(
         .links = links,
         .fields = fields,
         .boxes = boxes,
+        .sticky_headers = sticky_headers,
     };
 }
 
@@ -1899,8 +1920,16 @@ fn renderTable(state: *RenderState, w: anytype, elem: *const dom.Element) anyerr
 
     const is_link_list = isLinkListTable(elem);
 
+    // T2.7: sticky-header tracking.
+    const has_header = rows.items.len > 1 and rowHasHeader(rows.items[0]);
+    var header_line_start: usize = 0;
+    var header_line_end: usize = 0;
+
     // Render each row.
     for (rows.items, 0..) |row, ri| {
+        // T2.7: snap start-of-header before row 0.
+        if (ri == 0 and has_header) header_line_start = state.line_index;
+
         // Separator between rows.
         if (ri > 0 and !is_link_list) {
             for (0..max_cols) |ci| {
@@ -1941,7 +1970,28 @@ fn renderTable(state: *RenderState, w: anytype, elem: *const dom.Element) anyerr
             }
             try state.newline(w);
         }
+
+        // T2.7: snap end-of-header after row 0 (includes the separator drawn
+        // at ri==1 below, so we record *before* that separator).
+        if (ri == 0 and has_header) header_line_end = state.line_index;
     }
+
+    // T2.7: record the sticky header once the whole table is rendered.
+    if (has_header) {
+        state.sticky_hdrs.append(state.allocator, .{
+            .header_line_start = header_line_start,
+            .header_line_end = header_line_end,
+            .table_line_end = state.line_index,
+        }) catch {};
+    }
+}
+
+/// True if the first row of a table has at least one `<th>` cell.
+fn rowHasHeader(row: *const dom.Element) bool {
+    for (row.children.items) |child| {
+        if (child == .element and eql(child.element.tag, "th")) return true;
+    }
+    return false;
 }
 
 const WrappedCell = struct {
@@ -2949,4 +2999,52 @@ test "T2.6: non-diff pre blocks are not colored as diffs" {
     // No RED escape should appear — this is not a diff.
     try std.testing.expect(std.mem.indexOf(u8, model.text, RED) == null);
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Hello world") != null);
+}
+
+test "T2.7: sticky_headers populated for table with th header row" {
+    const html =
+        \\<html><body><table>
+        \\  <tr><th>Name</th><th>Value</th></tr>
+        \\  <tr><td>Alice</td><td>42</td></tr>
+        \\  <tr><td>Bob</td><td>99</td></tr>
+        \\  <tr><td>Carol</td><td>7</td></tr>
+        \\</table></body></html>
+    ;
+    var doc = try dom.parseDocument(std.testing.allocator, html);
+    defer doc.deinit();
+
+    var model = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = false,
+        .max_width = 40,
+    });
+    defer model.deinit();
+
+    // Table has 4 rows (1 header + 3 body) → one sticky header entry.
+    try std.testing.expectEqual(@as(usize, 1), model.sticky_headers.len);
+    const sh = model.sticky_headers[0];
+    // header_line_start < header_line_end < table_line_end
+    try std.testing.expect(sh.header_line_start < sh.header_line_end);
+    try std.testing.expect(sh.header_line_end < sh.table_line_end);
+    // Header row text should contain the column names.
+    const header_text = model.lineText(sh.header_line_start);
+    try std.testing.expect(std.mem.indexOf(u8, header_text, "Name") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header_text, "Value") != null);
+}
+
+test "T2.7: no sticky_headers for table without th cells" {
+    const html =
+        \\<html><body><table>
+        \\  <tr><td>A</td><td>B</td></tr>
+        \\  <tr><td>C</td><td>D</td></tr>
+        \\</table></body></html>
+    ;
+    var doc = try dom.parseDocument(std.testing.allocator, html);
+    defer doc.deinit();
+
+    var model = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = false,
+    });
+    defer model.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), model.sticky_headers.len);
 }
