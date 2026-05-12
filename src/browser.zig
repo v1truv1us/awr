@@ -100,10 +100,10 @@ pub const BrowserSession = struct {
     /// The TUI overlays the picker on the body area; arrow keys
     /// navigate, Enter commits, Esc cancels.
     select_picker: ?SelectPicker = null,
-    /// T-84: when non-null, the cookie inspector is open over the
-    /// body area. Lists cookies matching the current origin's host
-    /// with name/value/domain/path/expiry/secure/http_only columns.
-    /// `d` deletes the focused row; uppercase `C` clears all
+    /// T-84/T2.3: when non-null, the cookie inspector is open over
+    /// the body area. Lists cookies matching the current origin's host
+    /// with name/value/domain/path/expiry/secure/http_only/samesite
+    /// columns. `d` deletes the focused row; uppercase `C` clears all
     /// (asking for confirmation first); `q`/Esc closes.
     cookie_inspector: ?CookieInspector = null,
     /// T-90 / Tier 2 T2.2: in-memory ring buffer of recently-navigated
@@ -176,6 +176,8 @@ pub const BrowserSession = struct {
         expires: ?i64,
         secure: bool,
         http_only: bool,
+        /// 'L' lax · 'S' strict · 'N' none — pre-computed for display.
+        same_site_char: u8,
     };
 
     /// T-84: state for an open cookie inspector. Holds a snapshot
@@ -463,6 +465,11 @@ pub const BrowserSession = struct {
                 .expires = c.expires,
                 .secure = c.secure,
                 .http_only = c.http_only,
+                .same_site_char = switch (c.same_site) {
+                    .strict => 'S',
+                    .lax => 'L',
+                    .none => 'N',
+                },
             };
             try rows.append(self.allocator, row);
         }
@@ -1950,6 +1957,24 @@ fn viewportHeight(size: tui.Size) usize {
     return if (size.rows > 2) size.rows - 2 else 0;
 }
 
+/// Human-readable relative expiry for the cookie inspector (T2.3).
+/// Returns a slice into `buf` (max 16 bytes). Caller owns the buffer.
+fn cookieExpiryStr(buf: *[16]u8, expires: ?i64, now_ts: i64) []const u8 {
+    const e = expires orelse return "(session)";
+    const diff = e - now_ts;
+    if (diff <= 0) return "expired";
+    const secs: u64 = @intCast(diff);
+    const mins = secs / 60;
+    const hours = mins / 60;
+    const days = hours / 24;
+    const weeks = days / 7;
+    if (weeks >= 1) return std.fmt.bufPrint(buf, "{d}w left", .{weeks}) catch "…";
+    if (days >= 1) return std.fmt.bufPrint(buf, "{d}d left", .{days}) catch "…";
+    if (hours >= 1) return std.fmt.bufPrint(buf, "{d}h left", .{hours}) catch "…";
+    if (mins >= 1) return std.fmt.bufPrint(buf, "{d}m left", .{mins}) catch "…";
+    return "<1m";
+}
+
 /// Render the cookie inspector. Two modes:
 ///   - normal: header + tabular row list with cursor highlight
 ///   - confirm_clear_all: centered "Clear N cookies? (y/n)" prompt
@@ -2014,13 +2039,12 @@ fn drawCookieInspector(
     }
 
     // Column widths: name, value, domain, path, expiry, flags.
-    // For now pick fixed-ish widths and clip; a fancier auto-layout
-    // can come later if users ask. Flags column is `S` (secure) +
-    // `H` (httpOnly), 3 chars wide.
+    // T2.3: flags is now 4 chars (S secure · H httpOnly · SameSite L/S/N);
+    //       expiry is 10 chars of human-readable relative time.
     const name_w: usize = 18;
     const domain_w: usize = 22;
     const path_w: usize = 10;
-    const flags_w: usize = 3;
+    const flags_w: usize = 4; // SH + SameSite char + space
     const expiry_w: usize = 10;
     // value gets the rest.
     const fixed = 2 + name_w + 1 + domain_w + 1 + path_w + 1 + expiry_w + 1 + flags_w + 1;
@@ -2037,11 +2061,26 @@ fn drawCookieInspector(
     try writer.writeAll(" ");
     try writeFixed(writer, "path", path_w);
     try writer.writeAll(" ");
-    try writeFixed(writer, "expiry", expiry_w);
+    try writeFixed(writer, "expires", expiry_w);
     try writer.writeAll(" ");
-    try writeFixed(writer, "flg", flags_w);
+    try writeFixed(writer, "flgs", flags_w);
     try writer.writeAll(RESET);
     try writer.writeAll("\x1b[K\n");
+
+    // Tally active / session / expired for the footer.
+    var _ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.REALTIME, &_ts);
+    const now_ts: i64 = @intCast(_ts.sec);
+    var n_active: usize = 0;
+    var n_session: usize = 0;
+    var n_expired: usize = 0;
+    for (ci.rows.items) |r| {
+        if (r.expires) |e| {
+            if (e >= now_ts) n_active += 1 else n_expired += 1;
+        } else {
+            n_session += 1;
+        }
+    }
 
     // Scroll window so the cursor stays visible.
     const list_rows = if (viewport_height > 3) viewport_height - 3 else 0;
@@ -2070,25 +2109,27 @@ fn drawCookieInspector(
         try writeFixed(writer, r.path, path_w);
         try writer.writeAll(" ");
         var expiry_buf: [16]u8 = undefined;
-        const expiry_s: []const u8 = if (r.expires) |e|
-            std.fmt.bufPrint(&expiry_buf, "{d}", .{e}) catch "<long>"
-        else
-            "(session)";
+        const expiry_s = cookieExpiryStr(&expiry_buf, r.expires, now_ts);
         try writeFixed(writer, expiry_s, expiry_w);
         try writer.writeAll(" ");
-        var flags_buf: [3]u8 = undefined;
+        var flags_buf: [4]u8 = undefined;
         flags_buf[0] = if (r.secure) 'S' else '-';
         flags_buf[1] = if (r.http_only) 'H' else '-';
-        flags_buf[2] = ' ';
+        flags_buf[2] = r.same_site_char;
+        flags_buf[3] = ' ';
         try writeFixed(writer, &flags_buf, flags_w);
         if (ri == ci.cursor) try writer.writeAll(RESET);
         try writer.writeAll("\x1b[K\n");
     }
 
-    // Footer hint.
+    // Footer: classified counts + navigation hints.
     try writer.writeAll(DIM);
-    var hint_buf: [80]u8 = undefined;
-    const hint = std.fmt.bufPrint(&hint_buf, "{d}/{d} cookies — ↑/↓ move · d delete · C clear all · q close", .{ ci.cursor + 1, ci.rows.items.len }) catch "";
+    var hint_buf: [120]u8 = undefined;
+    const hint = std.fmt.bufPrint(
+        &hint_buf,
+        "{d} active · {d} session · {d} expired — ↑/↓ move · d delete · C clear all · q close",
+        .{ n_active, n_session, n_expired },
+    ) catch "";
     try writeClippedLine(writer, cols, hint);
     try writer.writeAll(RESET);
     try writer.writeAll("\x1b[K\n");
@@ -3267,5 +3308,18 @@ test "harness: T-90 arrow_up in URL prompt fills with recent history" {
         h.session.prompt_buffer.items,
     );
     try std.testing.expect(try h.frameContains("URL: https://news.ycombinator.com/"));
+}
+
+test "T2.3: cookieExpiryStr human-readable relative time" {
+    var buf: [16]u8 = undefined;
+    const now: i64 = 1_700_000_000;
+
+    try std.testing.expectEqualStrings("(session)", cookieExpiryStr(&buf, null, now));
+    try std.testing.expectEqualStrings("expired", cookieExpiryStr(&buf, now - 1, now));
+    try std.testing.expectEqualStrings("<1m", cookieExpiryStr(&buf, now + 30, now));
+    try std.testing.expectEqualStrings("5m left", cookieExpiryStr(&buf, now + 5 * 60, now));
+    try std.testing.expectEqualStrings("3h left", cookieExpiryStr(&buf, now + 3 * 3600, now));
+    try std.testing.expectEqualStrings("2d left", cookieExpiryStr(&buf, now + 2 * 86400, now));
+    try std.testing.expectEqualStrings("4w left", cookieExpiryStr(&buf, now + 4 * 7 * 86400, now));
 }
 
