@@ -203,11 +203,13 @@ why the case was invalid.
 
 ## 8. Mapping from API areas to test files
 
-> **Current status (as of 2026-05-11):** 106 active curated WPT cases pass via
+> **Current status (as of 2026-05-11):** 107 active curated WPT cases pass via
 > `zig build test-wpt`. 58 Test262 cases pass via `zig build test-test262`.
 > All `spec/subspecs/agent-browser.md §4` closure-gate cases are active.
 > `spec/subspecs/browser-tui.md §4.2` Tier 1 closure-gate cases for
-> form-input/keyboard/submit semantics also land (T-87).
+> form-input/keyboard/submit semantics also land (T-87). WebCrypto
+> subset (T-93) lands as a Tier 3 starter slice — `getRandomValues` +
+> `subtle.digest(SHA-1/256/384/512)` backed by BoringSSL.
 > Only one form/cookie row remains deferred — see §8b.
 
 ### §8a. Active curated cases
@@ -230,6 +232,7 @@ why the case was invalid.
 | History | `history_push_replace_state.js`, `history_relative_url.js`, `history_state_length.js` |
 | Viewport / observers | `viewport_dimensions.js`, `requestAnimationFrame.js`, `request_idle_callback.js`, `request_idle_callback_cancel.js`, `intersection_observer.js`, `resize_observer.js`, `window_basics.js` |
 | Window / navigator | `navigator_basics.js`, `url_search_params_basics.js`, `window_navigator_surface.js` |
+| WebCrypto (subset) | `webcrypto_basics.js` |
 | Harness / misc | `promise_test_basics.js`, `console_namespace.js`, `match_media.js` |
 | JS runtime | 58 curated Test262 cases in `tests/test262_runner.zig` (covers ES2019–2023: Object.hasOwn, Array.at/findLast, Promise.allSettled/any, optional chaining, nullish coalescing, logical assignment, BigInt, etc.) |
 

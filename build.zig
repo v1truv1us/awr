@@ -239,6 +239,33 @@ pub fn build(b: *std.Build) void {
         test_js_step.dependOn(&run_js.step);
     }
 
+    // ── WebCrypto backend (T-93) — depends on BoringSSL ───────────────────
+    // Standalone test target so the SHA / RAND vectors get verified on
+    // every `zig build test` without pulling BoringSSL into the lighter
+    // js_test target (which stays BoringSSL-free for fast iteration).
+    if (supports_boringssl) {
+        const webcrypto_mod = b.createModule(.{
+            .root_source_file = b.path("src/js/webcrypto_backend.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
+        });
+        webcrypto_mod.addImport("quickjs", qjs_mod);
+        webcrypto_mod.addImport("xev", xev_mod);
+        webcrypto_mod.linkLibrary(qjs_dep.artifact("quickjs-ng"));
+        addBoringSslSupport(b, webcrypto_mod, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
+
+        const webcrypto_test = b.addTest(.{
+            .name = "webcrypto_backend",
+            .root_module = webcrypto_mod,
+            .use_llvm = true, // matches js_test — engine.zig pulls QuickJS-NG
+        });
+        const run_webcrypto = b.addRunArtifact(webcrypto_test);
+        test_step.dependOn(&run_webcrypto.step);
+        test_js_step.dependOn(&run_webcrypto.step);
+    }
+
     // ── HTML parser module (depends on lexbor) ────────────────────────────
     {
         const html_mod = b.createModule(.{

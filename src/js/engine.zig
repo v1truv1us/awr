@@ -169,6 +169,53 @@ const HostData = struct {
     /// deadline is exceeded. Set via `JsEngine.setEvalDeadlineMs`,
     /// cleared via `JsEngine.clearEvalDeadline`.
     eval_deadline_ms: i64 = 0,
+    /// T-93: optional WebCrypto backend. When null, `crypto` is not
+    /// installed on the JS global. When set, exposes `crypto.getRandomValues`
+    /// and `crypto.subtle.digest`. The standalone js_test target leaves
+    /// this null so the engine never pulls BoringSSL into its build graph;
+    /// Page wires a BoringSSL-backed implementation from
+    /// `src/js/webcrypto_backend.zig`.
+    crypto_backend: ?CryptoBackend = null,
+};
+
+/// T-93: BoringSSL-free interface for the WebCrypto subset AWR
+/// implements. Functions write into caller-allocated output slices and
+/// return `true` on success / `false` on failure (callers map to
+/// JS-side exceptions). The standalone js_test target skips
+/// installation by leaving `HostData.crypto_backend = null`.
+pub const CryptoBackend = struct {
+    rand_bytes: *const fn (out: []u8) bool,
+    /// Compute a digest into `out`. `out` must be sized correctly for
+    /// the algorithm (20/32/48/64 bytes for SHA1/256/384/512). Caller
+    /// guarantees the right size before calling.
+    digest: *const fn (algo: DigestAlgo, data: []const u8, out: []u8) bool,
+};
+
+pub const DigestAlgo = enum {
+    sha1,
+    sha256,
+    sha384,
+    sha512,
+
+    pub fn outputLen(self: DigestAlgo) usize {
+        return switch (self) {
+            .sha1 => 20,
+            .sha256 => 32,
+            .sha384 => 48,
+            .sha512 => 64,
+        };
+    }
+
+    /// Parse a Web Crypto algorithm identifier — case-insensitive and
+    /// tolerant of dashes (WebCrypto spec says `"SHA-256"` with the
+    /// dash; some scripts use `"sha256"`).
+    pub fn fromName(name: []const u8) ?DigestAlgo {
+        if (std.ascii.eqlIgnoreCase(name, "SHA-1") or std.ascii.eqlIgnoreCase(name, "sha1")) return .sha1;
+        if (std.ascii.eqlIgnoreCase(name, "SHA-256") or std.ascii.eqlIgnoreCase(name, "sha256")) return .sha256;
+        if (std.ascii.eqlIgnoreCase(name, "SHA-384") or std.ascii.eqlIgnoreCase(name, "sha384")) return .sha384;
+        if (std.ascii.eqlIgnoreCase(name, "SHA-512") or std.ascii.eqlIgnoreCase(name, "sha512")) return .sha512;
+        return null;
+    }
 };
 
 /// Expose HostData so bridge.zig can retrieve it via ctx.getOpaque().
@@ -339,6 +386,11 @@ pub const JsEngine = struct {
         try self.installConsole();
         try self.installTimers();
         try self.installFetch();
+        // T-93: WebCrypto is opt-in — installCrypto returns early when
+        // `host.crypto_backend` is null. The standalone js_test target
+        // leaves it null; Page sets it via setCryptoBackend() and the
+        // backend survives across reset() since host is reused.
+        try self.installCrypto();
         try self.installStructuredClone();
         try self.installUrlSearchParams();
         try self.installMatchMedia();
@@ -525,6 +577,129 @@ pub const JsEngine = struct {
         try self.eval(FETCH_POLYFILL, "<fetch-polyfill>");
     }
 
+    // ── WebCrypto subset (T-93) ──────────────────────────────────────────
+    //
+    // Installs `crypto.getRandomValues` + `crypto.subtle.digest` on top
+    // of the host-provided `CryptoBackend`. No-op when the host hasn't
+    // attached a backend (the standalone js_test target leaves it null,
+    // keeping the engine binary free of BoringSSL deps). Page wires the
+    // BoringSSL implementation from `src/js/webcrypto_backend.zig`.
+
+    /// T-93: attach a WebCrypto backend and install `crypto.getRandomValues`
+    /// + `crypto.subtle.digest`. Safe to call multiple times — the JS-side
+    /// polyfill just re-binds the same globals.
+    pub fn setCryptoBackend(self: *JsEngine, backend: CryptoBackend) JsError!void {
+        const host = self.ctx.getOpaque(HostData) orelse return JsError.ContextInitFailed;
+        host.crypto_backend = backend;
+        try self.installCrypto();
+    }
+
+    fn installCrypto(self: *JsEngine) JsError!void {
+        const ctx = self.ctx;
+        const host = ctx.getOpaque(HostData) orelse return JsError.ContextInitFailed;
+        if (host.crypto_backend == null) return; // no-op when not wired
+
+        const randFn = qjs.Value.initCFunction(ctx, cryptoRandCb, "__awr_crypto_rand__", 1);
+        defer randFn.deinit(ctx);
+        try self.setGlobal("__awr_crypto_rand__", randFn.dup(ctx));
+
+        const digestFn = qjs.Value.initCFunction(ctx, cryptoDigestCb, "__awr_crypto_digest__", 2);
+        defer digestFn.deinit(ctx);
+        try self.setGlobal("__awr_crypto_digest__", digestFn.dup(ctx));
+
+        try self.eval(CRYPTO_POLYFILL, "<crypto-polyfill>");
+    }
+
+    /// `__awr_crypto_rand__(typedArray)` — fills `typedArray`'s
+    /// underlying buffer with cryptographically-secure random bytes
+    /// in place. Returns the same typedArray on success (matching
+    /// `crypto.getRandomValues`'s spec), or throws on backend failure.
+    fn cryptoRandCb(
+        ctx: ?*qjs.Context,
+        _: qjs.Value,
+        args: []const @import("quickjs").c.JSValue,
+    ) qjs.Value {
+        const c = ctx orelse return qjs.Value.undefined;
+        const host = c.getOpaque(HostData) orelse return throwTypeError(c, "crypto: no host");
+        const backend = host.crypto_backend orelse return throwTypeError(c, "crypto: no backend");
+        if (args.len < 1) return throwTypeError(c, "getRandomValues: missing typedArray");
+
+        const arg: qjs.Value = @bitCast(args[0]);
+        const tab = arg.getTypedArrayBuffer(c) orelse {
+            return throwTypeError(c, "getRandomValues: argument must be a TypedArray");
+        };
+        // `tab.value` (the underlying ArrayBuffer) is a new ref — must
+        // be deinit'd before this callback returns or QuickJS's GC trips
+        // on a non-empty obj list at runtime teardown.
+        defer tab.value.deinit(c);
+        const backing = tab.value.getArrayBuffer(c) orelse {
+            return throwTypeError(c, "getRandomValues: cannot access typed-array buffer");
+        };
+        // Spec cap: typedArray byteLength must be ≤ 65536. Real-world
+        // callers respect this; we error rather than fall back so bad
+        // callers see a deterministic failure.
+        if (tab.byte_length > 65536) {
+            return throwTypeError(c, "getRandomValues: byteLength exceeds 65536");
+        }
+        const end = tab.byte_offset + tab.byte_length;
+        if (end > backing.len) return throwTypeError(c, "getRandomValues: range out of bounds");
+        const slice = backing[tab.byte_offset..end];
+
+        if (!backend.rand_bytes(slice)) {
+            return throwTypeError(c, "getRandomValues: backend failure");
+        }
+        return arg.dup(c);
+    }
+
+    /// `__awr_crypto_digest__(algoName, bytes)` — synchronously digests
+    /// the bytes and returns an ArrayBuffer of the result. The JS-side
+    /// polyfill wraps this in `Promise.resolve(...)` to match WebCrypto's
+    /// `Promise<ArrayBuffer>` contract.
+    fn cryptoDigestCb(
+        ctx: ?*qjs.Context,
+        _: qjs.Value,
+        args: []const @import("quickjs").c.JSValue,
+    ) qjs.Value {
+        const c = ctx orelse return qjs.Value.undefined;
+        const host = c.getOpaque(HostData) orelse return throwTypeError(c, "crypto: no host");
+        const backend = host.crypto_backend orelse return throwTypeError(c, "crypto: no backend");
+        if (args.len < 2) return throwTypeError(c, "digest: missing arguments");
+
+        const algo_arg: qjs.Value = @bitCast(args[0]);
+        const algo_cstr = algo_arg.toCString(c) orelse return throwTypeError(c, "digest: algorithm must be a string");
+        defer c.freeCString(algo_cstr);
+        const algo_name = std.mem.span(algo_cstr);
+        const algo = DigestAlgo.fromName(algo_name) orelse {
+            return throwTypeError(c, "digest: unsupported algorithm");
+        };
+
+        const data_arg: qjs.Value = @bitCast(args[1]);
+        const tab = data_arg.getTypedArrayBuffer(c) orelse {
+            return throwTypeError(c, "digest: data must be a TypedArray");
+        };
+        defer tab.value.deinit(c);
+        const backing = tab.value.getArrayBuffer(c) orelse {
+            return throwTypeError(c, "digest: cannot access typed-array buffer");
+        };
+        const end = tab.byte_offset + tab.byte_length;
+        if (end > backing.len) return throwTypeError(c, "digest: range out of bounds");
+        const input = backing[tab.byte_offset..end];
+
+        // Allocate output on the stack — max 64 bytes (SHA-512).
+        var out_buf: [64]u8 = undefined;
+        const out_len = algo.outputLen();
+        if (!backend.digest(algo, input, out_buf[0..out_len])) {
+            return throwTypeError(c, "digest: backend failure");
+        }
+        return qjs.Value.initArrayBufferCopy(c, out_buf[0..out_len]);
+    }
+
+    /// Helper: throw a TypeError with `msg`. Returns the JS exception
+    /// sentinel value that QuickJS expects in cb return slots.
+    fn throwTypeError(ctx: *qjs.Context, msg: [:0]const u8) qjs.Value {
+        return ctx.throwTypeError(msg);
+    }
+
     fn rawFetchCb(
         ctx: ?*qjs.Context,
         _: qjs.Value,
@@ -620,6 +795,75 @@ pub const JsEngine = struct {
         promise.reject.deinit(c);
         return promise.value;
     }
+
+    /// T-93: WebCrypto JS shim. Wires `crypto.getRandomValues` and
+    /// `crypto.subtle.digest` on top of the host primitives
+    /// `__awr_crypto_rand__` and `__awr_crypto_digest__`. Input
+    /// normalization (string → UTF-8 bytes; ArrayBuffer → Uint8Array)
+    /// lives in JS so the native side only deals with TypedArrays.
+    const CRYPTO_POLYFILL =
+        \\(function () {
+        \\  'use strict';
+        \\  var rand = globalThis.__awr_crypto_rand__;
+        \\  var digest = globalThis.__awr_crypto_digest__;
+        \\  if (typeof rand !== 'function' || typeof digest !== 'function') return;
+        \\  globalThis.crypto = globalThis.crypto || {};
+        \\  globalThis.crypto.getRandomValues = function (typedArray) {
+        \\    return rand(typedArray);
+        \\  };
+        \\  globalThis.crypto.subtle = globalThis.crypto.subtle || {};
+        \\  globalThis.crypto.subtle.digest = function (algorithm, data) {
+        \\    return new Promise(function (resolve, reject) {
+        \\      try {
+        \\        var algoName = typeof algorithm === 'string'
+        \\          ? algorithm
+        \\          : (algorithm && algorithm.name);
+        \\        if (!algoName) throw new TypeError('digest: algorithm name required');
+        \\        var bytes;
+        \\        if (typeof data === 'string') {
+        \\          // Inline UTF-8 encoder — QuickJS-NG doesn't ship TextEncoder
+        \\          // as a built-in global. Handles BMP + surrogate-pair
+        \\          // code points; that covers everything WebCrypto cares about.
+        \\          var utf8 = [];
+        \\          for (var i = 0; i < data.length; i++) {
+        \\            var c = data.charCodeAt(i);
+        \\            if (c < 0x80) {
+        \\              utf8.push(c);
+        \\            } else if (c < 0x800) {
+        \\              utf8.push(0xc0 | (c >> 6));
+        \\              utf8.push(0x80 | (c & 0x3f));
+        \\            } else if ((c & 0xfc00) === 0xd800 && i + 1 < data.length) {
+        \\              var c2 = data.charCodeAt(++i);
+        \\              var cp = 0x10000 + (((c & 0x3ff) << 10) | (c2 & 0x3ff));
+        \\              utf8.push(0xf0 | (cp >> 18));
+        \\              utf8.push(0x80 | ((cp >> 12) & 0x3f));
+        \\              utf8.push(0x80 | ((cp >> 6) & 0x3f));
+        \\              utf8.push(0x80 | (cp & 0x3f));
+        \\            } else {
+        \\              utf8.push(0xe0 | (c >> 12));
+        \\              utf8.push(0x80 | ((c >> 6) & 0x3f));
+        \\              utf8.push(0x80 | (c & 0x3f));
+        \\            }
+        \\          }
+        \\          bytes = new Uint8Array(utf8);
+        \\        } else if (data instanceof Uint8Array) {
+        \\          bytes = data;
+        \\        } else if (data instanceof ArrayBuffer) {
+        \\          bytes = new Uint8Array(data);
+        \\        } else if (data && data.buffer instanceof ArrayBuffer) {
+        \\          bytes = new Uint8Array(data.buffer, data.byteOffset || 0, data.byteLength);
+        \\        } else {
+        \\          throw new TypeError('digest: data must be BufferSource or string');
+        \\        }
+        \\        var out = digest(algoName, bytes);
+        \\        resolve(out);
+        \\      } catch (e) {
+        \\        reject(e);
+        \\      }
+        \\    });
+        \\  };
+        \\})();
+    ;
 
     const FETCH_POLYFILL =
         \\(function () {

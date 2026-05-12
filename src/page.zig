@@ -15,6 +15,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const client = @import("client.zig");
 const engine = @import("js/engine.zig");
+const webcrypto_backend = @import("js/webcrypto_backend.zig");
 const dom = @import("dom/node.zig"); // parseDocument handles HTML+DOM internally
 const bridge = @import("dom/bridge.zig");
 const render = @import("render.zig");
@@ -389,6 +390,11 @@ pub const Page = struct {
     pub fn initWithJarPath(allocator: std.mem.Allocator, io: std.Io, jar_path: ?[]u8) !Page {
         var js_engine = try engine.JsEngine.init(allocator, null);
         errdefer js_engine.deinit();
+        // T-93: wire BoringSSL-backed WebCrypto. Best-effort — engine
+        // works fine without it (just `crypto.*` will be missing from
+        // pages that ask). Standalone js_test target never reaches this
+        // code path since it doesn't go through Page.init.
+        js_engine.setCryptoBackend(webcrypto_backend.backend) catch {};
 
         var el = try engine.EventLoop.init(allocator, js_engine.ctx);
         errdefer el.deinit();
@@ -458,6 +464,11 @@ pub const Page = struct {
     ) !Page {
         var js_engine = try engine.JsEngine.init(allocator, null);
         errdefer js_engine.deinit();
+        // T-93: wire BoringSSL-backed WebCrypto. Best-effort — engine
+        // works fine without it (just `crypto.*` will be missing from
+        // pages that ask). Standalone js_test target never reaches this
+        // code path since it doesn't go through Page.init.
+        js_engine.setCryptoBackend(webcrypto_backend.backend) catch {};
 
         var el = try engine.EventLoop.init(allocator, js_engine.ctx);
         errdefer el.deinit();
@@ -529,6 +540,11 @@ pub const Page = struct {
     ) !Page {
         var js_engine = try engine.JsEngine.init(allocator, null);
         errdefer js_engine.deinit();
+        // T-93: wire BoringSSL-backed WebCrypto. Best-effort — engine
+        // works fine without it (just `crypto.*` will be missing from
+        // pages that ask). Standalone js_test target never reaches this
+        // code path since it doesn't go through Page.init.
+        js_engine.setCryptoBackend(webcrypto_backend.backend) catch {};
 
         var el = try engine.EventLoop.init(allocator, js_engine.ctx);
         errdefer el.deinit();
@@ -2184,6 +2200,91 @@ test "resolveUrl — relative against file:// base" {
 }
 
 // ── Step 2 tests — window.location ────────────────────────────────────────
+
+test "T-93 WebCrypto: crypto.getRandomValues fills typed array" {
+    var page = try Page.init(std.testing.allocator, std.testing.io);
+    defer page.deinit();
+    var result = try page.processHtml(
+        "https://x.com/",
+        200,
+        \\<html><body><script>
+        \\  const buf = new Uint8Array(16);
+        \\  crypto.getRandomValues(buf);
+        \\  // Probability of all-zero bytes from a healthy CSPRNG is 2^-128.
+        \\  let nonzero = 0;
+        \\  for (const b of buf) if (b !== 0) nonzero++;
+        \\  window.__awrData__ = { len: buf.length, nonzero: nonzero };
+        \\</script></body></html>
+        ,
+    );
+    defer result.deinit();
+    try std.testing.expect(result.window_data != null);
+    // Expect 16 bytes filled, all 16 nonzero with high probability.
+    try std.testing.expect(std.mem.indexOf(u8, result.window_data.?, "\"len\":16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.window_data.?, "\"nonzero\"") != null);
+    // Make sure we didn't get 0 nonzero (would mean rand backend failed silently).
+    try std.testing.expect(std.mem.indexOf(u8, result.window_data.?, "\"nonzero\":0}") == null);
+}
+
+test "T-93 WebCrypto: crypto.subtle.digest SHA-256 of \"abc\" matches the spec vector" {
+    var page = try Page.init(std.testing.allocator, std.testing.io);
+    defer page.deinit();
+    // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+    var result = try page.processHtml(
+        "https://x.com/",
+        200,
+        \\<html><body><script>
+        \\  // crypto.subtle.digest is async — we capture the hex digest by
+        \\  // setting window.__awrData__ from inside the Promise's .then.
+        \\  // The page runtime drains promises before serializing __awrData__,
+        \\  // so this resolves before the test reads result.window_data.
+        \\  crypto.subtle.digest('SHA-256', 'abc').then(buf => {
+        \\    const bytes = new Uint8Array(buf);
+        \\    let hex = '';
+        \\    for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+        \\    window.__awrData__ = { hex: hex, len: bytes.length };
+        \\  });
+        \\</script></body></html>
+        ,
+    );
+    defer result.deinit();
+    try std.testing.expect(result.window_data != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        result.window_data.?,
+        "\"hex\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"",
+    ) != null);
+}
+
+test "T-93 WebCrypto: crypto.subtle.digest accepts Uint8Array input" {
+    var page = try Page.init(std.testing.allocator, std.testing.io);
+    defer page.deinit();
+    var result = try page.processHtml(
+        "https://x.com/",
+        200,
+        // 'hello' as raw bytes — QuickJS-NG doesn't ship TextEncoder
+        // and our polyfill's UTF-8 path is exercised by the previous
+        // test (string input). Here we exercise the Uint8Array path.
+        \\<html><body><script>
+        \\  const data = new Uint8Array([0x68, 0x65, 0x6c, 0x6c, 0x6f]);
+        \\  crypto.subtle.digest('SHA-256', data).then(buf => {
+        \\    const bytes = new Uint8Array(buf);
+        \\    let hex = '';
+        \\    for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+        \\    window.__awrData__ = { hex: hex };
+        \\  });
+        \\</script></body></html>
+        ,
+    );
+    defer result.deinit();
+    // SHA-256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+    try std.testing.expect(result.window_data != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        result.window_data.?,
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    ) != null);
+}
 
 test "Page.processHtml — window.location.href matches url arg" {
     var page = try Page.init(std.testing.allocator, std.testing.io);

@@ -736,6 +736,13 @@ const curated_cases = [_]WptCase{
         .html = "<html><body><form id=\"f\"><input id=\"t\" type=\"text\"><input id=\"cb\" type=\"checkbox\"><select id=\"s\"><option value=\"a\">A</option><option value=\"b\">B</option></select></form></body></html>",
         .script = @embedFile("wpt/form_input_change_semantics.js"),
     },
+    // T-93 / Tier 3 starter slice: WebCrypto getRandomValues +
+    // subtle.digest exposed to JS, backed by BoringSSL.
+    .{
+        .filename = "webcrypto_basics.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/webcrypto_basics.js"),
+    },
 };
 
 fn buildCaseHtml(allocator: std.mem.Allocator, case: WptCase) ![]u8 {
