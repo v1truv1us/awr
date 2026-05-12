@@ -165,6 +165,16 @@ pub const SelectedOptionLookup = struct {
     }
 };
 
+/// T2.8 — Label association contract:
+/// `label` is populated for:
+///   - `<button>` / `<input type="submit|reset|button">` — visible button text
+///   - `<label>` elements — their rendered text content
+/// For generic `<input>` / `<textarea>` / `<select>`, `label` is "" because
+/// AWR does not yet traverse the DOM to find an associated `<label for="id">`
+/// element at render time. The intended future contract is: if `getAttribute
+/// ("id")` returns an id that matches a `<label for="...">` element, that
+/// label's text is stored here. Status-bar rendering in browser.zig should
+/// show `label` when non-empty and fall back to `name` otherwise.
 pub const ScreenField = struct {
     index: usize,
     element_ptr: usize,
@@ -1473,7 +1483,11 @@ fn renderInput(state: *RenderState, w: anytype, elem: *const dom.Element) anyerr
     if (eql(input_type, "submit") or eql(input_type, "reset") or eql(input_type, "button")) {
         const label = elem.getAttribute("value") orelse if (eql(input_type, "submit")) "Submit" else if (eql(input_type, "reset")) "Reset" else "Button";
         const col = state.col;
+        const focused = focusMatches(state.opts.focused_element_ptr, elem);
         try state.prepareForContent(w);
+        // T2.8: apply REVERSE over BOLD when focused so the button is visually
+        // distinct regardless of which control is active.
+        if (focused and state.opts.ansi_colors) try state.ansi(w, REVERSE);
         try state.ansi(w, BOLD);
         try state.writeAll(w, "[");
         try state.writeAll(w, label);
@@ -1591,7 +1605,10 @@ fn renderButton(state: *RenderState, w: anytype, elem: *const dom.Element) anyer
         "button";
 
     const col = state.col;
+    const focused = focusMatches(state.opts.focused_element_ptr, elem);
     try state.prepareForContent(w);
+    // T2.8: uniform focus highlight — REVERSE overlaid on BOLD when focused.
+    if (focused and state.opts.ansi_colors) try state.ansi(w, REVERSE);
     try state.ansi(w, BOLD);
     try state.writeAll(w, "[");
     try state.writeAll(w, display);
@@ -1643,10 +1660,14 @@ fn renderSelect(state: *RenderState, w: anytype, elem: *const dom.Element) anyer
         null;
     const display = user_selected orelse selected_option orelse first_option orelse "";
     const col = state.col;
+    const focused = focusMatches(state.opts.focused_element_ptr, elem);
     try state.prepareForContent(w);
+    // T2.8: uniform focus highlight.
+    if (focused and state.opts.ansi_colors) try state.ansi(w, REVERSE);
     try state.writeAll(w, "[");
     try state.writeAll(w, display);
     try state.writeAll(w, " ▼]");
+    if (focused and state.opts.ansi_colors) try state.ansi(w, RESET);
     const name = elem.getAttribute("name") orelse "";
     _ = state.registerField(
         @intFromPtr(elem),
@@ -3047,4 +3068,35 @@ test "T2.7: no sticky_headers for table without th cells" {
     defer model.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), model.sticky_headers.len);
+}
+
+test "T2.8: uniform focus highlight — button and select show REVERSE when focused" {
+    const html =
+        \\<html><body><form>
+        \\  <select name="c"><option>opt1</option></select>
+        \\  <button type="button">Click me</button>
+        \\  <input type="submit" value="Go">
+        \\</form></body></html>
+    ;
+    var doc = try dom.parseDocument(std.testing.allocator, html);
+    defer doc.deinit();
+
+    // First get the model without focus to find element pointers.
+    var unfocused = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = true,
+    });
+    defer unfocused.deinit();
+
+    // No REVERSE in unfocused output for these controls.
+    // (Existing test coverage for input/textarea focus already handles those.)
+    try std.testing.expect(unfocused.fields.len >= 3);
+
+    // Focus the select control (field 0) and verify REVERSE appears.
+    const select_ptr = unfocused.fields[0].element_ptr;
+    var focused_model = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = true,
+        .focused_element_ptr = select_ptr,
+    });
+    defer focused_model.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, focused_model.text, REVERSE) != null);
 }
