@@ -50,6 +50,12 @@ pub const ImageLookup = struct {
     }
 };
 
+/// T2.4/T2.5: code-block styling mode for `<pre><code>` blocks.
+/// `.none` — no highlighting (plain text, line numbers only).
+/// `.auto` — detect language from `class="language-XYZ"` and highlight.
+/// `.tag`  — always highlight using only the class-hint tag, no fallback.
+pub const CodeStyle = enum { none, auto, tag };
+
 pub const RenderOptions = struct {
     max_width: usize = 80,
     ansi_colors: bool = true,
@@ -106,6 +112,14 @@ pub const RenderOptions = struct {
     /// `<option selected>` attribute. Used by the inline picker so
     /// the chosen option shows immediately after closing the picker.
     selected_option_lookup: ?SelectedOptionLookup = null,
+    /// T2.4: minimum line count before line numbers appear in `<pre><code>`
+    /// blocks. 0 = always show; default 5 matches the spec default.
+    /// Set to `std.math.maxInt(usize)` to disable entirely.
+    code_line_numbers: usize = 5,
+    /// T2.4/T2.5: syntax highlight style. `.none` = line numbers only.
+    /// `.auto` / `.tag` activate highlighting (T2.5). Stored here so
+    /// `awr render --code-style=auto` round-trips through RenderOptions.
+    code_style: CodeStyle = .none,
 };
 
 pub const FieldValueLookup = struct {
@@ -968,10 +982,60 @@ fn renderBlockquote(state: *RenderState, w: anytype, elem: *const dom.Element) a
 
 fn renderPre(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
     try state.ensureNewline(w);
+
+    // T2.4: `<pre><code>` blocks with enough lines get a numbered gutter.
+    line_numbers: {
+        if (state.opts.code_line_numbers == std.math.maxInt(usize)) break :line_numbers;
+        const code = elem.firstChildByTag("code") orelse break :line_numbers;
+        const text = code.textContent(state.allocator) catch break :line_numbers;
+        defer state.allocator.free(text);
+        const line_count = std.mem.count(u8, text, "\n") + 1;
+        if (line_count <= state.opts.code_line_numbers) break :line_numbers;
+        try renderCodeBlockWithLineNumbers(state, w, text, line_count);
+        try state.ensureNewline(w);
+        return;
+    }
+
     state.pre_depth += 1;
     try renderChildren(state, w, elem);
     state.pre_depth -= 1;
     try state.ensureNewline(w);
+}
+
+/// Render a code-block text with line-number gutter (T2.4).
+/// Gutter is dim; code lines follow with no wrapping (pre semantics).
+fn renderCodeBlockWithLineNumbers(
+    state: *RenderState,
+    w: anytype,
+    text: []const u8,
+    line_count: usize,
+) !void {
+
+    // Width of the line-number field (number of digits in total line count).
+    var digit_count: usize = 1;
+    {
+        var n = line_count;
+        while (n >= 10) : (n /= 10) digit_count += 1;
+    }
+
+    var line_num: usize = 1;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        // Dim gutter: right-aligned line number + " │ ".
+        if (state.opts.ansi_colors) try w.writeAll(DIM);
+        var num_buf: [20]u8 = undefined;
+        const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{line_num}) catch "";
+        // Pad to digit_count width.
+        var pad = if (digit_count > num_str.len) digit_count - num_str.len else 0;
+        while (pad > 0) : (pad -= 1) try w.writeByte(' ');
+        try w.writeAll(num_str);
+        try w.writeAll(" \u{2502} "); // │
+        if (state.opts.ansi_colors) try w.writeAll(RESET);
+        try w.writeAll(line);
+        try w.writeByte('\n');
+        state.col = 0;
+        line_num += 1;
+    }
 }
 
 fn renderCode(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
@@ -2465,4 +2529,37 @@ test "render - regular table keeps row separators" {
     try std.testing.expect(std.mem.indexOf(u8, model.text, "---") != null);
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Alice") != null);
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Bob") != null);
+}
+
+test "T2.4: pre/code line numbers appear when block exceeds threshold" {
+    const html =
+        \\<html><body><pre><code>line 1
+        \\line 2
+        \\line 3
+        \\line 4
+        \\line 5
+        \\line 6
+        \\</code></pre></body></html>
+    ;
+    var doc = try dom.parseDocument(std.testing.allocator, html);
+    defer doc.deinit();
+
+    // 6-line block with threshold=5: line numbers should appear.
+    var with_nums = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = false,
+        .max_width = 60,
+        .code_line_numbers = 5,
+    });
+    defer with_nums.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, with_nums.text, "1 \u{2502}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, with_nums.text, "6 \u{2502}") != null);
+
+    // Same block but threshold=10: no line numbers.
+    var without_nums = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = false,
+        .max_width = 60,
+        .code_line_numbers = 10,
+    });
+    defer without_nums.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, without_nums.text, "\u{2502}") == null);
 }

@@ -122,6 +122,10 @@ pub const BrowserSession = struct {
     /// per-page pipeline construction in installLoadedPage so the
     /// renderer's image_lookup hook gets real bytes to emit.
     image_protocol: image_protocol.Protocol = .none,
+    /// T2.4: mirrors RenderOptions.code_line_numbers. Set from RunOptions.
+    code_line_numbers: usize = 5,
+    /// T2.4/T2.5: mirrors RenderOptions.code_style. Set from RunOptions.
+    code_style: page_mod.CodeStyle = .none,
     field_editing: bool,
     scroll_row: usize,
     search_query: ?[]u8,
@@ -1282,6 +1286,8 @@ pub const BrowserSession = struct {
             // First render of a fresh page — no focus yet (Tab will set
             // it, then the next rerender picks it up).
             .focused_element_ptr = null,
+            .code_line_numbers = self.code_line_numbers,
+            .code_style = self.code_style,
         });
         errdefer rendered.deinit();
 
@@ -1495,6 +1501,8 @@ pub const BrowserSession = struct {
             .image_protocol = self.image_protocol,
             .image_lookup = image_lookup_opt,
             .focused_element_ptr = self.focusedElementPtrForRender(),
+            .code_line_numbers = self.code_line_numbers,
+            .code_style = self.code_style,
         });
         errdefer rendered.deinit();
 
@@ -1527,6 +1535,12 @@ pub const RunOptions = struct {
     /// per `src/image/pipeline.zig`. Resolved in main.zig before the
     /// runWith call so we don't probe inside the TUI loop.
     image_protocol: image_protocol.Protocol = .none,
+    /// T2.4: minimum line count for code-block line numbers. Mirrors
+    /// RenderOptions.code_line_numbers; threaded through the run loop
+    /// so `awr tui --code-line-numbers=N` takes effect.
+    code_line_numbers: usize = 5,
+    /// T2.4/T2.5: code-block style mode. Mirrors RenderOptions.code_style.
+    code_style: page_mod.CodeStyle = .none,
 };
 
 pub fn runWith(
@@ -1542,6 +1556,8 @@ pub fn runWith(
     defer session.deinit();
     session.page.disable_scripts = opts.disable_scripts;
     session.image_protocol = opts.image_protocol;
+    session.code_line_numbers = opts.code_line_numbers;
+    session.code_style = opts.code_style;
     const initial_size = terminal.size();
     try session.setViewportSize(initial_size.cols, initial_size.rows);
     // T-75: when launched without a URL (`awr tui` with no args and no

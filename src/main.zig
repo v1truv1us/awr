@@ -770,6 +770,14 @@ fn stdoutWrite(io: std.Io, bytes: []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(io, bytes);
 }
 
+/// T2.4: parse --code-style=auto|none|tag from CLI.
+fn parseCodeStyle(s: []const u8) ?page_mod.CodeStyle {
+    if (std.mem.eql(u8, s, "none")) return .none;
+    if (std.mem.eql(u8, s, "auto")) return .auto;
+    if (std.mem.eql(u8, s, "tag")) return .tag;
+    return null;
+}
+
 fn describeLoadError(err: anyerror) []const u8 {
     return switch (err) {
         error.InvalidUrl => "invalid URL",
@@ -961,6 +969,8 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         // mirroring `awr render`. Default `.auto` probes the terminal
         // and lands on the right protocol; `.none` skips entirely.
         var image_mode: image_protocol.Mode = .auto;
+        var tui_code_line_numbers: usize = 5;
+        var tui_code_style: page_mod.CodeStyle = .none;
         var ai: usize = 2;
         while (ai < args.len) : (ai += 1) {
             const arg = args[ai];
@@ -976,6 +986,16 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
                     std.process.fatal("{s}: --images expected auto|kitty|iterm|sixel|braille|none, got '{s}'", .{ subcmd, args[ai + 1] });
                 };
                 ai += 1;
+            } else if (std.mem.startsWith(u8, arg, "--code-line-numbers=")) {
+                const val = arg["--code-line-numbers=".len..];
+                tui_code_line_numbers = std.fmt.parseInt(usize, val, 10) catch {
+                    std.process.fatal("{s}: --code-line-numbers expects an integer, got '{s}'", .{ subcmd, val });
+                };
+            } else if (std.mem.startsWith(u8, arg, "--code-style=")) {
+                const val = arg["--code-style=".len..];
+                tui_code_style = parseCodeStyle(val) orelse {
+                    std.process.fatal("{s}: --code-style expects auto|none|tag, got '{s}'", .{ subcmd, val });
+                };
             } else if (std.mem.startsWith(u8, arg, "--")) {
                 try stdoutWrite(io, subcmd);
                 try stdoutWrite(io, ": unknown flag: ");
@@ -1012,6 +1032,8 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         try browser_mod.runWith(alloc, io, url_arg, .{
             .disable_scripts = disable_scripts,
             .image_protocol = resolved_protocol,
+            .code_line_numbers = tui_code_line_numbers,
+            .code_style = tui_code_style,
         });
         return;
     }
@@ -1034,6 +1056,8 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         // gives users an immediate error on typos.
         var image_mode: image_protocol.Mode = .auto;
         var disable_scripts = false;
+        var code_line_numbers: usize = 5;
+        var code_style: page_mod.CodeStyle = .none;
         var i: usize = 3;
         while (i < args.len) : (i += 1) {
             if (std.mem.eql(u8, args[i], "--width") and i + 1 < args.len) {
@@ -1053,6 +1077,16 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
                 i += 1;
             } else if (std.mem.eql(u8, args[i], "--no-js") or std.mem.eql(u8, args[i], "--no-script")) {
                 disable_scripts = true;
+            } else if (std.mem.startsWith(u8, args[i], "--code-line-numbers=")) {
+                const val = args[i]["--code-line-numbers=".len..];
+                code_line_numbers = std.fmt.parseInt(usize, val, 10) catch {
+                    std.process.fatal("render: --code-line-numbers expects an integer, got '{s}'", .{val});
+                };
+            } else if (std.mem.startsWith(u8, args[i], "--code-style=")) {
+                const val = args[i]["--code-style=".len..];
+                code_style = parseCodeStyle(val) orelse {
+                    std.process.fatal("render: --code-style expects auto|none|tag, got '{s}'", .{val});
+                };
             } else {
                 std.process.fatal("render: unknown arg '{s}'", .{args[i]});
             }
@@ -1119,6 +1153,8 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
             .show_images = true,
             .image_protocol = resolved_protocol,
             .image_lookup = image_lookup_opt,
+            .code_line_numbers = code_line_numbers,
+            .code_style = code_style,
         });
         defer screen.deinit();
         try stdoutWrite(io, screen.text);

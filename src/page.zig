@@ -93,6 +93,7 @@ pub const IsCheckedLookup = render.IsCheckedLookup;
 pub const SelectedOptionLookup = render.SelectedOptionLookup;
 pub const ImageLookup = render.ImageLookup;
 pub const RenderOptions = render.RenderOptions;
+pub const CodeStyle = render.CodeStyle; // T2.4/T2.5
 pub const Element = dom.Element;
 
 // ── Parallel external-script prefetch ─────────────────────────────────────
