@@ -51,7 +51,12 @@ Tests and Test262 cases.
 | `spec/subspecs/agent-browser.md` | Tier 0 agent-browser scope (closed): POST in fetch+XHR, form `method=post`, cookie persistence |
 | `spec/subspecs/rendering.md` | Tier 0 rendering scope (closed): terminal render + image protocols |
 | `spec/subspecs/daemon-mode.md` | Tier 0 daemon-mode scope (active → closing): long-lived `awrd` + JSON-RPC IPC for amortized startup |
-| `spec/subspecs/browser-tui.md` | **Tier 1 active sub-spec**: interactive TUI parity (form fields, focus, keyboard input, history, URL bar, cookie inspector, browser-cookie import) |
+| `spec/subspecs/browser-tui.md` | **Tier 1 closed sub-spec**: interactive TUI parity (form fields, focus, keyboard input, history, URL bar, cookie inspector, browser-cookie import) |
+| `spec/subspecs/render-polish.md` | **Tier 2 closed sub-spec**: render + UX polish (bookmarks, URL-bar autocomplete, form/table/code/diff/image polish, cookie inspector enrichment) |
+| `spec/subspecs/browser-history.md` | **Tier 3 active sub-spec**: History API (`pushState`, `replaceState`, `popstate`) |
+| `spec/subspecs/browser-storage.md` | **Tier 3 active sub-spec**: Web Storage (`localStorage` persisted, `sessionStorage` in-memory) |
+| `spec/subspecs/browser-realtime.md` | **Tier 3 active sub-spec**: real-time connections (WebSocket + EventSource/SSE) |
+| `spec/subspecs/browser-events.md` | **Tier 3 active sub-spec**: browser events (synthetic input, `DOMContentLoaded`/`load`, `requestAnimationFrame`, `matchMedia`) |
 | `docs/adr/0001-spec-governance.md` | Historical record for spec/documentation governance decisions |
 
 ### Deferred, documented, not active now
@@ -61,10 +66,9 @@ Tests and Test262 cases.
 | `spec/subspecs/mcp-stdio.md` | Deferred native MCP stdio server track (will be a thin client of daemon-mode per its B1 design doc) |
 | `spec/Fingerprint-Plan.md` | Future-only fingerprinting roadmap |
 
-Tiers 2–5 (rendering polish, dynamic-site APIs, layout engine, full SPA
-parity) are described in `spec/subspecs/browser-roadmap.md §3` but do
-not yet have dedicated sub-specs; they're created when promoted to
-ACTIVE.
+Tiers 4–5 (layout engine, full SPA parity) are described in
+`spec/subspecs/browser-roadmap.md §3` but do not yet have dedicated
+sub-specs; they're created when promoted to ACTIVE.
 
 ### Background / historical only
 

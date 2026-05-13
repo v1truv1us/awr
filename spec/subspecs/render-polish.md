@@ -255,3 +255,15 @@ These are deferred to slice-plan time:
 
 If the answers to any of these would change the contract above,
 amend this sub-spec in the same change as the slice plan.
+
+---
+
+## 9. Closure record
+
+| Field | Value |
+|-------|-------|
+| Status | CLOSED |
+| Date | 2026-05-13 |
+| Final commit | b6dd220 (T-100 — T2.9 image pipeline polish) |
+| Gates satisfied | §4.1 Tier 1 gates green ✓ / §4.2 test-image ✓ / §4.3 smoke bookmark ✓ / §4.4 help docs ✓ |
+| Sign-off | AWR Dev |

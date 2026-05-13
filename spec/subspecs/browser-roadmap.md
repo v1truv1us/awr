@@ -169,7 +169,7 @@ state across same-origin navigations.
 
 ---
 
-### Tier 2 — Render + UX polish (ACTIVE 2026-05-11)
+### Tier 2 — Render + UX polish (CLOSED 2026-05-13)
 
 **Scope sentence**: The terminal-rendered page is good enough that
 a human can do daily reading and form work without missing
@@ -193,8 +193,8 @@ visual signals.
 - cookie inspector enriched (per-cookie expiry, scope, secure
   flag visible)
 
-**Sub-spec(s)**: `spec/subspecs/render-polish.md` (ACTIVE since
-2026-05-11; owns slice-level execution detail).
+**Sub-spec(s)**: `spec/subspecs/render-polish.md` (CLOSED
+2026-05-13; §9 closure record; final commit `b6dd220`).
 
 **WPT corpus area**: minimal new coverage — a few `<pre>` /
 Content-Type cases per `render-polish.md §4`.
@@ -205,7 +205,7 @@ inspector enrichment, each with a code-side test + smoke flow).
 
 ---
 
-### Tier 3 — Lightly dynamic site support (DEFERRED)
+### Tier 3 — Lightly dynamic site support (ACTIVE 2026-05-13)
 
 **Scope sentence**: Sites that aren't full SPAs but use modern
 JavaScript for tabs, comments, live updates, or auth flows
@@ -237,9 +237,12 @@ work end-to-end.
 - `MediaQueryList` (`matchMedia`) — basic predicate evaluation
   against terminal dimensions.
 
-**Sub-spec(s)**: TBD — likely splits into `browser-history.md`,
-`browser-storage.md`, `browser-realtime.md` (WS+SSE), and
-`browser-events.md`.
+**Sub-spec(s)**: `spec/subspecs/browser-history.md` (History API),
+`spec/subspecs/browser-storage.md` (localStorage + sessionStorage),
+`spec/subspecs/browser-realtime.md` (WebSocket + EventSource/SSE),
+`spec/subspecs/browser-events.md` (synthetic input events,
+requestAnimationFrame, matchMedia). All promoted to ACTIVE
+2026-05-13.
 
 **WPT corpus area**: history, storage, websocket, mutation
 observer, event constructors.

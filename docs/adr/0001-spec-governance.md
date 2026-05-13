@@ -424,6 +424,45 @@ documentation governance.
   (new), `spec/subspecs/wpt-conformance.md` (status banner
   updated in the T-87 change), this ADR.
 
+### 2026-05-13 — Tier 2 CLOSED; Tier 3 promoted to ACTIVE
+
+- Date: 2026-05-13
+- Change: `spec/subspecs/render-polish.md` status → CLOSED (§9
+  closure record appended). Final commit `b6dd220` (T-100 — T2.9
+  image pipeline polish). All §4 closure gates green (`zig build
+  test`, `test-wpt`, `test-integration`, `zig build smoke`).
+  `spec/subspecs/browser-roadmap.md` Tier 2 line flips to
+  `(CLOSED 2026-05-13)`; Tier 3 line flips from `(DEFERRED)` to
+  `(ACTIVE 2026-05-13)` and gains pointers to four new sub-specs.
+  **New files** — four Tier 3 execution-authority stubs:
+  `spec/subspecs/browser-history.md` (History API —
+  `pushState`/`replaceState`/`popstate`),
+  `spec/subspecs/browser-storage.md` (`localStorage` +
+  `sessionStorage`),
+  `spec/subspecs/browser-realtime.md` (WebSocket + EventSource/SSE),
+  `spec/subspecs/browser-events.md` (synthetic input events,
+  `requestAnimationFrame`, `matchMedia`).
+  `spec/MVP.md §2` canonical-now table updated with the four new
+  sub-specs (status ACTIVE).
+- Reason: All nine Tier 2 slices (T2.1–T2.9) shipped. Tier 3
+  (lightly dynamic site support) is the logical next capability
+  gap — Reddit, Stack Overflow, and Discourse are unreachable
+  without the History API and `localStorage`. No strategic fork
+  point (unlike Tier 4's layout engine decision), so the
+  promotion lands as a normal amendment.
+  Tier 3 deliberately stays below full SPA support (no
+  `MutationObserver`-driven re-render, no virtual DOM diffing);
+  those remain Tier 4/5.
+- Documents updated: `spec/subspecs/render-polish.md` (§9 closure
+  record), `spec/subspecs/browser-roadmap.md` (Tier 2 → CLOSED,
+  Tier 3 → ACTIVE with sub-spec pointers),
+  `spec/subspecs/browser-history.md` (new),
+  `spec/subspecs/browser-storage.md` (new),
+  `spec/subspecs/browser-realtime.md` (new),
+  `spec/subspecs/browser-events.md` (new),
+  `spec/MVP.md §2` (four new sub-specs added to canonical-now
+  table), this ADR.
+
 ### Template for future amendments
 
 - Date:
