@@ -254,9 +254,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/js/storage.zig"),
             .target = target,
             .optimize = optimize,
-            .link_libc = true, // std.c.getpid for tmp-file naming
+            .link_libc = true, // std.c.getpid + std.c.fchmod
         });
-        storage_mod.addImport("storage_path", storage_path_mod);
+        // No named imports: storage.zig is intentionally self-contained
+        // so it works as a transitive @import from any module that
+        // pulls in src/dom/bridge.zig (page_mod, exe_page_mod, the WPT
+        // runner, the corpus runner, etc.) without addImport plumbing.
 
         const storage_test = b.addTest(.{
             .name = "storage",

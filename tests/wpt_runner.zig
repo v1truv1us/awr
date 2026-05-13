@@ -330,6 +330,11 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/storage_localStorage.js"),
     },
     .{
+        .filename = "storage_quota_exceeded.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/storage_quota_exceeded.js"),
+    },
+    .{
         .filename = "session_storage_distinct.js",
         .html = "<html><body></body></html>",
         .script = @embedFile("wpt/session_storage_distinct.js"),

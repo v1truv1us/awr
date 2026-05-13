@@ -1,6 +1,6 @@
 # Web Storage — Tier 3 sub-spec
 
-> **Status:** ACTIVE (promoted from DEFERRED to ACTIVE 2026-05-13)
+> **Status:** CLOSED 2026-05-13 (initial promotion + closure same day)
 > `spec/MVP.md` is the canonical umbrella spec.
 > `spec/subspecs/browser-roadmap.md` is the cross-tier ladder
 > authority; this file owns Tier 3 Web Storage execution detail.
@@ -134,4 +134,50 @@ Indicative slice (defer detailed plan to implementation time):
 
 ## 8. Closure record
 
-_Not yet closed._
+| Field | Value |
+|-------|-------|
+| Status | CLOSED |
+| Date | 2026-05-13 |
+| Final commit | (this commit — T3.A localStorage + sessionStorage wire-up) |
+| Gates satisfied | §4.1 prior-tier gates green ✓ / §4.2 round-trip test ✓ / §4.3 sessionStorage lifetime ✓ / §4.4 QuotaExceededError test ✓ / §4.5 WPT corpus extended (storage_localStorage.js + storage_quota_exceeded.js) ✓ |
+| Sign-off | AWR Dev |
+
+**Delivered surface:**
+
+- `Storage` interface (`getItem` / `setItem` / `removeItem` / `clear` /
+  `key` / `length`) for both `localStorage` and `sessionStorage`.
+- localStorage: per-origin disk persistence at
+  `$XDG_DATA_HOME/awr/storage/<encoded-origin>.json`
+  (configurable via `$AWR_STORAGE_DIR`), mode 0600, atomic
+  write-tmp + rename. Insertion order preserved via
+  `StringArrayHashMapUnmanaged`.
+- sessionStorage: in-memory per Page (per JS context), cleared
+  on Page deinit.
+- 5 MB per-storage quota enforced with atomic-on-failure semantics:
+  the JS-thrown `QuotaExceededError` leaves the prior entry intact.
+- Cross-origin isolation: foo.com and bar.com get separate JSON
+  files; in-memory state is reset whenever `setStorageOrigin` sees
+  a different origin.
+
+**Known scope NOT covered (deferred):**
+
+- `storage` event (cross-tab broadcasts) — §3 explicit non-goal.
+  Requires multi-process state sharing AWR doesn't have yet.
+- Daemon scoping for `initShared` — `storage_dir` stays null under
+  daemon mode pending the Tier 3 daemon-scope work alongside
+  cross-process URL state.
+
+**Test surface:**
+
+- `src/js/storage.zig` — 9 unit tests (round-trip, cross-origin,
+  quota atomicity, JSON-escape round-trip, etc.).
+- `src/dom/bridge.zig` — 5 bridge tests (JS-level round-trip,
+  length/key/removeItem/clear, sessionStorage independence,
+  QuotaExceededError throw, cross-process persistence via
+  `setStorageOrigin`).
+- `src/util/storage_path.zig` — 1 test for `$AWR_STORAGE_DIR`
+  override (skipped on platforms without `std.c.setenv`).
+- `tests/wpt/storage_localStorage.js` — pre-existing WPT coverage
+  of the API + insertion-order semantics (passing as of this slice).
+- `tests/wpt/storage_quota_exceeded.js` — new WPT case asserting
+  `QuotaExceededError` name + atomic preservation.

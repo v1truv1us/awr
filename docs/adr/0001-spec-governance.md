@@ -463,6 +463,35 @@ documentation governance.
   `spec/MVP.md §2` (four new sub-specs added to canonical-now
   table), this ADR.
 
+### 2026-05-13 — T3.A Web Storage CLOSED
+
+- Date: 2026-05-13
+- Change: `spec/subspecs/browser-storage.md` status → CLOSED
+  (§8 closure record appended). Delivered surface: `Storage`
+  interface for both `localStorage` and `sessionStorage`, per-origin
+  disk persistence under `$XDG_DATA_HOME/awr/storage/`, atomic
+  write-tmp + rename, 5 MB quota with atomic-on-failure
+  `QuotaExceededError`, insertion-order preservation via
+  `StringArrayHashMapUnmanaged`. New code: `src/js/storage.zig`,
+  `src/util/storage_path.zig`, 12 native callbacks +
+  `setStorageOrigin` in `src/dom/bridge.zig`,
+  Page-init wiring in `src/page.zig`. New WPT case:
+  `tests/wpt/storage_quota_exceeded.js`. Tier 3 banner stays
+  ACTIVE — three other sub-specs (browser-history, browser-realtime,
+  browser-events) still open.
+- Reason: localStorage persistence is the single biggest gap blocking
+  modern logins. Server-rendered logins (HN-style with `Set-Cookie`)
+  already work via the cookie jar; SPAs (Twitter, Slack, Discord,
+  anything Auth0/Firebase) store JWTs in `localStorage`, which AWR
+  was previously stubbing in-memory only — tokens vanished on every
+  process restart. T3.A landing first (rather than History API or
+  WebSocket) reflects that login persistence is the highest-impact
+  win.
+- Documents updated: `spec/subspecs/browser-storage.md` (§8 closure
+  record), `spec/subspecs/browser-roadmap.md` (Tier 3 sub-spec list
+  notes browser-storage as CLOSED), `spec/MVP.md` (canonical-now
+  table flipped browser-storage.md row to closed), this ADR.
+
 ### Template for future amendments
 
 - Date:

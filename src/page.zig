@@ -22,6 +22,7 @@ const render = @import("render.zig");
 const extract = @import("extract.zig");
 const url_mod = @import("net/url.zig");
 const cookie_path = @import("util/cookie_path.zig");
+const storage_path = @import("util/storage_path.zig");
 const cookie_mod = @import("net/cookie.zig");
 const tls_fail_cache_path = @import("util/tls_fail_cache_path.zig");
 const time_util = @import("util/time.zig");
@@ -360,6 +361,12 @@ pub const Page = struct {
     cookie_jar_path: ?[]u8 = null,
     /// Owned tls-fail-cache path. Borrowed by Client, freed by Page.
     tls_fail_cache_path: ?[]u8 = null,
+    /// Owned base directory for per-origin localStorage JSON files
+    /// (Tier 3 — T3.A). Resolved once in `init` via
+    /// `storage_path.resolveStorageDir`; freed in `deinit`. Null = no
+    /// persistence (storage operates in-memory). Bridge consults this
+    /// via `bridge.setStorageOrigin` from `setLocationFromUrl`.
+    storage_dir: ?[]u8 = null,
     /// Optional structured-metrics sink. When non-null, the
     /// per-phase TimingProbe writes sub-phase ms values into it
     /// (in addition to its existing AWR_TIMING-gated stderr output).
@@ -424,6 +431,14 @@ pub const Page = struct {
         };
         errdefer if (tls_cache_path) |p| allocator.free(p);
 
+        // Tier 3 — T3.A. Resolve localStorage directory once. Failure
+        // is non-fatal; storage falls back to in-memory only.
+        const ls_dir = storage_path.resolveStorageDir(allocator, io) catch |err| blk: {
+            std.log.warn("storage dir resolution failed: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        errdefer if (ls_dir) |p| allocator.free(p);
+
         const owned_client = try allocator.create(client.Client);
         errdefer allocator.destroy(owned_client);
         owned_client.* = client.Client.init(allocator, io, .{
@@ -453,6 +468,7 @@ pub const Page = struct {
             .current_doc = null,
             .cookie_jar_path = jar_path,
             .tls_fail_cache_path = tls_cache_path,
+            .storage_dir = ls_dir,
         };
         page.attachHosts();
         return page;
@@ -508,6 +524,15 @@ pub const Page = struct {
             .tls_fail_cache_path = tls_cache_path,
         });
 
+        // Tier 3 — T3.A. Resolve localStorage directory. Daemon-style
+        // construction also wants persistence; the directory is shared
+        // across Pages (per-origin files inside it).
+        const ls_dir = storage_path.resolveStorageDir(allocator, io) catch |err| blk: {
+            std.log.warn("storage dir resolution failed: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        errdefer if (ls_dir) |p| allocator.free(p);
+
         var page = Page{
             .allocator = allocator,
             .io = io,
@@ -522,6 +547,7 @@ pub const Page = struct {
             // try to free or save them.
             .cookie_jar_path = null,
             .tls_fail_cache_path = tls_cache_path,
+            .storage_dir = ls_dir,
         };
         page.attachHosts();
         return page;
@@ -575,6 +601,11 @@ pub const Page = struct {
             // No paths owned — daemon manages all persistence.
             .cookie_jar_path = null,
             .tls_fail_cache_path = null,
+            // Storage dir stays null: under initShared (daemon mode)
+            // localStorage falls back to in-memory for now. The daemon
+            // will plumb its own resolved dir through a separate path
+            // when Tier 3 storage daemon scoping is wired.
+            .storage_dir = null,
         };
         page.attachHosts();
         return page;
@@ -598,6 +629,7 @@ pub const Page = struct {
         self.allocator.free(self.base_url);
         if (self.cookie_jar_path) |p| self.allocator.free(p);
         if (self.tls_fail_cache_path) |p| self.allocator.free(p);
+        if (self.storage_dir) |p| self.allocator.free(p);
     }
 
     /// Wire the Page's event loop and fetch adapter into the JsEngine so
@@ -1498,6 +1530,15 @@ pub const Page = struct {
         // and would produce a false positive for this legitimate internal call).
         const js_inject = engine.JsEngine.eval;
         js_inject(&self.js, w.buffered(), "location-init") catch {};
+
+        // Tier 3 — T3.A. Wire localStorage persistence to this origin.
+        // Best-effort: failure means in-memory only (storage stub
+        // behaviour, same as before this slice). Skip empty / non-http
+        // origins (file:// pages share an in-memory namespace per spec
+        // — we treat them as "no persistence" for now).
+        if (origin.len > 0 and (std.mem.startsWith(u8, origin, "http://") or std.mem.startsWith(u8, origin, "https://"))) {
+            bridge.setStorageOrigin(&self.js, origin, self.storage_dir, self.io) catch {};
+        }
     }
 
     fn setViewportGlobals(self: *Page) void {

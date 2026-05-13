@@ -20,7 +20,6 @@
 /// pointer; the `BRIDGE_POLYFILL` JS shim calls those natives instead
 /// of maintaining its own in-memory map.
 const std = @import("std");
-const storage_path = @import("storage_path");
 
 /// Per-spec quota. Browsers vary (Chrome: ~10 MB, Firefox: ~10 MB,
 /// Safari: ~5 MB) — AWR picks the conservative end so apps that
@@ -35,11 +34,15 @@ pub const StorageError = error{
 
 /// Common Storage interface state. Used by both Local and Session
 /// storage; the persistence + origin layer is added by `LocalStorage`.
+///
+/// Backing: `StringArrayHashMapUnmanaged` preserves insertion order so
+/// that `key(n)` returns entries in the order they were added — Web
+/// Storage spec calls this the "ordered key list" and WPT enforces it.
 const StorageMap = struct {
     allocator: std.mem.Allocator,
-    /// All keys + values are heap-owned ([]u8). HashMap entries keep the
-    /// key slice alive; values are independently allocated.
-    data: std.StringHashMapUnmanaged([]u8),
+    /// All keys + values are heap-owned ([]u8). Entry keys live in the
+    /// map's internal storage; values are independently allocated.
+    data: std.StringArrayHashMapUnmanaged([]u8),
     /// Sum of `key.len + value.len` across all entries. Used for quota.
     byte_count: usize,
 
@@ -81,7 +84,9 @@ const StorageMap = struct {
         errdefer self.allocator.free(value_copy);
 
         if (old_value) |old| {
-            // Replace value in place; key stays the same allocation.
+            // Replace value in place; key stays the same allocation and
+            // its insertion-order index is preserved (ArrayHashMap put
+            // for an existing key updates the value without reordering).
             self.allocator.free(old);
             self.data.put(self.allocator, key, value_copy) catch unreachable; // key already present
             self.byte_count = self.byte_count - old_size + new_size;
@@ -96,9 +101,11 @@ const StorageMap = struct {
         return true; // new key
     }
 
-    /// Returns true when an entry was removed.
+    /// Returns true when an entry was removed. Uses `orderedRemove` so
+    /// later keys keep their original relative order — matches what
+    /// Chrome/Firefox do, and Web Storage WPT assumes.
     fn removeItem(self: *StorageMap, key: []const u8) bool {
-        if (self.data.fetchRemove(key)) |kv| {
+        if (self.data.fetchOrderedRemove(key)) |kv| {
             self.byte_count -= kv.key.len + kv.value.len;
             self.allocator.free(kv.key);
             self.allocator.free(kv.value);
@@ -119,16 +126,12 @@ const StorageMap = struct {
         return true;
     }
 
-    /// Returns the key at `index` in HashMap iteration order, or null
-    /// when out of range. Order is implementation-defined — Web Storage
-    /// spec permits any deterministic-within-snapshot order.
+    /// Returns the key at `index` in insertion order, or null when out
+    /// of range. ArrayHashMap exposes `keys()` as a stable slice.
     fn keyAt(self: *const StorageMap, index: u32) ?[]const u8 {
-        var it = self.data.keyIterator();
-        var i: u32 = 0;
-        while (it.next()) |k| : (i += 1) {
-            if (i == index) return k.*;
-        }
-        return null;
+        const keys = self.data.keys();
+        if (index >= keys.len) return null;
+        return keys[index];
     }
 
     fn length(self: *const StorageMap) u32 {
@@ -283,7 +286,7 @@ pub const LocalStorage = struct {
         const a = self.map.allocator;
         const origin = self.origin orelse return null;
         const dir = self.storage_dir orelse return null;
-        const encoded = storage_path.encodeOrigin(a, origin) catch return null;
+        const encoded = encodeOrigin(a, origin) catch return null;
         defer a.free(encoded);
         var name_buf: [512]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "{s}.json", .{encoded}) catch return null;
@@ -430,6 +433,35 @@ pub const LocalStorage = struct {
         return self.map.length();
     }
 };
+
+/// Encode an origin (e.g. `https://example.com:8080`) into a filesystem-safe
+/// filename stem. Inlined here so storage.zig has no named-module imports
+/// (cheaper to wire into bridge.zig + page.zig + 5 page-mod variants).
+///
+///   `https://example.com`        → `https__example.com`
+///   `http://localhost:3000`      → `http__localhost_3000`
+fn encodeOrigin(allocator: std.mem.Allocator, origin: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, origin.len + 8);
+
+    var i: usize = 0;
+    while (i < origin.len) {
+        if (i + 3 <= origin.len and std.mem.eql(u8, origin[i .. i + 3], "://")) {
+            try out.appendSlice(allocator, "__");
+            i += 3;
+            continue;
+        }
+        const c = origin[i];
+        switch (c) {
+            ':', '/', '\\' => try out.append(allocator, '_'),
+            0...0x1f, 0x7f => return error.InvalidOrigin,
+            else => try out.append(allocator, c),
+        }
+        i += 1;
+    }
+    return out.toOwnedSlice(allocator);
+}
 
 fn writeJsonString(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
     try buf.append(allocator, '"');

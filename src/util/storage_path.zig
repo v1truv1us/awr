@@ -7,8 +7,9 @@
 ///   3. `$HOME/.local/share/awr/storage` — XDG default
 ///
 /// localStorage is per-origin auth state and may contain tokens, so the
-/// directory is created with `0700` and individual files with `0600`
-/// (see `LocalStorage.flush` in src/js/storage.zig).
+/// directory is created with the process umask default and individual
+/// files chmod'd to `0600` after creation (see `LocalStorage.flush` in
+/// src/js/storage.zig).
 ///
 /// Mirrors `bookmark_path.zig`'s shape. Tier 3 — T3.A Web Storage.
 const std = @import("std");
@@ -36,43 +37,6 @@ pub fn resolveStorageDir(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
     return null;
 }
 
-/// Encode an origin (e.g. `https://example.com:8080`) into a filesystem-safe
-/// filename stem. Origins are produced by `Url.parse` so they're already
-/// well-formed; we just replace separators that confuse the filesystem.
-///
-///   `https://example.com`        → `https__example.com`
-///   `http://localhost:3000`      → `http__localhost_3000`
-///   `https://例え.jp`            → `https__例え.jp` (UTF-8 passes through)
-///
-/// Caller owns the returned slice.
-pub fn encodeOrigin(allocator: std.mem.Allocator, origin: []const u8) ![]u8 {
-    // Conservative size: input length + a few chars for `://` → `__`.
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.ensureTotalCapacity(allocator, origin.len + 8);
-
-    var i: usize = 0;
-    while (i < origin.len) {
-        if (i + 3 <= origin.len and std.mem.eql(u8, origin[i .. i + 3], "://")) {
-            try out.appendSlice(allocator, "__");
-            i += 3;
-            continue;
-        }
-        const c = origin[i];
-        switch (c) {
-            // Replace anything that breaks paths or is too clever on filesystems.
-            // `:` is a path separator on Windows; `/` and `\` on any OS.
-            ':', '/', '\\' => try out.append(allocator, '_'),
-            // Reject control chars / nulls outright — Url.parse should already
-            // exclude these but be defensive.
-            0...0x1f, 0x7f => return error.InvalidOrigin,
-            else => try out.append(allocator, c),
-        }
-        i += 1;
-    }
-    return out.toOwnedSlice(allocator);
-}
-
 fn readEnv(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
     if (!@hasDecl(std.c, "getenv")) return null;
     var name_buf: [64]u8 = undefined;
@@ -92,30 +56,20 @@ fn ensureDir(io: std.Io, path: []const u8) !void {
     };
 }
 
-test "encodeOrigin — https default port" {
+test "resolveStorageDir — honors AWR_STORAGE_DIR override" {
+    if (!@hasDecl(std.c, "setenv")) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const out = try encodeOrigin(a, "https://example.com");
-    defer a.free(out);
-    try std.testing.expectEqualStrings("https__example.com", out);
-}
 
-test "encodeOrigin — http with explicit port" {
-    const a = std.testing.allocator;
-    const out = try encodeOrigin(a, "http://localhost:3000");
-    defer a.free(out);
-    try std.testing.expectEqualStrings("http__localhost_3000", out);
-}
+    // tmpDir gives a sub-path under .zig-cache/tmp/<sub>.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
+    defer a.free(dir_path);
 
-test "encodeOrigin — rejects control chars" {
-    const a = std.testing.allocator;
-    try std.testing.expectError(error.InvalidOrigin, encodeOrigin(a, "https://example.com\x00"));
-}
+    _ = std.c.setenv("AWR_STORAGE_DIR", dir_path.ptr, 1);
+    defer _ = std.c.unsetenv("AWR_STORAGE_DIR");
 
-test "encodeOrigin — IPv6-style colons get replaced (filesystem-safe)" {
-    const a = std.testing.allocator;
-    const out = try encodeOrigin(a, "http://[::1]:8080");
-    defer a.free(out);
-    // Each `:` becomes `_` so the result is reversible by inspection only,
-    // not algorithmically. Good enough for a per-origin cache filename.
-    try std.testing.expectEqualStrings("http__[__1]_8080", out);
+    const resolved = (try resolveStorageDir(a, std.testing.io)).?;
+    defer a.free(resolved);
+    try std.testing.expectEqualStrings(dir_path[0..dir_path.len], resolved);
 }
