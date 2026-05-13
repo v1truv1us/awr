@@ -56,7 +56,7 @@ Tests and Test262 cases.
 | `spec/subspecs/browser-history.md` | **Tier 3 closed sub-spec**: History API (`pushState`, `replaceState`, `popstate`, `back`/`forward`/`go`) |
 | `spec/subspecs/browser-storage.md` | **Tier 3 closed sub-spec**: Web Storage (`localStorage` persisted, `sessionStorage` in-memory) |
 | `spec/subspecs/browser-realtime.md` | **Tier 3 active sub-spec**: real-time connections (WebSocket + EventSource/SSE) |
-| `spec/subspecs/browser-events.md` | **Tier 3 active sub-spec**: browser events (synthetic input, `DOMContentLoaded`/`load`, `requestAnimationFrame`, `matchMedia`) |
+| `spec/subspecs/browser-events.md` | **Tier 3 closed sub-spec**: browser events (synthetic input, `DOMContentLoaded`/`load`, `requestAnimationFrame`, `matchMedia` evaluation) |
 | `docs/adr/0001-spec-governance.md` | Historical record for spec/documentation governance decisions |
 
 ### Deferred, documented, not active now

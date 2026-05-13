@@ -523,6 +523,33 @@ documentation governance.
   `spec/subspecs/wpt-conformance.md` (108 → 109 WPT cases, History
   row gains the new case), this ADR.
 
+### 2026-05-13 — T3.C Browser events CLOSED
+
+- Date: 2026-05-13
+- Change: `spec/subspecs/browser-events.md` status → CLOSED
+  (§8 closure record appended). Audit + close: most of the §2
+  surface was already implemented in earlier tiers (synthetic
+  input events, `preventDefault`, `DOMContentLoaded`/`load`,
+  `requestAnimationFrame` setTimeout-shimmed). The one material
+  gap was matchMedia, which returned `matches: false` for
+  every query. T3.C upgrades the matchMedia polyfill in
+  `src/js/engine.zig` to evaluate `(prefers-color-scheme: dark|light)`
+  (terminal default = dark) and `(min|max)-(width|height): Npx`
+  against the JS viewport (1 col ≈ 8 px, 1 row ≈ 16 px). New
+  engine test for the evaluator; existing
+  `tests/wpt/match_media.js` updated to assert the new semantics
+  (was frozen at `matches === false` for the dark query).
+- Reason: matchMedia evaluation was the only browser-events.md
+  §4 closure gate not already satisfied. Real evaluation is what
+  responsive sites actually look at — sites that were silently
+  taking the "narrow viewport" branch (because every width query
+  returned false) now get the appropriate breakpoint.
+- Documents updated: `spec/subspecs/browser-events.md` (§8
+  closure record), `spec/subspecs/browser-roadmap.md` (Tier 3
+  sub-spec list notes browser-events as CLOSED — only
+  browser-realtime open), `spec/MVP.md` (canonical-now table
+  flipped browser-events.md row to closed), this ADR.
+
 ### Template for future amendments
 
 - Date:

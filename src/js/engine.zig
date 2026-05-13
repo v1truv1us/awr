@@ -949,19 +949,26 @@ pub const JsEngine = struct {
 
     const URLSEARCHPARAMS_POLYFILL = @embedFile("url_search_params.js");
 
-    /// `window.matchMedia(query)` — agent-runtime stub.
+    /// `window.matchMedia(query)` — Tier 3 (T3.C) evaluator.
     ///
-    /// Returns a `MediaQueryList` shape with `matches: false`, the original
-    /// query string, and no-op `addEventListener` / `removeEventListener` /
-    /// `addListener` / `removeListener` / `dispatchEvent` / `onchange`.
-    /// This is enough to satisfy the feature-detection paths in scripts
-    /// like react.dev's `(prefers-color-scheme: dark)` probe — they call
-    /// `.matches` and ignore the result if false, then `.addEventListener`
-    /// for runtime updates that AWR will never emit.
+    /// Evaluates a small subset of CSS Media Queries:
+    ///   - `(prefers-color-scheme: dark)` → `true`  (terminal assumption)
+    ///   - `(prefers-color-scheme: light)` → `false`
+    ///   - `(min-width: Npx)` → `(window.innerWidth * 8) >= N`
+    ///   - `(max-width: Npx)` → `(window.innerWidth * 8) <= N`
+    ///   - `(min-height: Npx)` / `(max-height: Npx)` — same shape; 1 row ≈ 16px
+    ///   - any other query → `false` (conservative default)
     ///
-    /// Deliberately does NOT attempt real CSS Media Query evaluation: AWR
-    /// has no viewport, no display medium, no reduced-motion preference.
-    /// Returning `matches: false` is the conservative answer.
+    /// Width approximation: 1 column ≈ 8 CSS pixels, matching what
+    /// browsers report at default font size. AWR has no real layout,
+    /// so this is intentionally rough — it's enough for responsive
+    /// sites that gate on standard breakpoints (typical thresholds:
+    /// 480, 768, 1024, 1280px → 60, 96, 128, 160 cols).
+    ///
+    /// `addListener` / `removeListener` / `addEventListener` /
+    /// `removeEventListener` / `dispatchEvent` / `onchange` are still
+    /// no-ops — terminal-resize-driven `change` event dispatch is a
+    /// future slice (the harness has no resize signal yet).
     fn installMatchMedia(self: *JsEngine) JsError!void {
         try self.eval(MATCH_MEDIA_POLYFILL, "<match-media>");
     }
@@ -969,9 +976,34 @@ pub const JsEngine = struct {
     const MATCH_MEDIA_POLYFILL =
         \\(function () {
         \\  if (typeof globalThis.matchMedia === 'function') return;
+        \\  function matchQuery(q) {
+        \\    if (typeof q !== 'string' || q.length === 0) return false;
+        \\    var s = q.trim().toLowerCase();
+        \\    // Strip a single outer paren pair if present.
+        \\    if (s.charCodeAt(0) === 40 && s.charCodeAt(s.length - 1) === 41) {
+        \\      s = s.slice(1, -1).trim();
+        \\    }
+        \\    var pcs = s.match(/^prefers-color-scheme\s*:\s*(dark|light|no-preference)$/);
+        \\    if (pcs) return pcs[1] === 'dark';
+        \\    var w = s.match(/^(min|max)-width\s*:\s*(\d+(?:\.\d+)?)px$/);
+        \\    if (w) {
+        \\      var cssPx = (typeof window !== 'undefined' && typeof window.innerWidth === 'number'
+        \\        ? window.innerWidth : 80) * 8;
+        \\      var n = parseFloat(w[2]);
+        \\      return w[1] === 'min' ? cssPx >= n : cssPx <= n;
+        \\    }
+        \\    var h = s.match(/^(min|max)-height\s*:\s*(\d+(?:\.\d+)?)px$/);
+        \\    if (h) {
+        \\      var cssPxH = (typeof window !== 'undefined' && typeof window.innerHeight === 'number'
+        \\        ? window.innerHeight : 24) * 16;
+        \\      var n2 = parseFloat(h[2]);
+        \\      return h[1] === 'min' ? cssPxH >= n2 : cssPxH <= n2;
+        \\    }
+        \\    return false;
+        \\  }
         \\  function MediaQueryList(query) {
         \\    this.media = String(query == null ? '' : query);
-        \\    this.matches = false;
+        \\    this.matches = matchQuery(this.media);
         \\    this.onchange = null;
         \\  }
         \\  MediaQueryList.prototype.addListener = function () {};
@@ -1328,18 +1360,35 @@ test "JsEngine — clearEvalDeadline restores unbounded mode" {
     try engine.eval("var x = 1 + 1;", "<post-clear>");
 }
 
-test "JsEngine — matchMedia returns MediaQueryList stub" {
+test "JsEngine — matchMedia returns MediaQueryList shape" {
     var engine = try JsEngine.init(std.testing.allocator, null);
     defer engine.deinit();
     // matchMedia must be callable as a function returning an object whose
     // shape matches feature-detection expectations.
     try std.testing.expect(try engine.evalBool("typeof matchMedia === 'function'"));
     try std.testing.expect(try engine.evalBool("typeof matchMedia('(prefers-color-scheme: dark)') === 'object'"));
-    try std.testing.expect(try engine.evalBool("matchMedia('(prefers-color-scheme: dark)').matches === false"));
     try std.testing.expect(try engine.evalBool("matchMedia('').media === ''"));
     try std.testing.expect(try engine.evalBool("matchMedia('(min-width: 600px)').media === '(min-width: 600px)'"));
     // addEventListener / addListener / dispatchEvent must be callable
     // without throwing — typical theme-detection pattern.
     try std.testing.expect(try engine.evalBool(
         "var q = matchMedia('(min-width: 1px)'); q.addEventListener('change', function(){}); q.removeEventListener('change', function(){}); q.addListener(function(){}); q.dispatchEvent(new Object()) === false"));
+}
+
+test "JsEngine — matchMedia evaluates prefers-color-scheme + width queries" {
+    var engine = try JsEngine.init(std.testing.allocator, null);
+    defer engine.deinit();
+
+    // T3.C: terminal default is dark.
+    try std.testing.expect(try engine.evalBool("matchMedia('(prefers-color-scheme: dark)').matches === true"));
+    try std.testing.expect(try engine.evalBool("matchMedia('(prefers-color-scheme: light)').matches === false"));
+
+    // No window viewport set in this engine-only test → defaults are
+    // 80 cols × 24 rows → 640 CSS px wide × 384 px tall.
+    try std.testing.expect(try engine.evalBool("matchMedia('(min-width: 320px)').matches === true"));
+    try std.testing.expect(try engine.evalBool("matchMedia('(max-width: 320px)').matches === false"));
+    try std.testing.expect(try engine.evalBool("matchMedia('(min-width: 1280px)').matches === false"));
+
+    // Unknown queries default to false (conservative).
+    try std.testing.expect(try engine.evalBool("matchMedia('(orientation: portrait)').matches === false"));
 }

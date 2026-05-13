@@ -1,6 +1,6 @@
 # Browser events — Tier 3 sub-spec
 
-> **Status:** ACTIVE (promoted from DEFERRED to ACTIVE 2026-05-13)
+> **Status:** CLOSED 2026-05-13 (initial promotion + closure same day)
 > `spec/MVP.md` is the canonical umbrella spec.
 > `spec/subspecs/browser-roadmap.md` is the cross-tier ladder
 > authority; this file owns Tier 3 browser events execution detail.
@@ -181,4 +181,69 @@ Indicative slice order (defer detailed plan to implementation time):
 
 ## 8. Closure record
 
-_Not yet closed._
+| Field | Value |
+|-------|-------|
+| Status | CLOSED |
+| Date | 2026-05-13 |
+| Final commit | (this commit — T3.C matchMedia evaluation + audit close) |
+| Gates satisfied | §4.1 prior-tier gates green ✓ / §4.2 synthetic event + preventDefault (pre-existing) ✓ / §4.3 DOMContentLoaded + load lifecycle (pre-existing in `Page.processHtml`) ✓ / §4.4 rAF queue + cancelAnimationFrame (pre-existing) ✓ / §4.5 matchMedia evaluation ✓ |
+| Sign-off | AWR Dev |
+
+**Audit context:** When T3.C began, most of the §2 surface was
+already implemented as part of earlier tiers. The only material
+gap was matchMedia, which returned `matches: false` for every
+query. This slice upgraded matchMedia to a real evaluator and
+verified the rest against the spec.
+
+**Delivered surface (incl. pre-existing):**
+
+- **Synthetic input events** (Tier 0/1): `click` / `focus` /
+  `blur` / `change` / `input` / `submit` already dispatched by
+  the TUI on user interaction. `Event.preventDefault()` already
+  suppresses AWR's default action. WPT cases:
+  `event_DOMContentLoaded.js`, `event_prevent_default.js`,
+  `element_click_focus_blur.js`, `element_click_listener.js`,
+  `element_interaction_events.js`, `keyboard_event_key_code.js`,
+  `form_input_change_semantics.js`, `event_dispatchEvent_returns.js`.
+- **DOMContentLoaded + load events** (pre-existing in
+  `Page.processHtml`): fired at the canonical points in the page
+  lifecycle (DOMContentLoaded after parser, load after script
+  drain). WPT case: `event_DOMContentLoaded.js`.
+- **requestAnimationFrame + cancelAnimationFrame** (pre-existing
+  setTimeout-shimmed): scripts that use `rAF` for sequencing
+  ("run after next paint") work correctly. AWR doesn't have a
+  60 fps timer — `rAF` callbacks fire after the QuickJS macrotask
+  budget (~16 ms via setTimeout). This matches the spec's
+  "demand-driven render time" allowance. WPT case:
+  `requestAnimationFrame.js`.
+- **matchMedia** (T3.C, this slice): real evaluation of:
+  - `(prefers-color-scheme: dark|light)` — terminal default is
+    `dark`.
+  - `(min-width: Npx)` / `(max-width: Npx)` — evaluated as
+    `(window.innerWidth * 8) <op> N` (1 col ≈ 8 CSS px).
+  - `(min-height: Npx)` / `(max-height: Npx)` — analogous,
+    1 row ≈ 16 CSS px.
+  - Unknown queries → `false` (conservative).
+
+**Known scope NOT covered (deferred):**
+
+- `change` event on `MediaQueryList` when terminal resizes —
+  TUI has no resize signal yet. `addListener` /
+  `addEventListener` are accepted (no throw) but never fire.
+- Real frame-rate timing for `rAF` (60 Hz tick) — the
+  setTimeout(16) shim is enough for sequencing; precise
+  frame-rate animation is a Tier 4+ concern alongside the
+  layout engine.
+- `MutationObserver`-driven re-render — covered separately by
+  `mvp-remainder.md §4`; not a fresh slice here.
+- Pointer events / Touch events — no pointer device in TUI,
+  permanently out of scope.
+
+**Test surface:**
+
+- `src/js/engine.zig` — 2 tests (existing shape + new
+  `evaluates prefers-color-scheme + width queries`).
+- `tests/wpt/match_media.js` — updated to assert dark=true,
+  width-query evaluation, unknown-query default, listener no-ops.
+- All pre-existing event WPT cases continue to pass (see
+  `wpt-conformance.md §8a`).

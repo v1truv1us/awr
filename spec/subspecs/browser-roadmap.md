@@ -243,8 +243,9 @@ work end-to-end.
 **CLOSED 2026-05-13**),
 `spec/subspecs/browser-realtime.md` (WebSocket + EventSource/SSE, ACTIVE),
 `spec/subspecs/browser-events.md` (synthetic input events,
-requestAnimationFrame, matchMedia, ACTIVE). All promoted to ACTIVE
-2026-05-13; browser-storage.md and browser-history.md closed same day.
+requestAnimationFrame, matchMedia, **CLOSED 2026-05-13**). All promoted
+to ACTIVE 2026-05-13; three of four closed same day. browser-realtime
+remains the last open Tier 3 sub-spec.
 
 **WPT corpus area**: history, storage, websocket, mutation
 observer, event constructors.
