@@ -239,6 +239,42 @@ pub fn build(b: *std.Build) void {
         test_js_step.dependOn(&run_js.step);
     }
 
+    // ── Web Storage backend (Tier 3 — T3.A) — pure Zig, no QuickJS ────────
+    // Tested standalone for fast iteration; bridge.zig pulls it transitively
+    // via the engine module when the dom-bridge tests run.
+    {
+        const storage_path_mod = b.createModule(.{
+            .root_source_file = b.path("src/util/storage_path.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true, // std.c.getenv
+        });
+
+        const storage_mod = b.createModule(.{
+            .root_source_file = b.path("src/js/storage.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true, // std.c.getpid for tmp-file naming
+        });
+        storage_mod.addImport("storage_path", storage_path_mod);
+
+        const storage_test = b.addTest(.{
+            .name = "storage",
+            .root_module = storage_mod,
+        });
+        const run_storage = b.addRunArtifact(storage_test);
+        test_step.dependOn(&run_storage.step);
+        test_js_step.dependOn(&run_storage.step);
+
+        const storage_path_test = b.addTest(.{
+            .name = "storage_path",
+            .root_module = storage_path_mod,
+        });
+        const run_storage_path = b.addRunArtifact(storage_path_test);
+        test_step.dependOn(&run_storage_path.step);
+        test_js_step.dependOn(&run_storage_path.step);
+    }
+
     // ── WebCrypto backend (T-93) — depends on BoringSSL ───────────────────
     // Standalone test target so the SHA / RAND vectors get verified on
     // every `zig build test` without pulling BoringSSL into the lighter
