@@ -492,6 +492,37 @@ documentation governance.
   notes browser-storage as CLOSED), `spec/MVP.md` (canonical-now
   table flipped browser-storage.md row to closed), this ADR.
 
+### 2026-05-13 — T3.B History API CLOSED
+
+- Date: 2026-05-13
+- Change: `spec/subspecs/browser-history.md` status → CLOSED
+  (§8 closure record appended). Delivered surface:
+  `history.pushState`, `replaceState`, `back`, `forward`, `go(n)`,
+  `length` + `state` getters, plus `popstate` event dispatch on
+  successful traversal. State objects are JSON-roundtripped
+  (matches browser ergonomics for plain objects). Stack ownership
+  moved into Zig: new `src/dom/history.zig` (`HistoryStack`),
+  owned by `BridgeCtx`, seeded by `Page.setLocationFromUrl` via
+  the new `bridge.seedHistory` API. Six new native callbacks
+  (`__awr_hist_*__`) replace the in-JS `__awr_history_entries__`
+  array. New WPT case: `tests/wpt/history_back_forward_popstate.js`.
+  Existing case `history_push_replace_state.js` updated to assert
+  `back/forward/go` are functions (was `undefined` before).
+- Reason: Post-login navigation in SPAs uses `pushState` to move
+  to the dashboard without a reload. With T3.A (storage) shipped,
+  the next gap blocking modern logins was history traversal —
+  Discourse threads, GitHub file browser, and any framework that
+  pairs `pushState` with router-managed re-render were unreachable
+  beyond the initial page. Same-day promotion + closure follows
+  the storage pattern: scope is well-understood, no strategic fork.
+  TUI b/f integration deferred until UI work needs it.
+- Documents updated: `spec/subspecs/browser-history.md` (§8 closure
+  record), `spec/subspecs/browser-roadmap.md` (Tier 3 sub-spec list
+  notes browser-history as CLOSED), `spec/MVP.md` (canonical-now
+  table flipped browser-history.md row to closed),
+  `spec/subspecs/wpt-conformance.md` (108 → 109 WPT cases, History
+  row gains the new case), this ADR.
+
 ### Template for future amendments
 
 - Date:

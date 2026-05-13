@@ -203,7 +203,7 @@ why the case was invalid.
 
 ## 8. Mapping from API areas to test files
 
-> **Current status (as of 2026-05-13):** 108 active curated WPT cases pass via
+> **Current status (as of 2026-05-13):** 109 active curated WPT cases pass via
 > `zig build test-wpt`. 58 Test262 cases pass via `zig build test-test262`.
 > All `spec/subspecs/agent-browser.md §4` closure-gate cases are active.
 > `spec/subspecs/browser-tui.md §4.2` Tier 1 closure-gate cases for
@@ -229,7 +229,7 @@ why the case was invalid.
 | XHR (GET + POST) | `xhr_basic_get.js`, `xhr_post_basic.js`, `xhr_post_form_encoded.js`, `xhr_rejects_unsupported.js`, `xhr_status_codes.js` |
 | `fetch()` (GET + POST) | `fetch_basic.js`, `fetch_post_basic.js`, `fetch_post_form_encoded.js`, `fetch_rejects_unsupported.js`, `fetch_status_codes.js`, `fetch_json_response.js`, `fetch_redirect_follow.js`, `fetch_headers_get.js` |
 | Forms (DOM) | `form_input_value_type.js`, `form_textarea_value.js`, `form_document_forms.js`, `form_button_select.js`, `form_method_post.js`, `form_properties.js`, `form_submit_event.js` |
-| History | `history_push_replace_state.js`, `history_relative_url.js`, `history_state_length.js` |
+| History | `history_push_replace_state.js`, `history_relative_url.js`, `history_state_length.js`, `history_back_forward_popstate.js` |
 | Viewport / observers | `viewport_dimensions.js`, `requestAnimationFrame.js`, `request_idle_callback.js`, `request_idle_callback_cancel.js`, `intersection_observer.js`, `resize_observer.js`, `window_basics.js` |
 | Window / navigator | `navigator_basics.js`, `url_search_params_basics.js`, `window_navigator_surface.js` |
 | WebCrypto (subset) | `webcrypto_basics.js` |

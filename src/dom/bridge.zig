@@ -35,6 +35,7 @@ const dom = @import("node.zig");
 const engine = @import("../js/engine.zig");
 const render = @import("../render.zig");
 const storage_mod = @import("../js/storage.zig");
+const history_mod = @import("history.zig");
 
 // ── BridgeCtx ─────────────────────────────────────────────────────────────
 
@@ -52,6 +53,9 @@ const BridgeCtx = struct {
     /// known (typically right after `installDomBridge`).
     local_storage: storage_mod.LocalStorage,
     session_storage: storage_mod.SessionStorage,
+    /// Tier 3 — T3.B. History API stack. Seeded by Page from
+    /// `setLocationFromUrl` (which calls `seedHistory` below).
+    history: history_mod.HistoryStack,
 
     fn init(doc: *dom.Document, allocator: std.mem.Allocator) BridgeCtx {
         return .{
@@ -63,6 +67,7 @@ const BridgeCtx = struct {
             .viewport_height = 24,
             .local_storage = storage_mod.LocalStorage.init(allocator),
             .session_storage = storage_mod.SessionStorage.init(allocator),
+            .history = history_mod.HistoryStack.init(allocator),
         };
     }
 
@@ -71,6 +76,7 @@ const BridgeCtx = struct {
         self.handle_to_elem.deinit(self.allocator);
         self.local_storage.deinit();
         self.session_storage.deinit();
+        self.history.deinit();
     }
 };
 
@@ -143,6 +149,17 @@ pub fn setStorageOrigin(
     try bctx.local_storage.setOrigin(origin, storage_dir, io);
 }
 
+/// Tier 3 — T3.B. Seed (or update) the history stack's initial entry
+/// to `url`. Called by Page from `setLocationFromUrl` on every full
+/// navigation. Idempotent for the same URL; full navigation to a new
+/// URL truncates forward history.
+pub fn seedHistory(eng: *engine.JsEngine, url: []const u8) void {
+    const host = eng.ctx.getOpaque(engine.EngineHostData) orelse return;
+    const ext = host.extension orelse return;
+    const bctx: *BridgeCtx = @ptrCast(@alignCast(ext));
+    bctx.history.setInitialEntry(url) catch {};
+}
+
 pub fn setDocumentReadyState(eng: *engine.JsEngine, state: []const u8) void {
     var buf = std.mem.zeroes([256]u8);
     var w = std.Io.Writer.fixed(&buf);
@@ -206,6 +223,15 @@ fn installNativeCallbacks(eng: *engine.JsEngine) !void {
         .{ "ss_clear", ssClearFn },
         .{ "ss_key", ssKeyFn },
         .{ "ss_length", ssLengthFn },
+        // Tier 3 — T3.B History API. Eight natives backing
+        // window.history. JS polyfill calls these instead of
+        // maintaining its own __awr_history_entries__ array.
+        .{ "hist_push", histPushFn },
+        .{ "hist_replace", histReplaceFn },
+        .{ "hist_go", histGoFn },
+        .{ "hist_length", histLengthFn },
+        .{ "hist_state_json", histStateJsonFn },
+        .{ "hist_current_url", histCurrentUrlFn },
     }) |entry| {
         const fname: [:0]const u8 = "__awr_" ++ entry[0] ++ "__";
         const fn_val = qjs.Value.initCFunction(ctx, entry[1], fname, 1);
@@ -1204,6 +1230,73 @@ fn ssLengthFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.
     return qjs.Value.init(c, @as(i32, @intCast(bridge.session_storage.length())));
 }
 
+// ── History host bindings (Tier 3 — T3.B) ─────────────────────────────────
+
+fn histPushFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.undefined;
+    const bridge = getBridge(ctx) orelse return qjs.Value.undefined;
+    if (args.len < 2) return qjs.Value.undefined;
+    const url_v: qjs.Value = @bitCast(args[0]);
+    const state_v: qjs.Value = @bitCast(args[1]);
+    const url_cstr = url_v.toCString(c) orelse return qjs.Value.undefined;
+    defer c.freeCString(url_cstr);
+    const state_cstr = state_v.toCString(c) orelse return qjs.Value.undefined;
+    defer c.freeCString(state_cstr);
+    const state_str = std.mem.span(state_cstr);
+    // The polyfill passes the literal string "null" when JS state is null;
+    // unwrap that here so the stack stores ?[]u8 = null cleanly.
+    const state_arg: ?[]const u8 = if (std.mem.eql(u8, state_str, "null")) null else state_str;
+    bridge.history.pushState(std.mem.span(url_cstr), state_arg) catch {};
+    return qjs.Value.undefined;
+}
+
+fn histReplaceFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.undefined;
+    const bridge = getBridge(ctx) orelse return qjs.Value.undefined;
+    if (args.len < 2) return qjs.Value.undefined;
+    const url_v: qjs.Value = @bitCast(args[0]);
+    const state_v: qjs.Value = @bitCast(args[1]);
+    const url_cstr = url_v.toCString(c) orelse return qjs.Value.undefined;
+    defer c.freeCString(url_cstr);
+    const state_cstr = state_v.toCString(c) orelse return qjs.Value.undefined;
+    defer c.freeCString(state_cstr);
+    const state_str = std.mem.span(state_cstr);
+    const state_arg: ?[]const u8 = if (std.mem.eql(u8, state_str, "null")) null else state_str;
+    bridge.history.replaceState(std.mem.span(url_cstr), state_arg) catch {};
+    return qjs.Value.undefined;
+}
+
+fn histGoFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.initBool(false);
+    const bridge = getBridge(ctx) orelse return qjs.Value.initBool(false);
+    if (args.len == 0) return qjs.Value.initBool(false);
+    const v: qjs.Value = @bitCast(args[0]);
+    const delta = v.toInt32(c) catch return qjs.Value.initBool(false);
+    return qjs.Value.initBool(bridge.history.go(delta));
+}
+
+fn histLengthFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.init(undefined, @as(i32, 0));
+    const bridge = getBridge(ctx) orelse return qjs.Value.init(c, @as(i32, 0));
+    return qjs.Value.init(c, @as(i32, @intCast(bridge.history.length())));
+}
+
+/// Returns the current entry's state JSON, or the literal string "null"
+/// when the state is JS `null`. JS-side polyfill `JSON.parse`s the
+/// result, so "null" → null is automatic.
+fn histStateJsonFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.initStringLen(undefined, "null");
+    const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(c, "null");
+    const s = bridge.history.currentStateJson() orelse return qjs.Value.initStringLen(c, "null");
+    return qjs.Value.initStringLen(c, s);
+}
+
+fn histCurrentUrlFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.initStringLen(undefined, "");
+    const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(c, "");
+    return qjs.Value.initStringLen(c, bridge.history.currentUrl());
+}
+
 // ── JS polyfill ───────────────────────────────────────────────────────────
 
 const BRIDGE_POLYFILL =
@@ -1874,22 +1967,47 @@ const BRIDGE_POLYFILL =
     \\  if (!globalThis.location) {
     \\    globalThis.location = { href: '', origin: '', pathname: '/', search: '', hash: '', hostname: '', host: '', port: '', protocol: 'https:' };
     \\  }
-    \\  const __awr_history_entries__ = [{ url: globalThis.location.href || '', state: null }];
+    \\  // Tier 3 — T3.B. The History API is backed by a Zig-owned stack
+    \\  // (BridgeCtx.history). length / state are getters that re-read
+    \\  // the natives so they stay reactive across back/forward/go.
+    \\  // popstate is dispatched here on successful traversal.
     \\  globalThis.history = {
-    \\    length: 1,
-    \\    state: null,
-    \\    pushState(state, unused, url) {
+    \\    get length() { return __awr_hist_length__(); },
+    \\    get state() {
+    \\      const json = __awr_hist_state_json__();
+    \\      return json === 'null' ? null : JSON.parse(json);
+    \\    },
+    \\    pushState(state, _unused, url) {
     \\      const nextUrl = url == null ? globalThis.location.href : __awr_resolve_history_url__(url);
-    \\      __awr_history_entries__.push({ url: nextUrl, state: state == null ? null : state });
-    \\      this.length = __awr_history_entries__.length;
-    \\      this.state = state == null ? null : state;
+    \\      const stateJson = state == null ? 'null' : JSON.stringify(state);
+    \\      __awr_hist_push__(nextUrl, stateJson);
     \\      __awr_apply_location__(nextUrl);
     \\    },
-    \\    replaceState(state, unused, url) {
+    \\    replaceState(state, _unused, url) {
     \\      const nextUrl = url == null ? globalThis.location.href : __awr_resolve_history_url__(url);
-    \\      __awr_history_entries__[__awr_history_entries__.length - 1] = { url: nextUrl, state: state == null ? null : state };
-    \\      this.state = state == null ? null : state;
+    \\      const stateJson = state == null ? 'null' : JSON.stringify(state);
+    \\      __awr_hist_replace__(nextUrl, stateJson);
     \\      __awr_apply_location__(nextUrl);
+    \\    },
+    \\    back() { this.go(-1); },
+    \\    forward() { this.go(1); },
+    \\    go(delta) {
+    \\      const d = (delta == null ? 0 : delta) | 0;
+    \\      // go(0) is a no-op for AWR (browsers reload; we have nothing
+    \\      // useful to do until the daemon-driven reload story lands).
+    \\      if (d === 0) return;
+    \\      if (!__awr_hist_go__(d)) return;
+    \\      const newUrl = __awr_hist_current_url__();
+    \\      __awr_apply_location__(newUrl);
+    \\      const stateJson = __awr_hist_state_json__();
+    \\      const newState = stateJson === 'null' ? null : JSON.parse(stateJson);
+    \\      // Per HTML spec, popstate fires on the window with .state
+    \\      // set to the new entry's state. Browsers use PopStateEvent;
+    \\      // a plain Event with a .state shim is enough for code that
+    \\      // does `if (e.state)` or destructures `{ state }`.
+    \\      const evt = new Event('popstate');
+    \\      try { evt.state = newState; } catch (_) {}
+    \\      try { globalThis.dispatchEvent(evt); } catch (_) {}
     \\    },
     \\  };
     \\  globalThis.screen  = { width: 80, height: 24, availWidth: 80, availHeight: 24, colorDepth: 24, pixelDepth: 24 };
@@ -2526,6 +2644,80 @@ test "bridge — localStorage QuotaExceededError is throwable" {
     try std.testing.expectEqualStrings("QuotaExceededError", name);
     // Storage is unchanged on quota failure.
     try std.testing.expect(try eng.evalBool("localStorage.length === 0"));
+}
+
+test "bridge — history back/forward fires popstate with state" {
+    const run = engine.JsEngine.eval;
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    // Seed the stack like Page would after fetching a URL.
+    seedHistory(&eng, "https://example.com/");
+
+    try run(&eng,
+        \\globalThis.__pop_states = [];
+        \\window.addEventListener('popstate', e => globalThis.__pop_states.push(e.state));
+        \\history.pushState({ n: 1 }, '', '/a');
+        \\history.pushState({ n: 2 }, '', '/b');
+        \\history.back();
+        \\history.back();
+        \\history.forward();
+    , "<test>");
+    try std.testing.expect(try eng.evalBool("history.length === 3"));
+    try std.testing.expect(try eng.evalBool("globalThis.__pop_states.length === 3"));
+    try std.testing.expect(try eng.evalBool("globalThis.__pop_states[0].n === 1"));
+    try std.testing.expect(try eng.evalBool("globalThis.__pop_states[1] === null"));
+    try std.testing.expect(try eng.evalBool("globalThis.__pop_states[2].n === 1"));
+}
+
+test "bridge — pushState after back() truncates forward history" {
+    const run = engine.JsEngine.eval;
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    seedHistory(&eng, "https://example.com/");
+
+    try run(&eng,
+        \\history.pushState(null, '', '/a');
+        \\history.pushState(null, '', '/b');
+        \\history.back();
+        \\history.pushState(null, '', '/c');
+    , "<test>");
+    try std.testing.expect(try eng.evalBool("history.length === 3"));
+    try std.testing.expect(try eng.evalBool("location.pathname === '/c'"));
+    // forward() now does nothing (no forward history).
+    try run(&eng, "history.forward();", "<test>");
+    try std.testing.expect(try eng.evalBool("location.pathname === '/c'"));
+}
+
+test "bridge — replaceState updates state without changing length" {
+    const run = engine.JsEngine.eval;
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    seedHistory(&eng, "https://example.com/");
+    try run(&eng,
+        \\history.pushState({ a: 1 }, '', '/x');
+        \\history.replaceState({ a: 2 }, '', '/x/edit');
+    , "<test>");
+    try std.testing.expect(try eng.evalBool("history.length === 2"));
+    try std.testing.expect(try eng.evalBool("history.state.a === 2"));
+    try std.testing.expect(try eng.evalBool("location.pathname === '/x/edit'"));
 }
 
 test "bridge — setStorageOrigin enables cross-process disk persistence" {

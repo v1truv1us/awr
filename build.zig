@@ -278,6 +278,24 @@ pub fn build(b: *std.Build) void {
         test_js_step.dependOn(&run_storage_path.step);
     }
 
+    // ── History API stack (Tier 3 — T3.B) — pure Zig, no deps ─────────────
+    // Same shape as the storage module: standalone for fast iteration,
+    // bridge.zig pulls it transitively when dom-bridge tests run.
+    {
+        const history_mod = b.createModule(.{
+            .root_source_file = b.path("src/dom/history.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const history_test = b.addTest(.{
+            .name = "history",
+            .root_module = history_mod,
+        });
+        const run_history = b.addRunArtifact(history_test);
+        test_step.dependOn(&run_history.step);
+        test_dom_step.dependOn(&run_history.step);
+    }
+
     // ── WebCrypto backend (T-93) — depends on BoringSSL ───────────────────
     // Standalone test target so the SHA / RAND vectors get verified on
     // every `zig build test` without pulling BoringSSL into the lighter

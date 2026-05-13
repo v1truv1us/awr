@@ -8,7 +8,8 @@ test(() => {
   assert_equals(history.length, 2);
   assert_equals(history.state.page, 3);
   assert_equals(location.pathname, '/docs/next');
-  assert_equals(typeof history.back, 'undefined');
-  assert_equals(typeof history.forward, 'undefined');
-  assert_equals(typeof history.go, 'undefined');
+  // T3.B: back/forward/go are now functions (were undefined before).
+  assert_equals(typeof history.back, 'function');
+  assert_equals(typeof history.forward, 'function');
+  assert_equals(typeof history.go, 'function');
 }, 'history exposes same-origin pushState/replaceState plus state and length');

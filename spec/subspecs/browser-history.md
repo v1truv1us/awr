@@ -1,6 +1,6 @@
 # History API — Tier 3 sub-spec
 
-> **Status:** ACTIVE (promoted from DEFERRED to ACTIVE 2026-05-13)
+> **Status:** CLOSED 2026-05-13 (initial promotion + closure same day)
 > `spec/MVP.md` is the canonical umbrella spec.
 > `spec/subspecs/browser-roadmap.md` is the cross-tier ladder
 > authority; this file owns Tier 3 History API execution detail.
@@ -139,4 +139,59 @@ Indicative slice (defer detailed plan to implementation time):
 
 ## 8. Closure record
 
-_Not yet closed._
+| Field | Value |
+|-------|-------|
+| Status | CLOSED |
+| Date | 2026-05-13 |
+| Final commit | (this commit — T3.B History API + popstate) |
+| Gates satisfied | §4.1 prior-tier gates green ✓ / §4.2 pushState/replaceState/popstate ✓ / §4.3 history bridge methods ✓ / §4.4 WPT history case ✓ / §4.5 TUI b/f bindings unaffected (no contract change) ✓ |
+| Sign-off | AWR Dev |
+
+**Delivered surface:**
+
+- `history.pushState(state, title, url)` — same-origin URL; truncates
+  forward history; `state` round-tripped via JSON (matches browser
+  ergonomics for plain objects).
+- `history.replaceState(state, title, url)` — same as pushState but
+  preserves forward history and overwrites the current entry.
+- `history.back()` / `history.forward()` / `history.go(n)` — bounds-
+  checked traversal. `go(0)` is a no-op (per spec, AWR has no reload
+  concept here).
+- `popstate` event dispatched on successful traversal with `.state`
+  matching the new entry. Code that uses `addEventListener('popstate', ...)`
+  or `e.state` works.
+- `history.length` and `history.state` are getters that re-read the
+  Zig-owned stack — stay reactive across all mutations.
+- `location.href` updates on every push/replace/go via the existing
+  `__awr_apply_location__` helper (so `pathname` / `search` / `hash`
+  derivatives all reflect the new entry).
+
+**Stack ownership:** `BridgeCtx.history` (`HistoryStack` in
+`src/dom/history.zig`) is the single source of truth. Page seeds it
+from `setLocationFromUrl` on every full navigation. JS calls into the
+8 native callbacks (`__awr_hist_*__`) that wrap the Zig stack.
+
+**Known scope NOT covered (deferred):**
+
+- TUI `b` / `f` bindings driving the JS stack (§5 of this spec).
+  Requires Page-side coordination between fetch history and JS
+  history; deferred until UI work that needs it.
+- `hashchange` event (URL fragment-only mutations) — separate slice;
+  trivial to layer on top once needed.
+- Cross-origin navigation throwing `SecurityError` from JS (the
+  resolve helper already throws `TypeError` for cross-origin URLs;
+  upgrading the error class is cosmetic).
+
+**Test surface:**
+
+- `src/dom/history.zig` — 9 unit tests (init seed, idempotent re-seed,
+  push/replace/back/forward/go bounds, truncate-on-push-after-back,
+  full-navigation truncate).
+- `src/dom/bridge.zig` — 3 JS-level bridge tests (popstate fires with
+  state, push-after-back truncates forward history, replaceState
+  doesn't grow length).
+- `tests/wpt/history_push_replace_state.js` — updated to assert
+  `back/forward/go` are now `function` (was `undefined`).
+- `tests/wpt/history_back_forward_popstate.js` — new WPT case
+  covering full traversal + popstate firing + truncation +
+  out-of-range no-ops.

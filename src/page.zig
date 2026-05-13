@@ -1539,6 +1539,11 @@ pub const Page = struct {
         if (origin.len > 0 and (std.mem.startsWith(u8, origin, "http://") or std.mem.startsWith(u8, origin, "https://"))) {
             bridge.setStorageOrigin(&self.js, origin, self.storage_dir, self.io) catch {};
         }
+
+        // Tier 3 — T3.B. Anchor the History API stack to the page URL.
+        // Idempotent for same URL; full navigation truncates forward
+        // history. JS pushState / replaceState on top of this seed.
+        bridge.seedHistory(&self.js, raw_url);
     }
 
     fn setViewportGlobals(self: *Page) void {

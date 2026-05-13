@@ -53,7 +53,7 @@ Tests and Test262 cases.
 | `spec/subspecs/daemon-mode.md` | Tier 0 daemon-mode scope (active → closing): long-lived `awrd` + JSON-RPC IPC for amortized startup |
 | `spec/subspecs/browser-tui.md` | **Tier 1 closed sub-spec**: interactive TUI parity (form fields, focus, keyboard input, history, URL bar, cookie inspector, browser-cookie import) |
 | `spec/subspecs/render-polish.md` | **Tier 2 closed sub-spec**: render + UX polish (bookmarks, URL-bar autocomplete, form/table/code/diff/image polish, cookie inspector enrichment) |
-| `spec/subspecs/browser-history.md` | **Tier 3 active sub-spec**: History API (`pushState`, `replaceState`, `popstate`) |
+| `spec/subspecs/browser-history.md` | **Tier 3 closed sub-spec**: History API (`pushState`, `replaceState`, `popstate`, `back`/`forward`/`go`) |
 | `spec/subspecs/browser-storage.md` | **Tier 3 closed sub-spec**: Web Storage (`localStorage` persisted, `sessionStorage` in-memory) |
 | `spec/subspecs/browser-realtime.md` | **Tier 3 active sub-spec**: real-time connections (WebSocket + EventSource/SSE) |
 | `spec/subspecs/browser-events.md` | **Tier 3 active sub-spec**: browser events (synthetic input, `DOMContentLoaded`/`load`, `requestAnimationFrame`, `matchMedia`) |

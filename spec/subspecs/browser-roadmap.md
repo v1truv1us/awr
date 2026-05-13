@@ -237,13 +237,14 @@ work end-to-end.
 - `MediaQueryList` (`matchMedia`) — basic predicate evaluation
   against terminal dimensions.
 
-**Sub-spec(s)**: `spec/subspecs/browser-history.md` (History API, ACTIVE),
+**Sub-spec(s)**: `spec/subspecs/browser-history.md` (History API,
+**CLOSED 2026-05-13**),
 `spec/subspecs/browser-storage.md` (localStorage + sessionStorage,
 **CLOSED 2026-05-13**),
 `spec/subspecs/browser-realtime.md` (WebSocket + EventSource/SSE, ACTIVE),
 `spec/subspecs/browser-events.md` (synthetic input events,
 requestAnimationFrame, matchMedia, ACTIVE). All promoted to ACTIVE
-2026-05-13; browser-storage.md closed same day.
+2026-05-13; browser-storage.md and browser-history.md closed same day.
 
 **WPT corpus area**: history, storage, websocket, mutation
 observer, event constructors.

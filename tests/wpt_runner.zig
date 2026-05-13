@@ -335,6 +335,11 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/storage_quota_exceeded.js"),
     },
     .{
+        .filename = "history_back_forward_popstate.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/history_back_forward_popstate.js"),
+    },
+    .{
         .filename = "session_storage_distinct.js",
         .html = "<html><body></body></html>",
         .script = @embedFile("wpt/session_storage_distinct.js"),
