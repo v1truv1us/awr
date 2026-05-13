@@ -86,8 +86,21 @@ void awr_tls_conn_free(awr_ssl_t *ssl);
 /* ── I/O ────────────────────────────────────────────────────────────────── */
 
 /**
+ * awr_tls_set_read_deadline — set a per-thread total-read deadline.
+ *
+ * deadline_ms: wall-clock milliseconds since epoch (CLOCK_REALTIME).
+ *   Pass 0 to disable. Thread-safe: stored in thread-local storage.
+ *
+ * When set, awr_tls_conn_read retries SSL_read (using SO_RCVTIMEO as a
+ * poll interval) and returns -1 as soon as the deadline is reached.
+ * This bounds the total time spent reading a response even when the
+ * server drip-feeds data just under the per-read SO_RCVTIMEO window.
+ */
+void awr_tls_set_read_deadline(int64_t deadline_ms);
+
+/**
  * awr_tls_conn_read — read up to len bytes from an established TLS connection.
- * Returns bytes read (>0), 0 on clean EOF, or -1 on error.
+ * Returns bytes read (>0), 0 on clean EOF, or -1 on error / deadline exceeded.
  */
 int awr_tls_conn_read(awr_ssl_t *ssl, uint8_t *buf, int len);
 

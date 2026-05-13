@@ -204,6 +204,12 @@ pub const ClientOptions = struct {
     /// fails (~100-160ms saved per cold fetch to a known-failing host).
     /// Caller owns the slice; Client borrows it.
     tls_fail_cache_path: ?[]const u8 = null,
+    /// When true, skip the `fetchOnceStd` (stdlib TLS) attempt entirely
+    /// and go straight to the BoringSSL path. Used by prefetch workers to
+    /// ensure TLS reads go through `awr_tls_conn_read` (which supports the
+    /// total-fetch deadline). Without this, `fetchOnceStd` can hang on body
+    /// reads indefinitely because the stdlib TLS layer has no deadline.
+    force_boringssl: bool = false,
 };
 
 // ── Response ──────────────────────────────────────────────────────────────
@@ -488,6 +494,15 @@ pub const Client = struct {
         return self.fetchRequest(.{ .url = url_str });
     }
 
+    /// Set a total-read deadline for all TLS reads on the calling thread.
+    /// deadline_ms: wall-clock ms since epoch (use wallClockMillis() + budget_ms).
+    /// Pass 0 to clear. Prefetch workers call this before each fetch so a
+    /// server drip-feeding data just under SO_RCVTIMEO cannot hold the thread
+    /// indefinitely.
+    pub fn setFetchDeadlineMs(_: *Client, deadline_ms: i64) void {
+        tls_conn.setReadDeadlineMs(deadline_ms);
+    }
+
     /// Full fetch entry — accepts a `Request` with method and body. Follows
     /// redirects per `options.follow_redirects`. On 30x responses to a POST,
     /// per RFC 7231 §6.4.2/3 the body is dropped and the next hop becomes a
@@ -541,10 +556,11 @@ pub const Client = struct {
 
     fn fetchOnce(self: *Client, url_str: []const u8, method: Method, body: ?[]const u8) anyerror!Response {
         // Skip the std attempt for hosts where its TLS stack has already
-        // failed once. Without this cache, every same-host fetch pays the
-        // full TCP+TLS handshake on the std side (~100-160ms) before falling
-        // back to BoringSSL — wiping out most of the keep-alive savings.
-        if (self.shouldSkipStdForUrl(url_str)) {
+        // failed once, or when force_boringssl is set (prefetch workers use
+        // this to ensure TLS reads go through awr_tls_conn_read which
+        // supports total-fetch deadlines — the stdlib TLS body reader has
+        // no deadline mechanism).
+        if (self.options.force_boringssl or self.shouldSkipStdForUrl(url_str)) {
             if (boringsslFallbackAllowed(url_str)) {
                 return self.fetchOnceBoringSslHttp1(url_str, method, body) catch |e| return mapFetchError(e);
             }

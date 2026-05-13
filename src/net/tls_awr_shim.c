@@ -29,6 +29,9 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
 
 /* ── AWR cipher string ───────────────────────────────────────────────────
  * 15 entries: Chrome 132 list with TLS_RSA_WITH_3DES_EDE_CBC_SHA removed.
@@ -238,6 +241,17 @@ static awr_ssl_t *awr_tls_conn_new_impl(awr_ssl_ctx_t *ctx, int fd, const char *
         if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
     }
 
+    /* Per-read poll interval used with the total-deadline mechanism below.
+     * SO_RCVTIMEO makes SSL_read return WANT_READ after 1 s of no data,
+     * letting awr_tls_conn_read check the total-fetch deadline before
+     * retrying. 1 s is short enough that a deadline fires within ~1 s of
+     * expiry while long enough to avoid busy-polling.  On error SSL_read
+     * returns negative and the caller propagates TlsError.ReadFailed. */
+    {
+        struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+
     /* Attach socket and perform blocking handshake */
     if (!SSL_set_fd(ssl, fd))
         goto fail;
@@ -269,13 +283,41 @@ void awr_tls_conn_free(awr_ssl_t *ssl) {
 
 /* ── I/O ────────────────────────────────────────────────────────────────── */
 
-int awr_tls_conn_read(awr_ssl_t *ssl, uint8_t *buf, int len) {
-    int n = SSL_read((SSL *)ssl, buf, len);
-    if (n > 0) return n;
+/* Per-thread total-read deadline. 0 means no deadline. Set via
+ * awr_tls_set_read_deadline() before calling awr_tls_conn_read. The prefetch
+ * workers in page.zig each set their own deadline so a throttling server
+ * (e.g. GTM drip-feeding chunks every 2.8s) cannot hold a thread indefinitely
+ * even though each individual SO_RCVTIMEO window hasn't expired. */
+static __thread int64_t awr_tls_read_deadline_ms = 0;
 
-    int err = SSL_get_error((SSL *)ssl, n);
-    if (err == SSL_ERROR_ZERO_RETURN) return 0;  /* clean EOF */
-    return -1;
+void awr_tls_set_read_deadline(int64_t deadline_ms) {
+    awr_tls_read_deadline_ms = deadline_ms;
+}
+
+static int64_t wall_clock_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+int awr_tls_conn_read(awr_ssl_t *ssl, uint8_t *buf, int len) {
+    while (1) {
+        /* Deadline check before every attempt — catches the case where
+         * SO_RCVTIMEO fires repeatedly (server drip-feeds just under the
+         * per-read window) and the total elapsed time exceeds the budget. */
+        if (awr_tls_read_deadline_ms != 0 &&
+            wall_clock_ms() >= awr_tls_read_deadline_ms)
+            return -1;
+
+        int n = SSL_read((SSL *)ssl, buf, len);
+        if (n > 0) return n;
+
+        int err = SSL_get_error((SSL *)ssl, n);
+        if (err == SSL_ERROR_ZERO_RETURN) return 0;  /* clean EOF */
+        /* SO_RCVTIMEO elapsed but deadline not yet reached — retry. */
+        if (err == SSL_ERROR_WANT_READ) continue;
+        return -1;
+    }
 }
 
 int awr_tls_conn_write(awr_ssl_t *ssl, const uint8_t *buf, int len) {

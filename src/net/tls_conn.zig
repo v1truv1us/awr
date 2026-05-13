@@ -145,6 +145,14 @@ pub fn forceHttp11Alpn(ctx: *TlsCtx) void {
     _ = c.awr_tls_set_alpn_http11_only(ctx.inner);
 }
 
+/// Set a total-read deadline (wall-clock ms since epoch) for TLS reads on this
+/// thread.  Pass 0 to disable.  Each SSL_read retry checks the deadline so a
+/// server that drip-feeds data just under the per-read SO_RCVTIMEO window still
+/// gets killed when the total budget is exceeded.
+pub fn setReadDeadlineMs(deadline_ms: i64) void {
+    c.awr_tls_set_read_deadline(deadline_ms);
+}
+
 fn networkTestsEnabled() bool {
     if (!@hasDecl(std.c, "getenv")) return false;
     return std.c.getenv("AWR_RUN_NETWORK_TESTS") != null;

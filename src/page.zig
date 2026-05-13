@@ -199,6 +199,16 @@ fn prefetchWorkerMain(ctx: PrefetchWorker) void {
     var c = client.Client.init(ctx.allocator, io, ctx.options);
     defer c.deinit();
 
+    // Single deadline for the entire worker lifetime. Google's GTM server
+    // throttles awr connections to a trickle (~2.8s between data chunks),
+    // causing each fetch to run 14-18s even though individual SO_RCVTIMEO
+    // windows never fire. Without a total budget, workers with multiple URLs
+    // can block the join() for N * 14s. 5s covers most CDN round trips
+    // while bounding the maximum join() wait to ~6s (deadline + one 1s
+    // SO_RCVTIMEO window).
+    c.setFetchDeadlineMs(time_util.wallClockMillis() + 5_000);
+    defer c.setFetchDeadlineMs(0);
+
     var i = ctx.start;
     while (i < ctx.urls.len) : (i += ctx.stride) {
         const url = ctx.urls[i];
@@ -1585,10 +1595,14 @@ pub const Page = struct {
 
         // Strip cookie persistence from worker options — only the main
         // Client owns the on-disk jar, and concurrent file writes from
-        // multiple Clients would race.
+        // multiple Clients would race. Force BoringSSL so TLS reads go
+        // through awr_tls_conn_read, which supports the total-fetch
+        // deadline set below. The stdlib TLS path (fetchOnceStd) has no
+        // deadline and would hang on drip-feed responses (GTM).
         var worker_options = self.client.options;
         worker_options.persist_cookies = false;
         worker_options.cookie_jar_path = null;
+        worker_options.force_boringssl = true;
 
         var threads: [PREFETCH_WORKER_COUNT]std.Thread = undefined;
         var ctxs: [PREFETCH_WORKER_COUNT]PrefetchWorker = undefined;
@@ -1753,10 +1767,24 @@ pub const Page = struct {
     /// Fetch an external resource (e.g. `<script src>`) and return its body
     /// as an owned slice. Supports http(s):// via the HTTP client and
     /// file:// via direct filesystem read. Any other scheme fails fast.
+    ///
+    /// A 3-second total-read deadline is set for HTTP(S) fetches to prevent
+    /// throttling servers (e.g. GTM drip-feeding data) from blocking the
+    /// main thread indefinitely when the prefetch cache missed this URL.
     fn fetchExternalResource(self: *Page, url: []const u8) ![]u8 {
         if (std.mem.startsWith(u8, url, "http://") or
             std.mem.startsWith(u8, url, "https://"))
         {
+            // Use BoringSSL path so the total-read deadline applies. Without
+            // force_boringssl, fetchOnce would try the stdlib TLS path first;
+            // the stdlib body reader has no deadline and hangs on drip-feed.
+            const prev_boringssl = self.client.options.force_boringssl;
+            self.client.options.force_boringssl = true;
+            defer self.client.options.force_boringssl = prev_boringssl;
+
+            const deadline = time_util.wallClockMillis() + 3_000;
+            self.client.setFetchDeadlineMs(deadline);
+            defer self.client.setFetchDeadlineMs(0);
             var resp = try self.client.fetch(url);
             defer resp.deinit();
             return try self.allocator.dupe(u8, resp.body);

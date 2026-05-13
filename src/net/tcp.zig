@@ -52,7 +52,7 @@ const ConnCtx = struct {
 };
 
 /// Used by read/write callbacks to report byte count or error.
-const IoCtx = struct { result: anyerror!usize = 0 };
+const IoCtx = struct { result: anyerror!usize = 0, done: bool = false };
 
 // ── TcpConn ───────────────────────────────────────────────────────────────
 
@@ -74,6 +74,13 @@ pub const TcpConn = struct {
     const READ_BUF_SIZE = 64 * 1024;
     const WRITE_BUF_SIZE = 64 * 1024;
     const CONNECT_TIMEOUT_NS = 1 * std.time.ns_per_s;
+    /// Per-read wall-clock timeout. Without this, a server that accepts the
+    /// TCP+TLS handshake but never sends an HTTP response blocks the calling
+    /// thread in kevent() forever (0% CPU, 100% wall-clock hang). Mirrors
+    /// the connect-timeout pattern: poll .no_wait + sleep until deadline.
+    /// 10 s is generous for any real HTTP response; the B2 regression
+    /// (react.dev / gtag network stall) was hanging for 18+ s without it.
+    const READ_TIMEOUT_NS: u64 = 10 * std.time.ns_per_s;
 
     pub fn init(allocator: std.mem.Allocator, remote_addr: std.Io.net.IpAddress) !TcpConn {
         const read_buf = try allocator.alloc(u8, READ_BUF_SIZE);
@@ -163,7 +170,33 @@ pub const TcpConn = struct {
         var c: xev.Completion = undefined;
         var ctx = IoCtx{};
         self.socket.?.read(&self.loop, &c, .{ .slice = buf }, IoCtx, &ctx, readCb);
-        self.loop.run(.until_done) catch return TcpError.ReadFailed;
+        // Poll with a wall-clock deadline instead of blocking in kevent()
+        // forever (.until_done). Without this, a server that handshakes but
+        // never sends data hangs the thread at 0% CPU indefinitely.
+        self.loop.update_now();
+        const deadline = self.loop.now() + @as(i64, @intCast(READ_TIMEOUT_NS));
+        while (!ctx.done) {
+            var ts = std.posix.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
+            _ = std.posix.system.nanosleep(&ts, &ts); // 1ms between polls
+            self.loop.run(.no_wait) catch {
+                self.state = .closed;
+                if (self.socket) |s| {
+                    _ = std.c.close(s.fd);
+                    self.socket = null;
+                }
+                return TcpError.ReadFailed;
+            };
+            if (ctx.done) break;
+            self.loop.update_now();
+            if (self.loop.now() >= deadline) {
+                self.state = .closed;
+                if (self.socket) |s| {
+                    _ = std.c.close(s.fd);
+                    self.socket = null;
+                }
+                return TcpError.Timeout;
+            }
+        }
         return ctx.result catch TcpError.ReadFailed;
     }
 
@@ -215,6 +248,7 @@ fn writeCb(
     r: xev.WriteError!usize,
 ) xev.CallbackAction {
     ctx.?.result = r;
+    ctx.?.done = true;
     return .disarm;
 }
 
@@ -227,6 +261,7 @@ fn readCb(
     r: xev.ReadError!usize,
 ) xev.CallbackAction {
     ctx.?.result = r;
+    ctx.?.done = true;
     return .disarm;
 }
 
