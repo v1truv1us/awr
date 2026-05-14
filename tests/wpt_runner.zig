@@ -340,6 +340,11 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/history_back_forward_popstate.js"),
     },
     .{
+        .filename = "eventsource_parser.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/eventsource_parser.js"),
+    },
+    .{
         .filename = "session_storage_distinct.js",
         .html = "<html><body></body></html>",
         .script = @embedFile("wpt/session_storage_distinct.js"),

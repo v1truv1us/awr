@@ -55,7 +55,7 @@ Tests and Test262 cases.
 | `spec/subspecs/render-polish.md` | **Tier 2 closed sub-spec**: render + UX polish (bookmarks, URL-bar autocomplete, form/table/code/diff/image polish, cookie inspector enrichment) |
 | `spec/subspecs/browser-history.md` | **Tier 3 closed sub-spec**: History API (`pushState`, `replaceState`, `popstate`, `back`/`forward`/`go`) |
 | `spec/subspecs/browser-storage.md` | **Tier 3 closed sub-spec**: Web Storage (`localStorage` persisted, `sessionStorage` in-memory) |
-| `spec/subspecs/browser-realtime.md` | **Tier 3 active sub-spec**: real-time connections (WebSocket + EventSource/SSE) |
+| `spec/subspecs/browser-realtime.md` | **Tier 3 partial sub-spec**: real-time connections — SSE shipped (T3.D.1), WebSocket pending (T3.D.2) |
 | `spec/subspecs/browser-events.md` | **Tier 3 closed sub-spec**: browser events (synthetic input, `DOMContentLoaded`/`load`, `requestAnimationFrame`, `matchMedia` evaluation) |
 | `docs/adr/0001-spec-governance.md` | Historical record for spec/documentation governance decisions |
 

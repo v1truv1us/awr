@@ -550,6 +550,38 @@ documentation governance.
   browser-realtime open), `spec/MVP.md` (canonical-now table
   flipped browser-events.md row to closed), this ADR.
 
+### 2026-05-13 — T3.D.1 EventSource (SSE) shipped (browser-realtime PARTIAL)
+
+- Date: 2026-05-13
+- Change: `spec/subspecs/browser-realtime.md` status → PARTIAL
+  (SSE landed; WebSocket remains for next session). New
+  `src/net/sse.zig` (WHATWG-compliant incremental parser, 13 unit
+  tests). One native callback `__awr_sse_parse_all__` exposes the
+  parser to JS as a `text → JSON-array` function. JS-side
+  `EventSource` class added to BRIDGE_POLYFILL: standard
+  `CONNECTING`/`OPEN`/`CLOSED` constants, full listener API,
+  wraps `fetch` for the body, dispatches parsed events. New WPT
+  case `tests/wpt/eventsource_parser.js`.
+- Reason: SSE was the smaller of the two browser-realtime
+  surfaces and could be shipped in a single session without
+  rewriting AWR's networking model. Honest scope: AWR's page-
+  processing model has a bounded `drainAll` budget — there's
+  nowhere for a long-lived background SSE connection to deliver
+  events, so this slice ships request/response SSE (works for
+  sites that bootstrap state via SSE; auto-reconnect + true
+  streaming deferred until daemon-mode TUI work creates a
+  background runtime). WebSocket (T3.D.2) is a meaningfully
+  larger commitment (RFC 6455 upgrade + frame codec + masking
+  + fragment reassembly, ~600+ lines) and gets its own session
+  so it can be done carefully.
+- Documents updated: `spec/subspecs/browser-realtime.md` (§8
+  partial closure record + honest scope-limitation note),
+  `spec/subspecs/browser-roadmap.md` (Tier 3 sub-spec list notes
+  SSE landed, WebSocket pending), `spec/MVP.md` (canonical-now
+  table flipped browser-realtime to "partial"),
+  `spec/subspecs/wpt-conformance.md` (109 → 110 WPT cases, new
+  EventSource (SSE) row), this ADR.
+
 ### Template for future amendments
 
 - Date:

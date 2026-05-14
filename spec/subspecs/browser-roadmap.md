@@ -241,11 +241,12 @@ work end-to-end.
 **CLOSED 2026-05-13**),
 `spec/subspecs/browser-storage.md` (localStorage + sessionStorage,
 **CLOSED 2026-05-13**),
-`spec/subspecs/browser-realtime.md` (WebSocket + EventSource/SSE, ACTIVE),
+`spec/subspecs/browser-realtime.md` (WebSocket + EventSource/SSE,
+**SSE landed 2026-05-13 — T3.D.1; WebSocket pending T3.D.2**),
 `spec/subspecs/browser-events.md` (synthetic input events,
-requestAnimationFrame, matchMedia, **CLOSED 2026-05-13**). All promoted
-to ACTIVE 2026-05-13; three of four closed same day. browser-realtime
-remains the last open Tier 3 sub-spec.
+requestAnimationFrame, matchMedia, **CLOSED 2026-05-13**). Three
+fully closed + SSE landed in browser-realtime; WebSocket remains
+the last unshipped piece of Tier 3.
 
 **WPT corpus area**: history, storage, websocket, mutation
 observer, event constructors.

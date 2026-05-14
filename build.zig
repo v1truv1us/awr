@@ -278,6 +278,22 @@ pub fn build(b: *std.Build) void {
         test_js_step.dependOn(&run_storage_path.step);
     }
 
+    // ── SSE parser (Tier 3 — T3.D.1) — pure Zig, no deps ──────────────────
+    {
+        const sse_mod = b.createModule(.{
+            .root_source_file = b.path("src/net/sse.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const sse_test = b.addTest(.{
+            .name = "sse",
+            .root_module = sse_mod,
+        });
+        const run_sse = b.addRunArtifact(sse_test);
+        test_step.dependOn(&run_sse.step);
+        test_net_step.dependOn(&run_sse.step);
+    }
+
     // ── History API stack (Tier 3 — T3.B) — pure Zig, no deps ─────────────
     // Same shape as the storage module: standalone for fast iteration,
     // bridge.zig pulls it transitively when dom-bridge tests run.

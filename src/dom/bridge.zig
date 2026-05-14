@@ -36,6 +36,7 @@ const engine = @import("../js/engine.zig");
 const render = @import("../render.zig");
 const storage_mod = @import("../js/storage.zig");
 const history_mod = @import("history.zig");
+const sse_mod = @import("../net/sse.zig");
 
 // ── BridgeCtx ─────────────────────────────────────────────────────────────
 
@@ -232,6 +233,10 @@ fn installNativeCallbacks(eng: *engine.JsEngine) !void {
         .{ "hist_length", histLengthFn },
         .{ "hist_state_json", histStateJsonFn },
         .{ "hist_current_url", histCurrentUrlFn },
+        // Tier 3 — T3.D.1 SSE. One native: parse a complete event-stream
+        // body and return events as JSON. EventSource JS class wraps
+        // fetch + this. Real streaming + reconnect deferred.
+        .{ "sse_parse_all", sseParseAllFn },
     }) |entry| {
         const fname: [:0]const u8 = "__awr_" ++ entry[0] ++ "__";
         const fn_val = qjs.Value.initCFunction(ctx, entry[1], fname, 1);
@@ -1297,6 +1302,78 @@ fn histCurrentUrlFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickj
     return qjs.Value.initStringLen(c, bridge.history.currentUrl());
 }
 
+// ── SSE host binding (Tier 3 — T3.D.1) ────────────────────────────────────
+//
+// The EventSource JS class fetches the whole SSE body and hands it
+// to this native, which runs the Zig parser and returns the events
+// as a JSON array string. JS-side then JSON.parses and dispatches.
+// Single round trip, no per-instance parser handle bookkeeping.
+
+fn sseParseAllFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.initStringLen(undefined, "[]");
+    const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(c, "[]");
+    if (args.len == 0) return qjs.Value.initStringLen(c, "[]");
+    const v: qjs.Value = @bitCast(args[0]);
+    const cstr = v.toCString(c) orelse return qjs.Value.initStringLen(c, "[]");
+    defer c.freeCString(cstr);
+    const text = std.mem.span(cstr);
+
+    var parser = sse_mod.Parser.init(bridge.allocator);
+    defer parser.deinit();
+    parser.feed(text) catch return qjs.Value.initStringLen(c, "[]");
+    parser.finish() catch return qjs.Value.initStringLen(c, "[]");
+
+    // Build a JSON array of {event, data, lastEventId, retry?}.
+    // retry_ms is included on the FIRST event (or as a standalone
+    // marker if there are no events) so the JS wrapper can pick up
+    // the server's preferred reconnect delay.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(bridge.allocator);
+    buf.append(bridge.allocator, '[') catch return qjs.Value.initStringLen(c, "[]");
+
+    var first = true;
+    while (parser.next()) |ev| {
+        defer parser.freeEvent(ev);
+        if (!first) buf.append(bridge.allocator, ',') catch break;
+        first = false;
+        buf.append(bridge.allocator, '{') catch break;
+        appendJsonField(bridge.allocator, &buf, "event", ev.event) catch break;
+        buf.append(bridge.allocator, ',') catch break;
+        appendJsonField(bridge.allocator, &buf, "data", ev.data) catch break;
+        buf.append(bridge.allocator, ',') catch break;
+        appendJsonField(bridge.allocator, &buf, "lastEventId", ev.last_event_id) catch break;
+        buf.append(bridge.allocator, '}') catch break;
+    }
+    buf.append(bridge.allocator, ']') catch return qjs.Value.initStringLen(c, "[]");
+
+    return qjs.Value.initStringLen(c, buf.items);
+}
+
+fn appendJsonField(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), name: []const u8, value: []const u8) !void {
+    try buf.append(allocator, '"');
+    try buf.appendSlice(allocator, name);
+    try buf.appendSlice(allocator, "\":");
+    try writeJsStrTo(allocator, buf, value);
+}
+
+fn writeJsStrTo(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
+    try buf.append(allocator, '"');
+    for (s) |c| switch (c) {
+        '"' => try buf.appendSlice(allocator, "\\\""),
+        '\\' => try buf.appendSlice(allocator, "\\\\"),
+        '\n' => try buf.appendSlice(allocator, "\\n"),
+        '\r' => try buf.appendSlice(allocator, "\\r"),
+        '\t' => try buf.appendSlice(allocator, "\\t"),
+        0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => {
+            var esc: [6]u8 = undefined;
+            const w = std.fmt.bufPrint(&esc, "\\u{x:0>4}", .{c}) catch continue;
+            try buf.appendSlice(allocator, w);
+        },
+        else => try buf.append(allocator, c),
+    };
+    try buf.append(allocator, '"');
+}
+
 // ── JS polyfill ───────────────────────────────────────────────────────────
 
 const BRIDGE_POLYFILL =
@@ -2169,6 +2246,101 @@ const BRIDGE_POLYFILL =
     \\    __awr_ss_get_item__, __awr_ss_set_item__, __awr_ss_remove_item__,
     \\    __awr_ss_clear__, __awr_ss_key__, __awr_ss_length__);
     \\
+    \\  // Tier 3 — T3.D.1. EventSource: fetch the event-stream body once,
+    \\  // hand it to the Zig SSE parser, then dispatch the resulting events
+    \\  // to listeners. Honest scope: this is request/response, not true
+    \\  // streaming — works for sites that send initial state via SSE; long-
+    \\  // lived background streams + auto-reconnect are deferred (see
+    \\  // browser-realtime.md §8). withCredentials is accepted but ignored.
+    \\  function EventSource(url, init) {
+    \\    if (!(this instanceof EventSource)) {
+    \\      throw new TypeError("Failed to construct 'EventSource': use 'new'");
+    \\    }
+    \\    this.url = String(url == null ? '' : url);
+    \\    this.readyState = 0; // CONNECTING
+    \\    this.withCredentials = !!(init && init.withCredentials);
+    \\    this.onopen = null;
+    \\    this.onmessage = null;
+    \\    this.onerror = null;
+    \\    this.__listeners = Object.create(null);
+    \\    this.__closed = false;
+    \\    var self = this;
+    \\
+    \\    // Use the existing fetch polyfill (its Promise plays nicely with
+    \\    // the page-processing drainAll loop). Accept header signals SSE.
+    \\    fetch(this.url, { headers: { 'Accept': 'text/event-stream' } })
+    \\      .then(function(res) {
+    \\        if (self.__closed) return null;
+    \\        if (!res.ok) throw new Error('EventSource: HTTP ' + res.status);
+    \\        return res.text();
+    \\      })
+    \\      .then(function(body) {
+    \\        if (self.__closed || body == null) return;
+    \\        self.readyState = 1; // OPEN
+    \\        self.__fire('open', { type: 'open' });
+    \\        var arr = JSON.parse(__awr_sse_parse_all__(body));
+    \\        for (var i = 0; i < arr.length; i++) {
+    \\          if (self.__closed) return;
+    \\          var ev = arr[i];
+    \\          var msg = new Event(ev.event);
+    \\          try { msg.data = ev.data; } catch (_) {}
+    \\          try { msg.lastEventId = ev.lastEventId; } catch (_) {}
+    \\          try { msg.origin = (function () {
+    \\            var loc = (typeof location !== 'undefined' ? location.origin : '');
+    \\            // Best-effort URL → origin; new URL() may not exist in
+    \\            // every harness. Fall back to location.origin.
+    \\            try { return new URL(self.url, loc).origin; } catch (_) { return loc; }
+    \\          })(); } catch (_) {}
+    \\          self.__fire(ev.event, msg);
+    \\        }
+    \\        self.readyState = 2; // CLOSED
+    \\      })
+    \\      .catch(function(_err) {
+    \\        if (self.__closed) return;
+    \\        self.readyState = 2;
+    \\        self.__fire('error', new Event('error'));
+    \\      });
+    \\  }
+    \\  EventSource.CONNECTING = 0;
+    \\  EventSource.OPEN = 1;
+    \\  EventSource.CLOSED = 2;
+    \\  EventSource.prototype.CONNECTING = 0;
+    \\  EventSource.prototype.OPEN = 1;
+    \\  EventSource.prototype.CLOSED = 2;
+    \\  EventSource.prototype.addEventListener = function(type, listener) {
+    \\    if (typeof listener !== 'function') return;
+    \\    if (!this.__listeners[type]) this.__listeners[type] = [];
+    \\    this.__listeners[type].push(listener);
+    \\  };
+    \\  EventSource.prototype.removeEventListener = function(type, listener) {
+    \\    var arr = this.__listeners[type];
+    \\    if (!arr) return;
+    \\    var idx = arr.indexOf(listener);
+    \\    if (idx >= 0) arr.splice(idx, 1);
+    \\  };
+    \\  EventSource.prototype.dispatchEvent = function(event) {
+    \\    this.__fire(event && event.type, event);
+    \\    return true;
+    \\  };
+    \\  EventSource.prototype.close = function() {
+    \\    this.__closed = true;
+    \\    this.readyState = 2;
+    \\  };
+    \\  EventSource.prototype.__fire = function(type, evt) {
+    \\    var propKey = 'on' + type;
+    \\    if (typeof this[propKey] === 'function') {
+    \\      try { this[propKey](evt); } catch (_) {}
+    \\    }
+    \\    var arr = this.__listeners[type];
+    \\    if (arr) {
+    \\      var copy = arr.slice();
+    \\      for (var i = 0; i < copy.length; i++) {
+    \\        try { copy[i](evt); } catch (_) {}
+    \\      }
+    \\    }
+    \\  };
+    \\  globalThis.EventSource = EventSource;
+    \\
     \\  globalThis.XMLHttpRequest = function() {
     \\    this.readyState = 0;
     \\    this.status = 0;
@@ -2718,6 +2890,74 @@ test "bridge — replaceState updates state without changing length" {
     try std.testing.expect(try eng.evalBool("history.length === 2"));
     try std.testing.expect(try eng.evalBool("history.state.a === 2"));
     try std.testing.expect(try eng.evalBool("location.pathname === '/x/edit'"));
+}
+
+test "bridge — sse_parse_all native parses a simple stream" {
+    const run = engine.JsEngine.eval;
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    try run(&eng,
+        \\globalThis.__sse_arr = JSON.parse(__awr_sse_parse_all__(
+        \\  'event: ping\ndata: pong\n\ndata: hello\n\n'));
+    , "<test>");
+    try std.testing.expect(try eng.evalBool("globalThis.__sse_arr.length === 2"));
+    try std.testing.expect(try eng.evalBool("globalThis.__sse_arr[0].event === 'ping'"));
+    try std.testing.expect(try eng.evalBool("globalThis.__sse_arr[0].data === 'pong'"));
+    try std.testing.expect(try eng.evalBool("globalThis.__sse_arr[1].event === 'message'"));
+    try std.testing.expect(try eng.evalBool("globalThis.__sse_arr[1].data === 'hello'"));
+}
+
+test "bridge — EventSource constructor + close() shape" {
+    const run = engine.JsEngine.eval;
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    // No fetch host attached → EventSource will reject async, but the
+    // synchronous shape (constructor, readyState, close) must be
+    // immediately observable. This proves the JS class is wired
+    // without depending on a live network.
+    try run(&eng,
+        \\globalThis.__es = new EventSource('https://example.com/stream');
+    , "<test>");
+    try std.testing.expect(try eng.evalBool("typeof EventSource === 'function'"));
+    try std.testing.expect(try eng.evalBool("EventSource.CONNECTING === 0"));
+    try std.testing.expect(try eng.evalBool("EventSource.OPEN === 1"));
+    try std.testing.expect(try eng.evalBool("EventSource.CLOSED === 2"));
+    try std.testing.expect(try eng.evalBool("globalThis.__es.url === 'https://example.com/stream'"));
+    try std.testing.expect(try eng.evalBool("globalThis.__es.readyState === 0"));
+    try std.testing.expect(try eng.evalBool("globalThis.__es.withCredentials === false"));
+    try run(&eng, "globalThis.__es.close();", "<test>");
+    try std.testing.expect(try eng.evalBool("globalThis.__es.readyState === 2"));
+}
+
+test "bridge — sse_parse_all handles multi-line data + retry field" {
+    const run = engine.JsEngine.eval;
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    try run(&eng,
+        \\globalThis.__sse2 = JSON.parse(__awr_sse_parse_all__(
+        \\  'retry: 5000\nid: 7\ndata: l1\ndata: l2\n\n'));
+    , "<test>");
+    try std.testing.expect(try eng.evalBool("globalThis.__sse2.length === 1"));
+    try std.testing.expect(try eng.evalBool("globalThis.__sse2[0].data === 'l1\\nl2'"));
+    try std.testing.expect(try eng.evalBool("globalThis.__sse2[0].lastEventId === '7'"));
 }
 
 test "bridge — setStorageOrigin enables cross-process disk persistence" {

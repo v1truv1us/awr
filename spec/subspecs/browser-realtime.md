@@ -1,6 +1,7 @@
 # Real-time connections — Tier 3 sub-spec
 
-> **Status:** ACTIVE (promoted from DEFERRED to ACTIVE 2026-05-13)
+> **Status:** PARTIAL — SSE landed 2026-05-13 (T3.D.1); WebSocket
+> remains active for a follow-up session (T3.D.2).
 > `spec/MVP.md` is the canonical umbrella spec.
 > `spec/subspecs/browser-roadmap.md` is the cross-tier ladder
 > authority; this file owns Tier 3 real-time connection execution
@@ -139,4 +140,58 @@ Indicative slice order (defer detailed plan to implementation time):
 
 ## 8. Closure record
 
-_Not yet closed._
+| Field | Value |
+|-------|-------|
+| Status | PARTIAL — SSE shipped, WebSocket pending |
+| Date | 2026-05-13 (T3.D.1 — SSE only) |
+| Final commit (so far) | (this commit — T3.D.1 EventSource) |
+| Gates satisfied | §4.1 prior-tier gates ✓ / §4.2 SSE parsing (data/event/id/retry, multi-line, BOM, CR/LF/CRLF) ✓ / §4.3 WebSocket — **not yet** / §4.4 SSE round-trip — **partial** (parse-only WPT case; no live test server) / §4.5 SSE manual smoke — pending |
+| Sign-off (T3.D.1) | AWR Dev |
+
+**Delivered surface (T3.D.1 — SSE):**
+
+- `src/net/sse.zig`: WHATWG-compliant incremental parser. Handles
+  `data:` / `event:` / `id:` / `retry:` fields, multi-line data
+  joined with `\n`, comment lines, BOM stripping, CR/LF/CRLF
+  terminators (incl. CR-LF split across chunks), id-with-NUL
+  ignoring, empty-data dispatch suppression. 13 unit tests.
+- One native callback `__awr_sse_parse_all__(text) → JSON array`
+  that runs the Zig parser over a complete body and returns
+  events as `[{event, data, lastEventId}, ...]`.
+- JS-side `EventSource` class: standard `CONNECTING/OPEN/CLOSED`
+  constants, `addEventListener`/`removeEventListener`/`close()`,
+  `onopen`/`onmessage`/`onerror` properties, dispatches events
+  with `.data`/`.lastEventId`/`.origin` set per spec. Wraps
+  `fetch` for the body, then drains parsed events.
+
+**Honest scope limitation (intentional):**
+
+EventSource is **request/response, not streaming**. AWR's page-
+processing model has a bounded `drainAll` budget (1-2s), so
+there is no "always-on" runtime where a long-lived background
+SSE connection could deliver events. The current implementation:
+
+- Fetches the full event-stream body, parses, dispatches all
+  events at once — works for sites that send initial state via
+  SSE (status pages, news bootstraps).
+- Does NOT auto-reconnect on disconnect.
+- Does NOT maintain the connection across navigations.
+
+This is deliberately conservative. Real streaming + reconnect
+will land in a follow-up slice once daemon-mode + TUI session
+work creates a place for background connections to live.
+
+**WebSocket — DEFERRED to next session (T3.D.2):**
+
+Not implemented. Sub-spec sections §2.2 (WebSocket), §4.3
+(closure gate), and §6.2 (slice 2) remain ACTIVE. Closure of
+this sub-spec requires both T3.D.1 (done) and T3.D.2 (pending).
+
+**Test surface (T3.D.1):**
+
+- `src/net/sse.zig` — 13 unit tests covering the spec's parsing
+  surface end-to-end.
+- `src/dom/bridge.zig` — 3 JS-level tests (parse via the native,
+  EventSource constructor + close shape, multi-line + retry).
+- `tests/wpt/eventsource_parser.js` — new WPT case covering the
+  EventSource shape + parser surface that closure gates require.
