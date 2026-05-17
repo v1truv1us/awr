@@ -28,3 +28,9 @@ zig-pkg/
 # parallel task sessions, reaped via `solo worktree cleanup`. The
 # tracking DB at .solo/solo.db is checked in; the worktrees are not.
 .solo/worktrees/
+.solo/*.db-shm
+.solo/*.db-wal
+
+# Local diagnostic captures and generated test comparison outputs.
+errors/
+*.actual.txt

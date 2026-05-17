@@ -1,0 +1,4 @@
+- [ ] Add a richer second-stage fallback backend for `tools` and `call` (Priority: Medium)
+- [ ] Add structured per-problem tags for reproducibility and AWR issue filing (Priority: Medium)
+- [ ] Add integration tests that exercise the real local AWR binary against `experiments/webmcp_mock.html` (Priority: Medium)
+- [ ] Add project-local settings/examples for shipping this package outside the AWR repo (Priority: Low)

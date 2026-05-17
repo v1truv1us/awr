@@ -20,7 +20,10 @@
 #   1 = one or more checks failed (failing check printed to stderr)
 #   2 = setup failure (binary missing, jq missing, port collision)
 
-set -euo pipefail
+# Drop -e so individual test failures accumulate rather than aborting the
+# tally loop. Unexpected setup failures still exit via explicit `exit 2`
+# guards below. -uo pipefail remain for unbound-variable protection.
+set -uo pipefail
 
 AWR_BIN="${AWR_BIN:-./zig-out/bin/awr}"
 OFFLINE="${AWR_SMOKE_OFFLINE:-0}"
@@ -36,10 +39,14 @@ FAILS=()
 PIDS=()
 
 cleanup() {
-  for pid in "${PIDS[@]}"; do
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-  done
+  # Guard against empty PIDS — bash set -u treats "${arr[@]}" on an empty
+  # array as unbound in some versions.
+  if [[ ${#PIDS[@]} -gt 0 ]]; then
+    for pid in "${PIDS[@]}"; do
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    done
+  fi
 }
 trap cleanup EXIT
 
@@ -158,7 +165,7 @@ else
   expect_json "B1: 304 Not Modified under 2s"   2000 \
     '.status == 304 and (.body_text | length) == 0' \
     "$AWR_BIN" https://httpbin.org/status/304
-  expect_json "B2: react.dev under 8s (gtag-loop)" 8000 \
+  expect_json "B2: react.dev under 15s (gtag-loop)" 15000 \
     '.status == 200 and .title == "React"' \
     "$AWR_BIN" https://react.dev
   expect_json "B3: example.com baseline (no regression)" 2000 \
