@@ -37,6 +37,7 @@ const render = @import("../render.zig");
 const storage_mod = @import("../js/storage.zig");
 const history_mod = @import("history.zig");
 const sse_mod = @import("../net/sse.zig");
+const ws_mod = @import("../net/websocket.zig");
 
 // ── BridgeCtx ─────────────────────────────────────────────────────────────
 
@@ -237,6 +238,9 @@ fn installNativeCallbacks(eng: *engine.JsEngine) !void {
         // body and return events as JSON. EventSource JS class wraps
         // fetch + this. Real streaming + reconnect deferred.
         .{ "sse_parse_all", sseParseAllFn },
+        // Tier 3 — T3.D.2 WebSocket. One native: connect, exchange frames,
+        // return messages as JSON. WebSocket JS class wraps this.
+        .{ "ws_connect_and_recv", wsConnectAndRecvFn },
     }) |entry| {
         const fname: [:0]const u8 = "__awr_" ++ entry[0] ++ "__";
         const fn_val = qjs.Value.initCFunction(ctx, entry[1], fname, 1);
@@ -1374,6 +1378,128 @@ fn writeJsStrTo(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), s: []cons
     try buf.append(allocator, '"');
 }
 
+// ── WebSocket host binding (Tier 3 — T3.D.2) ──────────────────────────────
+//
+// The WebSocket JS polyfill collects pre-open sends and calls this native
+// with (url, sendsJson). Zig connects, exchanges frames, then returns JSON:
+//   {"messages":[{"data":"...","binary":false},...],
+//    "closeCode":1000,"closeReason":""}
+// On error: {"error":"connection failed"}
+
+fn wsConnectAndRecvFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.initStringLen(undefined, "{\"error\":\"no context\"}");
+    const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(c, "{\"error\":\"no bridge\"}");
+    if (args.len < 2) return qjs.Value.initStringLen(c, "{\"error\":\"missing args\"}");
+
+    const url_v: qjs.Value = @bitCast(args[0]);
+    const sends_v: qjs.Value = @bitCast(args[1]);
+    const url_cstr = url_v.toCString(c) orelse return qjs.Value.initStringLen(c, "{\"error\":\"bad url\"}");
+    defer c.freeCString(url_cstr);
+    const sends_cstr = sends_v.toCString(c) orelse return qjs.Value.initStringLen(c, "{\"error\":\"bad sends\"}");
+    defer c.freeCString(sends_cstr);
+
+    const result = wsDoConnect(bridge.allocator, std.mem.span(url_cstr), std.mem.span(sends_cstr)) catch {
+        return qjs.Value.initStringLen(c, "{\"error\":\"connection failed\"}");
+    };
+    defer bridge.allocator.free(result);
+    return qjs.Value.initStringLen(c, result);
+}
+
+fn wsDoConnect(allocator: std.mem.Allocator, url_str: []const u8, sends_json: []const u8) ![]u8 {
+    const tls_conn_mod = @import("../net/tls_conn.zig");
+    const io_mod = @import("../util/io.zig");
+    const url_mod = @import("../net/url.zig");
+
+    const url = try url_mod.Url.parse(url_str);
+    if (!url.is_websocket) return error.NotWebSocket;
+
+    // Parse pending sends from JSON array of strings.
+    var sends = std.ArrayList([]const u8).init(allocator);
+    defer sends.deinit();
+    {
+        const p = try std.json.parseFromSlice(std.json.Value, allocator, sends_json, .{});
+        defer p.deinit();
+        if (p.value == .array) {
+            for (p.value.array.items) |item| {
+                if (item == .string) try sends.append(item.string);
+            }
+        }
+    }
+
+    var path_buf: [2048]u8 = undefined;
+    const path = url.pathWithQuery(&path_buf);
+
+    const stream = try std.net.tcpConnectToHost(allocator, url.host, url.port);
+    defer stream.close();
+
+    if (url.is_https) {
+        var tls_ctx = try tls_conn_mod.initCompatHttp11WithBundle();
+        defer tls_ctx.deinit();
+        const hostname_z = try allocator.dupeZ(u8, url.host);
+        defer allocator.free(hostname_z);
+        var conn = try tls_conn_mod.TlsConn.connectNoAlps(&tls_ctx, stream.handle, hostname_z.ptr);
+        defer conn.deinit();
+
+        const TlsReader = io_mod.BlockingReader(*tls_conn_mod.TlsConn, tls_conn_mod.TlsError, tls_conn_mod.TlsConn.readFn);
+        var reader: TlsReader = .{ .context = &conn };
+        const TlsWriter = struct {
+            inner: *tls_conn_mod.TlsConn,
+            pub fn writeAll(self: *@This(), data: []const u8) !void {
+                var off: usize = 0;
+                while (off < data.len) off += try self.inner.writeFn(data[off..]);
+            }
+        };
+        var writer: TlsWriter = .{ .inner = &conn };
+
+        var session = try ws_mod.runSession(&reader, &writer, allocator, url.host, path, sends.items);
+        defer session.deinit();
+        return buildWsResultJson(allocator, &session);
+    } else {
+        const TcpReader = io_mod.BlockingReader(std.net.Stream, anyerror, tcpStreamRead);
+        var reader: TcpReader = .{ .context = stream };
+        const TcpWriter = struct {
+            inner: std.net.Stream,
+            pub fn writeAll(self: *@This(), data: []const u8) !void {
+                var off: usize = 0;
+                while (off < data.len) {
+                    const n = std.posix.write(self.inner.handle, data[off..]) catch return error.WriteFailed;
+                    off += n;
+                }
+            }
+        };
+        var writer: TcpWriter = .{ .inner = stream };
+
+        var session = try ws_mod.runSession(&reader, &writer, allocator, url.host, path, sends.items);
+        defer session.deinit();
+        return buildWsResultJson(allocator, &session);
+    }
+}
+
+fn tcpStreamRead(stream: std.net.Stream, buf: []u8) anyerror!usize {
+    return std.posix.read(stream.handle, buf);
+}
+
+fn buildWsResultJson(allocator: std.mem.Allocator, session: *ws_mod.WsSession) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "{\"messages\":[");
+    for (session.messages.items, 0..) |msg, i| {
+        if (i > 0) try buf.append(allocator, ',');
+        try buf.appendSlice(allocator, "{\"data\":");
+        try writeJsStrTo(allocator, &buf, msg.data);
+        try buf.appendSlice(allocator, if (msg.is_binary) ",\"binary\":true}" else ",\"binary\":false}");
+    }
+    try buf.appendSlice(allocator, "],\"closeCode\":");
+    var code_buf: [8]u8 = undefined;
+    try buf.appendSlice(allocator, std.fmt.bufPrint(&code_buf, "{d}", .{session.close_code}) catch "1000");
+    try buf.appendSlice(allocator, ",\"closeReason\":");
+    try writeJsStrTo(allocator, &buf, session.close_reason);
+    try buf.append(allocator, '}');
+
+    return buf.toOwnedSlice(allocator);
+}
+
 // ── JS polyfill ───────────────────────────────────────────────────────────
 
 const BRIDGE_POLYFILL =
@@ -2341,6 +2467,92 @@ const BRIDGE_POLYFILL =
     \\  };
     \\  globalThis.EventSource = EventSource;
     \\
+    \\  // Tier 3 — T3.D.2. WebSocket: one-shot connect+recv, honest scope.
+    \\  // send() before open is buffered; post-open send deferred (one-shot model).
+    \\  function WebSocket(url, protocols) {
+    \\    void protocols;
+    \\    if (!(this instanceof WebSocket)) {
+    \\      throw new TypeError("Failed to construct 'WebSocket': use 'new'");
+    \\    }
+    \\    this.url = String(url == null ? '' : url);
+    \\    this.readyState = 0; // CONNECTING
+    \\    this.protocol = '';
+    \\    this.extensions = '';
+    \\    this.bufferedAmount = 0;
+    \\    this.binaryType = 'arraybuffer';
+    \\    this.onopen = null;
+    \\    this.onmessage = null;
+    \\    this.onerror = null;
+    \\    this.onclose = null;
+    \\    this.__pendingSends = [];
+    \\    this.__listeners = Object.create(null);
+    \\    var self = this;
+    \\    Promise.resolve().then(function() {
+    \\      if (self.readyState === 3) return;
+    \\      var sends = JSON.stringify(self.__pendingSends);
+    \\      var result;
+    \\      try { result = JSON.parse(__awr_ws_connect_and_recv__(self.url, sends)); }
+    \\      catch (_) { result = { error: 'parse failed' }; }
+    \\      if (result.error) {
+    \\        self.readyState = 3;
+    \\        self.__fire('error', { type: 'error' });
+    \\        self.__fire('close', { type: 'close', code: 1006, reason: '', wasClean: false });
+    \\        return;
+    \\      }
+    \\      self.readyState = 1;
+    \\      self.__fire('open', { type: 'open' });
+    \\      var msgs = result.messages || [];
+    \\      for (var i = 0; i < msgs.length; i++) {
+    \\        if (self.readyState === 3) break;
+    \\        self.__fire('message', { type: 'message', data: msgs[i].data,
+    \\          origin: self.url, lastEventId: '', ports: [] });
+    \\      }
+    \\      self.readyState = 3;
+    \\      self.__fire('close', { type: 'close', code: result.closeCode || 1000,
+    \\        reason: result.closeReason || '', wasClean: true });
+    \\    }).catch(function() {
+    \\      self.readyState = 3;
+    \\      self.__fire('error', { type: 'error' });
+    \\    });
+    \\  }
+    \\  WebSocket.CONNECTING = 0; WebSocket.OPEN = 1;
+    \\  WebSocket.CLOSING = 2;    WebSocket.CLOSED = 3;
+    \\  WebSocket.prototype.CONNECTING = 0; WebSocket.prototype.OPEN = 1;
+    \\  WebSocket.prototype.CLOSING = 2;    WebSocket.prototype.CLOSED = 3;
+    \\  WebSocket.prototype.send = function(data) {
+    \\    if (this.readyState === 0) { this.__pendingSends.push(String(data)); return; }
+    \\    if (this.readyState !== 1) throw new DOMException('WebSocket not open', 'InvalidStateError');
+    \\  };
+    \\  WebSocket.prototype.close = function(code, reason) {
+    \\    void code; void reason;
+    \\    this.readyState = 3;
+    \\  };
+    \\  WebSocket.prototype.addEventListener = function(type, fn) {
+    \\    if (typeof fn !== 'function') return;
+    \\    if (!this.__listeners[type]) this.__listeners[type] = [];
+    \\    this.__listeners[type].push(fn);
+    \\  };
+    \\  WebSocket.prototype.removeEventListener = function(type, fn) {
+    \\    var arr = this.__listeners[type];
+    \\    if (!arr) return;
+    \\    var idx = arr.indexOf(fn);
+    \\    if (idx >= 0) arr.splice(idx, 1);
+    \\  };
+    \\  WebSocket.prototype.__fire = function(type, evt) {
+    \\    var propKey = 'on' + type;
+    \\    if (typeof this[propKey] === 'function') {
+    \\      try { this[propKey](evt); } catch (_) {}
+    \\    }
+    \\    var arr = this.__listeners[type];
+    \\    if (arr) {
+    \\      var copy = arr.slice();
+    \\      for (var i = 0; i < copy.length; i++) {
+    \\        try { copy[i](evt); } catch (_) {}
+    \\      }
+    \\    }
+    \\  };
+    \\  globalThis.WebSocket = WebSocket;
+    \\
     \\  globalThis.XMLHttpRequest = function() {
     \\    this.readyState = 0;
     \\    this.status = 0;
@@ -3061,4 +3273,46 @@ test "bridge — element.matches and closest use Zig selector engine" {
         "(() => { const leaf = document.getElementById('leaf'); return leaf.matches('p.copy') && leaf.closest('section.shell').tagName === 'SECTION'; })()",
     );
     try std.testing.expect(ok);
+}
+
+test "bridge — WebSocket constructor shape" {
+    const run = engine.JsEngine.eval;
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    // Verify the class constants and synchronous constructor shape without
+    // exercising the network path.
+    try run(&eng,
+        \\globalThis.__ws = new WebSocket('wss://example.com/chat');
+    , "<test>");
+    try std.testing.expect(try eng.evalBool("typeof WebSocket === 'function'"));
+    try std.testing.expect(try eng.evalBool("WebSocket.CONNECTING === 0"));
+    try std.testing.expect(try eng.evalBool("WebSocket.OPEN === 1"));
+    try std.testing.expect(try eng.evalBool("WebSocket.CLOSING === 2"));
+    try std.testing.expect(try eng.evalBool("WebSocket.CLOSED === 3"));
+    try std.testing.expect(try eng.evalBool("globalThis.__ws.url === 'wss://example.com/chat'"));
+    try std.testing.expect(try eng.evalBool("globalThis.__ws.readyState === 0"));
+    try std.testing.expect(try eng.evalBool("Array.isArray(globalThis.__ws.__pendingSends)"));
+}
+
+test "bridge — WebSocket close() before open sets CLOSED" {
+    const run = engine.JsEngine.eval;
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    try run(&eng,
+        \\globalThis.__ws2 = new WebSocket('wss://example.com/chat');
+        \\globalThis.__ws2.close();
+    , "<test>");
+    try std.testing.expect(try eng.evalBool("globalThis.__ws2.readyState === 3"));
 }
