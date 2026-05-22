@@ -294,6 +294,22 @@ pub fn build(b: *std.Build) void {
         test_net_step.dependOn(&run_sse.step);
     }
 
+    // ── WebSocket (Tier 3 — T3.D.2) — pure Zig, no deps ──────────────────
+    {
+        const ws_mod = b.createModule(.{
+            .root_source_file = b.path("src/net/websocket.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const ws_test = b.addTest(.{
+            .name = "websocket",
+            .root_module = ws_mod,
+        });
+        const run_ws = b.addRunArtifact(ws_test);
+        test_step.dependOn(&run_ws.step);
+        test_net_step.dependOn(&run_ws.step);
+    }
+
     // ── History API stack (Tier 3 — T3.B) — pure Zig, no deps ─────────────
     // Same shape as the storage module: standalone for fast iteration,
     // bridge.zig pulls it transitively when dom-bridge tests run.
