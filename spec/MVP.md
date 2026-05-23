@@ -2,13 +2,14 @@
 
 > **Canonical execution spec.** If any other planning doc disagrees, this file wins.
 >
-> **Current status:** Tier 0 (CLI-first agent browser runtime) is **CLOSED**
-> and shipped under curated WPT/Test262 gates. Tier 1 (interactive human
-> TUI parity with lynx/w3m) is **ACTIVE** per
-> `spec/subspecs/browser-roadmap.md`. Subsequent tiers (rendering polish,
-> dynamic-site browser APIs, layout, full SPA support) are documented and
-> deferred. This file remains the change-control point for any tier
-> promotion or scope change.
+> **Current status:** Tiers 0–3 are **CLOSED**. Tier 0 (agent runtime
+> baseline), Tier 1 (interactive TUI parity), Tier 2 (render + UX polish),
+> and Tier 3 (lightly dynamic site support — History, Storage, SSE, WebSocket,
+> events) are all closed under curated WPT/Test262 gates. Tiers 4–5
+> (layout engine, full SPA parity) are documented and deferred per
+> `spec/subspecs/browser-roadmap.md`. Daemon mode is active per
+> `spec/subspecs/daemon-mode.md`. This file remains the change-control
+> point for any tier promotion or scope change.
 
 ---
 
@@ -50,12 +51,12 @@ Tests and Test262 cases.
 | `spec/subspecs/wpt-conformance.md` | Canonical WPT/Test262 runner, corpus, and merge-gate spec; corpus grows with each active tier |
 | `spec/subspecs/agent-browser.md` | Tier 0 agent-browser scope (closed): POST in fetch+XHR, form `method=post`, cookie persistence |
 | `spec/subspecs/rendering.md` | Tier 0 rendering scope (closed): terminal render + image protocols |
-| `spec/subspecs/daemon-mode.md` | Tier 0 daemon-mode scope (active → closing): long-lived `awrd` + JSON-RPC IPC for amortized startup |
+| `spec/subspecs/daemon-mode.md` | Daemon-mode scope (DEFERRED per ADR 0002, 2026-05-23): long-lived `awrd` + JSON-RPC IPC for amortized startup |
 | `spec/subspecs/browser-tui.md` | **Tier 1 closed sub-spec**: interactive TUI parity (form fields, focus, keyboard input, history, URL bar, cookie inspector, browser-cookie import) |
 | `spec/subspecs/render-polish.md` | **Tier 2 closed sub-spec**: render + UX polish (bookmarks, URL-bar autocomplete, form/table/code/diff/image polish, cookie inspector enrichment) |
 | `spec/subspecs/browser-history.md` | **Tier 3 closed sub-spec**: History API (`pushState`, `replaceState`, `popstate`, `back`/`forward`/`go`) |
 | `spec/subspecs/browser-storage.md` | **Tier 3 closed sub-spec**: Web Storage (`localStorage` persisted, `sessionStorage` in-memory) |
-| `spec/subspecs/browser-realtime.md` | **Tier 3 partial sub-spec**: real-time connections — SSE shipped (T3.D.1), WebSocket pending (T3.D.2) |
+| `spec/subspecs/browser-realtime.md` | **Tier 3 closed sub-spec**: real-time connections — SSE (T3.D.1) + WebSocket (T3.D.2), both CLOSED 2026-05-22 |
 | `spec/subspecs/browser-events.md` | **Tier 3 closed sub-spec**: browser events (synthetic input, `DOMContentLoaded`/`load`, `requestAnimationFrame`, `matchMedia` evaluation) |
 | `docs/adr/0001-spec-governance.md` | Historical record for spec/documentation governance decisions |
 
@@ -174,10 +175,10 @@ These tracks stay documented, but they are **not** in the active queue:
 - native MCP stdio server work → `spec/subspecs/mcp-stdio.md`
 - later fingerprinting / owned browser identity work →
   `spec/Fingerprint-Plan.md`
-- Tiers 2–5 of the browser-roadmap (rendering polish, dynamic-site
-  browser APIs, layout engine, full SPA parity) →
-  `spec/subspecs/browser-roadmap.md §3`. These do not have dedicated
-  sub-specs yet; sub-specs are created at promotion time.
+- Tiers 4–5 of the browser-roadmap (layout engine, full SPA parity) →
+  `spec/subspecs/browser-roadmap.md §3`. Tiers 2 and 3 are closed;
+  Tiers 4–5 do not have dedicated sub-specs yet; sub-specs are created
+  at promotion time.
 
 The agent-browser scope (POST in `fetch` and XHR, `<form method=post>` end-to-
 end through `awr browse`, cookie jar disk persistence) is governed by
@@ -188,10 +189,7 @@ agent-browser, rendering, daemon-mode, and the WPT/Test262 gates.
 The Tier 1 interactive-TUI scope (form-field interaction, focus
 management, keyboard input dispatch, history navigation, URL bar,
 cookie inspector, Chrome/Firefox cookie import) is governed by
-`spec/subspecs/browser-tui.md` and is **active** (per ADR
-2026-05-09 entry). Tier 1 closure does not weaken any Tier 0
-gate — `spec/subspecs/browser-tui.md §4` requires every existing
-gate stays green plus the new corpus areas land.
+`spec/subspecs/browser-tui.md` and is **closed** (CLOSED 2026-05-11).
 
 The rendering scope (real-page render-quality corpus + terminal image
 rendering) is governed by `spec/subspecs/rendering.md` and is
@@ -205,11 +203,10 @@ test surface via `zig build test-image` (113 tests across 8 modules).
 
 The daemon-mode scope (long-lived `awrd` process + Unix-socket JSON-RPC
 IPC + per-cookie-scope state partitioning) is governed by
-`spec/subspecs/daemon-mode.md` and is **active** (proposed
-2026-05-07). Companion design doc:
-`docs/research/2026-05-07-daemon-mode-design.md`. Does not weaken the
-in-process MVP closure — daemon mode reuses the same `Client` /
-`Page` / `JsEngine` code paths.
+`spec/subspecs/daemon-mode.md` and is **deferred** per
+`docs/adr/0002-daemon-mode-deferred.md` (deferred 2026-05-23). The B1
+design and IPC contract are preserved for when the track is promoted.
+Companion design doc: `docs/research/2026-05-07-daemon-mode-design.md`.
 
 Do not treat deferred tracks as blockers for the active MVP closure work unless
 this spec is amended.

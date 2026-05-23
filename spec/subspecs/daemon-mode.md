@@ -1,6 +1,7 @@
 # Daemon-Mode — active sub-spec
 
-> **Status:** ACTIVE (proposed 2026-05-07, B1 design accepted)
+> **Status:** DEFERRED (proposed 2026-05-07, B1 design accepted;
+> deferred 2026-05-23 per `docs/adr/0002-daemon-mode-deferred.md`)
 > `spec/MVP.md` is the canonical umbrella spec. This file is the
 > authority for the daemon-mode scope, IPC contract, session model,
 > lifecycle semantics, and closure gates. Sits alongside

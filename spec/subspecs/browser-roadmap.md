@@ -205,7 +205,7 @@ inspector enrichment, each with a code-side test + smoke flow).
 
 ---
 
-### Tier 3 — Lightly dynamic site support (ACTIVE 2026-05-13)
+### Tier 3 — Lightly dynamic site support (CLOSED 2026-05-22)
 
 **Scope sentence**: Sites that aren't full SPAs but use modern
 JavaScript for tabs, comments, live updates, or auth flows
@@ -242,11 +242,10 @@ work end-to-end.
 `spec/subspecs/browser-storage.md` (localStorage + sessionStorage,
 **CLOSED 2026-05-13**),
 `spec/subspecs/browser-realtime.md` (WebSocket + EventSource/SSE,
-**SSE landed 2026-05-13 — T3.D.1; WebSocket pending T3.D.2**),
+**CLOSED 2026-05-22 — T3.D.1 SSE + T3.D.2 WebSocket**),
 `spec/subspecs/browser-events.md` (synthetic input events,
-requestAnimationFrame, matchMedia, **CLOSED 2026-05-13**). Three
-fully closed + SSE landed in browser-realtime; WebSocket remains
-the last unshipped piece of Tier 3.
+requestAnimationFrame, matchMedia, **CLOSED 2026-05-13**). All four
+sub-specs closed; Tier 3 is fully complete.
 
 **WPT corpus area**: history, storage, websocket, mutation
 observer, event constructors.

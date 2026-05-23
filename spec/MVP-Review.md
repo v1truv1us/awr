@@ -1,4 +1,4 @@
-# AWR MVP Review — 2026-05-19
+# AWR MVP Review — 2026-05-23
 
 > **Purpose:** Candid readiness review against the tier ladder defined in
 > `spec/subspecs/browser-roadmap.md` and the closure gates in `spec/MVP.md`.
@@ -57,18 +57,16 @@ highlighting + line numbers, diff/patch rendering, image pipeline polish,
 enriched cookie inspector (expiry, scope, secure flag). Corpus extended per
 `render-polish.md §4`.
 
-**Tier 3 — Lightly Dynamic Sites** (ACTIVE, partially closed)
-Three of four sub-specs closed:
+**Tier 3 — Lightly Dynamic Sites** (CLOSED 2026-05-22)
+All four sub-specs closed:
 - `browser-history.md` CLOSED: `pushState` / `replaceState` / `popstate`,
   `back()` / `forward()` / `go()`.
 - `browser-storage.md` CLOSED: `localStorage` per-origin disk persistence,
   `sessionStorage` in-memory.
 - `browser-events.md` CLOSED: synthetic input events, `requestAnimationFrame`,
   `matchMedia` evaluation.
-
-One sub-spec partially open:
-- `browser-realtime.md` PARTIAL: EventSource (SSE) shipped as T3.D.1;
-  WebSocket (T3.D.2) not yet landed.
+- `browser-realtime.md` CLOSED 2026-05-22: EventSource (SSE, T3.D.1) +
+  WebSocket RFC 6455 (T3.D.2). Both landed; all §4 gates satisfied.
 
 **WebCrypto:** `getRandomValues` + `subtle.digest` shipped (T-93).
 **data: URL scheme support** for `<script src>` shipped (T-92.2).
@@ -77,18 +75,11 @@ One sub-spec partially open:
 
 ---
 
-## 2. What's Blocking MVP (Critical Gaps)
+## 2. What's Blocking MVP
 
-"MVP" here means Tier 3 fully closed, which is the current active goal.
-
-### Blocker: WebSocket (T3.D.2)
-
-`browser-realtime.md` is PARTIAL. WebSocket — RFC 6455 upgrade handshake,
-frame parsing (text, binary, ping/pong, close), JS `WebSocket` class with
-`onopen` / `onmessage` / `onerror` / `onclose` / `send()` — is the last
-unshipped piece of Tier 3. Until this lands, Tier 3 cannot close. Sites
-using real-time feeds (live comment sections, Discourse, some auth flows)
-remain broken in the TUI. This is the single most impactful open item.
+**No hard blockers.** Tiers 0–3 are all closed as of 2026-05-22. WebSocket
+(T3.D.2) landed and closed `browser-realtime.md`. Daemon mode has been
+explicitly deferred per ADR 0002 (2026-05-23). The spec map is clean.
 
 ### Known Bug: TlsInitializationFailed on HackerNews
 
@@ -117,35 +108,30 @@ shipping codebase:
   (`/api` no longer matches `/apiOld`), and `cookie.zig:168-202` enforces
   `SameSite` at send time. Covered by unit tests. Closed.
 
-### Daemon Mode — Active but Incomplete
+### Daemon Mode — Explicitly Deferred
 
-`spec/subspecs/daemon-mode.md` is ACTIVE with a design doc (`docs/research/
-2026-05-07-daemon-mode-design.md`). The `awrd` binary, Unix-socket JSON-RPC IPC,
-and per-scope cookie jar cache are specified but not yet shipped. `AWR_DAEMON=1`
-mode is documented as the opt-in path. The companion performance plan
-(`.opencode/plans/1778109534122-shiny-nebula-remainder.md`) identified concrete
-startup-time savings (HN: ~590ms → <450ms, GitHub: ~2157ms → <1200ms) that
-daemon mode would enable. Not a gate for Tier 3 close, but it is listed as an
-active sub-spec in `spec/MVP.md §2` and needs a closure record.
+`spec/subspecs/daemon-mode.md` was ACTIVE but is now **DEFERRED** per
+`docs/adr/0002-daemon-mode-deferred.md` (2026-05-23). The B1 design and IPC
+contract are preserved. The spec map is now clean — daemon mode is not
+listed as an active gate.
 
 ---
 
 ## 3. Nice-to-Have vs. Required
 
-### Required for Tier 3 close
+### Required for MVP close
 
-- WebSocket (T3.D.2) — the only hard gate
+- Nothing. Tiers 0–3 are closed. Daemon mode is deferred. All tests green.
 
 ### Required before any public/production release (correctness fixes)
 
-- None currently open. BUG-001, BUG-002, and BUG-003 are already fixed at
-  HEAD. The remaining pre-release risk is the HN TLS fallback path (not a
-  functional blocker) and the open WebSocket gate.
+- None currently open. BUG-001, BUG-002, and BUG-003 are fixed at HEAD.
+  Pre-release risk: HN TLS fallback path (non-blocking, BoringSSL covers it).
 
 ### Nice-to-Have (Tier 4+ or polish)
 
-- Daemon mode (`awrd` binary + IPC) — real startup-time improvement, but
-  the in-process path already works and daemon mode is explicitly opt-in
+- Daemon mode (`awrd` binary + IPC) — real startup-time improvement,
+  explicitly deferred per ADR 0002; B1 design preserved for promotion
 - H2 multiplexing for BoringSSL sub-resource fetches (Lane A from
   `.opencode/plans/1778109534122-shiny-nebula-remainder.md`) — would cut HN
   cold-fetch time; meaningful but not blocking any spec gate
@@ -162,43 +148,27 @@ active sub-spec in `spec/MVP.md §2` and needs a closure record.
 
 ---
 
-## 4. Recommended Next 3–5 Steps
+## 4. Recommended Next Steps
 
-**Step 1 — Ship WebSocket (T3.D.2) to close Tier 3.**
-This is the single gating item. RFC 6455 upgrade handshake over the existing
-TLS path, frame parser (text/binary/ping/pong/close), JS `WebSocket` class
-wired via QuickJS-NG, curated WPT case. The H2 framing code in
-`src/net/h2session.zig` and the TLS path are already in place; WebSocket is
-an HTTP/1.1 upgrade, so the stack needed (`tls_conn.zig`, `http1.zig`, the
-event loop) is already exercised. Estimated scope: 1–2 weeks.
+**All Tier 0–3 gates are closed.** The current open questions are Tier 4+ and
+optional quality improvements.
 
-**Step 2 — Verify correctness fixes remain green.**
-BUG-001, BUG-002, and BUG-003 are already fixed at HEAD. Confirm they stay
-closed with `zig build test-net` and `zig build test-client` before any
-WebSocket branch merges.
+**Step 1 — Make the Tier 4 layout engine decision.**
+The biggest remaining architectural question: `browser-roadmap.md §3` "Path A
+vs. Path B" — embed Servo/Ladybird for layout, or build a minimal Zig layout
+engine. This gates `IntersectionObserver`, real `getBoundingClientRect`, and
+scroll-driven content. Make the call as ADR 0003 so it doesn't drift.
 
-**Step 3 — Write the Tier 3 closure record and advance Tier 4 decision.**
-When WebSocket lands and the Tier 3 WPT corpus passes, mark `browser-realtime.md`
-CLOSED and write the Tier 3 closure record in `spec/subspecs/browser-roadmap.md`.
-Then resolve the Tier 4 strategic question (`browser-roadmap.md §3` "Path A vs.
-Path B"): embed Servo/Ladybird for layout, or build a minimal Zig layout engine.
-This is the biggest architectural decision remaining and it gates `IntersectionObserver`,
-real `getBoundingClientRect`, and scroll-driven content. Make the call as an ADR
-so it doesn't drag.
+**Step 2 — Grow the WPT corpus for Tier 3 areas.**
+History, Storage, Events, and SSE are closed but corpus coverage in those areas
+can be audited. `spec/subspecs/wpt-conformance.md §3` requires corpus to grow
+alongside tiers. WebSocket now has `websocket_echo.js` as a baseline; more
+comprehensive WebSocket WPT cases can follow the Tier 4 decision.
 
-**Step 4 — Resolve daemon-mode status.**
-Daemon mode should either close (ship `awrd`) or be explicitly deferred with a
-timeline, since it's currently listed as ACTIVE in the canonical spec but has no
-shipping code. Leaving it ACTIVE indefinitely without shipping muddies the spec
-map.
-
-**Step 5 — Grow the Tier 3 WPT corpus to match shipped behavior.**
-History, Storage, Events, and SSE are closed but the WPT corpus coverage in those
-areas should be audited: `spec/subspecs/wpt-conformance.md §3` requires corpus
-to grow alongside each tier. The corpus already includes storage, EventSource,
-rAF, and WebCrypto cases, but a final audit should confirm coverage for
-`localStorage`, `sessionStorage`, `pushState`/`popstate`, and `WebSocket` once
-that lands. This should be a parallel track to Step 1, not a follow-on.
+**Step 3 — Promote daemon mode when ready.**
+The B1 design and IPC contract are preserved in `daemon-mode.md`. When the track
+is promoted, update ADR 0002, add a concrete implementation milestone, and update
+`spec/MVP.md §2` accordingly.
 
 ---
 
@@ -215,9 +185,9 @@ that lands. This should be a parallel track to Step 1, not a follow-on.
 | Tier 3 — History API | ✅ CLOSED | — |
 | Tier 3 — Web Storage | ✅ CLOSED | — |
 | Tier 3 — Browser Events + rAF + matchMedia | ✅ CLOSED | — |
-| Tier 3 — EventSource (SSE) | ✅ Shipped (T3.D.1) | — |
-| Tier 3 — WebSocket | ❌ Not landed (T3.D.2) | **Tier 3 gate** |
-| Daemon mode (`awrd`) | 🔄 ACTIVE, no shipping code | ACTIVE sub-spec |
+| Tier 3 — EventSource (SSE) | ✅ CLOSED (T3.D.1 2026-05-13) | — |
+| Tier 3 — WebSocket | ✅ CLOSED (T3.D.2 2026-05-22) | — |
+| Daemon mode (`awrd`) | ⏸️ DEFERRED (ADR 0002, 2026-05-23) | — |
 | BUG-001 H2 pseudo-header order | ✅ Closed (fixed at HEAD) | — |
 | BUG-002 HTTPS redirect counter | ✅ Closed (fixed at HEAD) | — |
 | BUG-003 Cookie path matching | ✅ Closed (fixed at HEAD) | — |
