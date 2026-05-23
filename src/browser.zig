@@ -1596,11 +1596,20 @@ pub fn runWith(
             needs_draw = false;
         }
         const maybe_key = try terminal.readKeyTimeout(SIZE_POLL_MS);
-        const key = maybe_key orelse continue;
-        needs_draw = true;
-        switch (try processKey(&session, key, viewportHeight(size))) {
-            .continue_ => {},
-            .exit => return,
+        if (maybe_key) |key| {
+            needs_draw = true;
+            switch (try processKey(&session, key, viewportHeight(size))) {
+                .continue_ => {},
+                .exit => return,
+            }
+        } else {
+            // Idle timeout: tick the JS event loop to run async tasks like WebSocket frames and timers.
+            session.page.event_loop.tickNoWait() catch {};
+            if (page_mod.bridge.isDomDirty(&session.page.js)) {
+                try session.rerenderCurrent();
+                page_mod.bridge.clearDomDirty(&session.page.js);
+                needs_draw = true;
+            }
         }
     }
 }

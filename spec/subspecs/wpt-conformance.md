@@ -203,7 +203,7 @@ why the case was invalid.
 
 ## 8. Mapping from API areas to test files
 
-> **Current status (as of 2026-05-13):** 110 active curated WPT cases pass via
+> **Current status (as of 2026-05-23):** 111 active curated WPT cases pass via
 > `zig build test-wpt`. 58 Test262 cases pass via `zig build test-test262`.
 > All `spec/subspecs/agent-browser.md §4` closure-gate cases are active.
 > `spec/subspecs/browser-tui.md §4.2` Tier 1 closure-gate cases for
@@ -226,6 +226,7 @@ why the case was invalid.
 | MutationObserver | `mutation_observer_childList.js`, `mutation_observer_attributes.js`, `mutation_observer_subtree.js`, `mutation_observer_takeRecords.js`, `mutation_observer_reflected_attributes.js`, `mutation_observer_characterData.js` |
 | Storage | `storage_localStorage.js`, `storage_quota_exceeded.js`, `session_storage_distinct.js`, `storage_event_payload.js` |
 | EventSource (SSE) | `eventsource_parser.js` |
+| WebSockets | `websocket_echo.js` |
 | Cookies (DOM) | `document_cookie.js` |
 | XHR (GET + POST) | `xhr_basic_get.js`, `xhr_post_basic.js`, `xhr_post_form_encoded.js`, `xhr_rejects_unsupported.js`, `xhr_status_codes.js` |
 | `fetch()` (GET + POST) | `fetch_basic.js`, `fetch_post_basic.js`, `fetch_post_form_encoded.js`, `fetch_rejects_unsupported.js`, `fetch_status_codes.js`, `fetch_json_response.js`, `fetch_redirect_follow.js`, `fetch_headers_get.js` |

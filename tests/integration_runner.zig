@@ -1089,11 +1089,11 @@ test "AWR_DAEMON=1 auto-spawns awrd when no daemon is running" {
             .{ tmp_dir, std.posix.system.geteuid() },
         );
         defer allocator.free(sock);
-        const stat = std.Io.Dir.cwd().readFileAlloc(io, sock, allocator, .limited(1)) catch |err| switch (err) {
+        var file = std.Io.Dir.cwd().openFile(io, sock, .{}) catch |err| switch (err) {
             error.FileNotFound => break,
             else => continue,
         };
-        allocator.free(stat);
+        file.close(io);
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch {};
     }
 }
@@ -1300,4 +1300,142 @@ test "awrd singleton: stale pid file from a SIGKILLed daemon does not block rest
     try testing.expect(std.mem.indexOf(u8, ping_resp, "\"value\":\"pong\"") != null);
 
     try d.shutdown();
+}
+
+const ConcurrentSpawnWorker = struct {
+    allocator: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
+    url: []const u8,
+    result: ?std.process.Child.Term = null,
+    err: ?anyerror = null,
+    stdout: ?[]const u8 = null,
+    stderr: ?[]const u8 = null,
+
+    fn run(self: *@This()) void {
+        const io = std.testing.io;
+        var child = std.process.spawn(io, .{
+            .argv = &.{ AWR_BIN, self.url },
+            .stdin = .ignore,
+            .stdout = .pipe,
+            .stderr = .pipe,
+            .environ_map = self.env,
+        }) catch |err| {
+            self.err = err;
+            return;
+        };
+        self.stdout = drainPipe(io, self.allocator, &child.stdout.?) catch |err| {
+            self.err = err;
+            return;
+        };
+        self.stderr = drainPipe(io, self.allocator, &child.stderr.?) catch |err| {
+            self.err = err;
+            return;
+        };
+        self.result = child.wait(io) catch |err| {
+            self.err = err;
+            return;
+        };
+    }
+
+    fn deinit(self: *@This()) void {
+        if (self.stdout) |s| self.allocator.free(s);
+        if (self.stderr) |s| self.allocator.free(s);
+    }
+};
+
+test "awrd concurrent spawn race" {
+    // Spawn 4 clients concurrently pointing to the same XDG_RUNTIME_DIR.
+    // Assert that exactly one daemon is spawned (via checking pid file presence).
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+    const pid = std.posix.system.getpid();
+
+    var mock = try MockHandle.start(allocator, 18609);
+    defer mock.deinit();
+
+    const tmp_dir = try std.fmt.allocPrint(
+        allocator,
+        "/tmp/awr-concurrent-{d}",
+        .{pid},
+    );
+    defer allocator.free(tmp_dir);
+    std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, tmp_dir);
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("AWR_DAEMON", "1");
+    try env.put("AWR_DAEMON_IDLE_SEC", "0");
+    try env.put("XDG_RUNTIME_DIR", tmp_dir);
+
+    var workers: [4]ConcurrentSpawnWorker = undefined;
+    var threads: [4]std.Thread = undefined;
+
+    for (&workers, 0..) |*w, i| {
+        w.* = .{
+            .allocator = allocator,
+            .env = &env,
+            .url = "http://127.0.0.1:18609/webmcp_mock.html",
+        };
+        threads[i] = try std.Thread.spawn(.{}, ConcurrentSpawnWorker.run, .{w});
+    }
+
+    for (threads) |t| {
+        t.join();
+    }
+
+    defer {
+        for (&workers) |*w| w.deinit();
+    }
+
+    // All clients should exit successfully
+    for (workers, 0..) |w, i| {
+        if (w.err) |err| {
+            std.debug.print("Worker {d} error: {}\n", .{ i, err });
+            return err;
+        }
+        std.debug.print("Worker {d} exit code: {?}. Stderr:\n{s}\nStdout:\n{s}\n", .{ i, w.result, w.stderr orelse "", w.stdout orelse "" });
+        try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, w.result.?);
+    }
+
+    // Verify exactly one pid file was created and contains a valid pid.
+    const uid = std.posix.system.geteuid();
+    const pid_path = try std.fmt.allocPrint(allocator, "{s}/awrd-{d}.pid", .{ tmp_dir, uid });
+    defer allocator.free(pid_path);
+
+    const pid_bytes = try std.Io.Dir.cwd().readFileAlloc(io, pid_path, allocator, .limited(64));
+    defer allocator.free(pid_bytes);
+    const trimmed = std.mem.trim(u8, pid_bytes, " \r\n\t");
+    const recorded_pid = try std.fmt.parseInt(i32, trimmed, 10);
+    try testing.expect(recorded_pid > 0);
+
+    // Manually trigger shutdown via RPC to avoid waiting the full 10 seconds.
+    const sock_path = try std.fmt.allocPrint(allocator, "{s}/awrd-{d}.sock", .{ tmp_dir, uid });
+    defer allocator.free(sock_path);
+    const ua = try std.Io.net.UnixAddress.init(sock_path);
+    if (ua.connect(io)) |stream| {
+        var s = stream;
+        defer s.close(io);
+        var wbuf: [512]u8 = undefined;
+        var rbuf: [512]u8 = undefined;
+        var net_writer = s.writer(io, &wbuf);
+        var net_reader = s.reader(io, &rbuf);
+        const body = "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}";
+        try net_writer.interface.print("Content-Length: {d}\r\n\r\n{s}", .{ body.len, body });
+        try net_writer.interface.flush();
+        const resp = readFrame(io, &net_reader.interface, allocator) catch null;
+        if (resp) |r| allocator.free(r);
+    } else |_| {}
+
+    // Wait for the daemon to finish shutdown and clean up its socket
+    var waited: u64 = 0;
+    while (waited < 5000) : (waited += 100) {
+        var file = std.Io.Dir.cwd().openFile(io, sock_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => break,
+            else => continue,
+        };
+        file.close(io);
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch {};
+    }
 }

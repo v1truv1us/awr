@@ -795,6 +795,12 @@ pub fn build(b: *std.Build) void {
         });
         page_import.addImport("telemetry", wpt_telemetry_mod);
         wpt_mod.addImport("page", page_import);
+        const wpt_ws_mod = b.createModule(.{
+            .root_source_file = b.path("src/net/websocket.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        wpt_mod.addImport("websocket", wpt_ws_mod);
 
         const wpt_test = b.addTest(.{
             .name = "wpt",

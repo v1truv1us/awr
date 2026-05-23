@@ -1,5 +1,6 @@
 const std = @import("std");
 const page_mod = @import("page");
+const ws_mod = page_mod.bridge.ws_mod;
 
 const testharness_shim = @embedFile("wpt/testharness_shim.js");
 
@@ -65,34 +66,103 @@ const EchoServer = struct {
         var net_writer = stream.writer(std.testing.io, &write_storage);
 
         var http_server: std.http.Server = .init(&net_reader.interface, &net_writer.interface);
-        var request = http_server.receiveHead() catch return;
+        std.debug.print("[Server] receiveHead...\n", .{});
+        var request = http_server.receiveHead() catch |err| {
+            std.debug.print("[Server] receiveHead failed: {}\n", .{err});
+            return;
+        };
 
-        // `request.head.target` is a slice into the recv buffer; reading
-        // the body and emitting the response can invalidate it. Dupe up
-        // front so route matching below is safe regardless of subsequent
-        // operations on the connection.
         const target = try allocator.dupe(u8, request.head.target);
         defer allocator.free(target);
+        const method = @tagName(request.head.method);
+        std.debug.print("[Server] request: {s} {s}\n", .{method, target});
 
         var body_buf: [4 * 1024]u8 = undefined;
-        const body_reader = request.readerExpectContinue(&body_buf) catch return;
+        const body_reader = request.readerExpectContinue(&body_buf) catch |err| {
+            std.debug.print("[Server] readerExpectContinue failed: {}\n", .{err});
+            return;
+        };
         const body = body_reader.allocRemaining(allocator, .limited(64 * 1024)) catch
             try allocator.dupe(u8, "");
         defer allocator.free(body);
+        std.debug.print("[Server] read body, length={d}\n", .{body.len});
 
-        const method = @tagName(request.head.method);
+        // /ws — WebSocket upgrade route. Performs handshake and echos frames.
+        if (std.mem.startsWith(u8, target, "/ws")) {
+            var ws_key: ?[]const u8 = null;
+            var header_it = request.iterateHeaders();
+            while (header_it.next()) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "sec-websocket-key")) {
+                    ws_key = header.value;
+                }
+            }
 
-        // Route table — keep narrow. Add routes only when a curated WPT
-        // case needs them; do not extend the EchoServer into a general
-        // mock server. The default route remains `METHOD|BODY` so existing
-        // POST round-trip cases keep working.
+            if (ws_key) |key| {
+                std.debug.print("[Server] ws_key={s}, computing accept\n", .{key});
+                const accept = try ws_mod.computeAccept(allocator, key);
+                defer allocator.free(accept);
 
-        // The EchoServer is single-shot per connection (defer stream.close
-        // closes after each response). To prevent the AWR std.http.Client
-        // pool from trying to reuse the now-closed socket on a subsequent
-        // request, every response includes Connection: close. Cases that
-        // need keep-alive between requests should be promoted to a
-        // separate harness.
+                const ReaderAdapter = struct {
+                    inner: *std.Io.Reader,
+                    pub fn readNoEof(self: *@This(), buf: []u8) !void {
+                        try self.inner.readSliceAll(buf);
+                    }
+                };
+                var reader_adapter = ReaderAdapter{ .inner = &net_reader.interface };
+
+                const WriterAdapter = struct {
+                    inner: *std.Io.Writer,
+                    pub fn writeAll(self: *@This(), bytes: []const u8) !void {
+                        try self.inner.writeAll(bytes);
+                    }
+                };
+                var writer_adapter = WriterAdapter{ .inner = &net_writer.interface };
+
+                var handshake_buf: [1024]u8 = undefined;
+                const resp = try std.fmt.bufPrint(&handshake_buf,
+                    "HTTP/1.1 101 Switching Protocols\r\n" ++
+                    "Upgrade: websocket\r\n" ++
+                    "Connection: Upgrade\r\n" ++
+                    "Sec-WebSocket-Accept: {s}\r\n\r\n",
+                    .{accept},
+                );
+                std.debug.print("[Server] sending handshake...\n", .{});
+                try writer_adapter.writeAll(resp);
+                try net_writer.interface.flush();
+
+                while (true) {
+                    std.debug.print("[Server] reading frame...\n", .{});
+                    const frame = ws_mod.readFrame(&reader_adapter, allocator) catch |err| {
+                        std.debug.print("[Server] readFrame error/EOF: {}\n", .{err});
+                        break;
+                    };
+                    defer allocator.free(frame.payload);
+                    std.debug.print("[Server] readFrame successful, opcode={}, payload_len={d}\n", .{frame.opcode, frame.payload.len});
+
+                    if (frame.opcode == .close) {
+                        std.debug.print("[Server] close frame received, echoing and exiting\n", .{});
+                        ws_mod.writeFrame(&writer_adapter, .close, &.{}, [_]u8{ 0, 0, 0, 0 }) catch {};
+                        try net_writer.interface.flush();
+                        break;
+                    }
+
+                    if (frame.opcode == .ping) {
+                        std.debug.print("[Server] ping frame received, echoing pong\n", .{});
+                        ws_mod.writeFrame(&writer_adapter, .pong, frame.payload, [_]u8{ 0, 0, 0, 0 }) catch break;
+                        try net_writer.interface.flush();
+                    } else {
+                        std.debug.print("[Server] echoing frame opcode={}\n", .{frame.opcode});
+                        ws_mod.writeFrame(&writer_adapter, frame.opcode, frame.payload, [_]u8{ 0, 0, 0, 0 }) catch break;
+                        std.debug.print("[Server] sending close and exiting\n", .{});
+                        ws_mod.writeFrame(&writer_adapter, .close, &.{}, [_]u8{ 0, 0, 0, 0 }) catch {};
+                        try net_writer.interface.flush();
+                        break;
+                    }
+                }
+                std.debug.print("[Server] websocket handler finished\n", .{});
+                return;
+            }
+        }
 
         // /status/{N} — respond with status N, empty body. Used by fetch
         // and XHR cases that exercise the response.status surface.
@@ -758,6 +828,12 @@ const curated_cases = [_]WptCase{
         .html = "<html><body></body></html>",
         .script = @embedFile("wpt/webcrypto_basics.js"),
     },
+    // WebSocket (T3.D.2) echo roundtrip.
+    .{
+        .filename = "websocket_echo.js",
+        .html = "<html><body></body></html>",
+        .script = @embedFile("wpt/websocket_echo.js"),
+    },
 };
 
 fn buildCaseHtml(allocator: std.mem.Allocator, case: WptCase) ![]u8 {
@@ -810,6 +886,7 @@ test "curated WPT DOM corpus passes" {
     defer echo.shutdown();
 
     for (curated_cases) |case| {
+        std.debug.print("Running WPT case: {s}...\n", .{case.filename});
         try runCase(std.testing.allocator, case);
     }
 }

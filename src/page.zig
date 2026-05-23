@@ -17,7 +17,7 @@ const client = @import("client.zig");
 const engine = @import("js/engine.zig");
 const webcrypto_backend = @import("js/webcrypto_backend.zig");
 const dom = @import("dom/node.zig"); // parseDocument handles HTML+DOM internally
-const bridge = @import("dom/bridge.zig");
+pub const bridge = @import("dom/bridge.zig");
 const render = @import("render.zig");
 const extract = @import("extract.zig");
 const url_mod = @import("net/url.zig");
@@ -1258,7 +1258,7 @@ pub const Page = struct {
 
         // ── Install DOM bridge (document/window globals in JS) ────────────
         // removeDomBridge runs before zig_doc.deinit (LIFO defer order).
-        try bridge.installDomBridge(&self.js, zig_doc, gpa);
+        try bridge.installDomBridge(&self.js, zig_doc, self.io, gpa);
         errdefer bridge.removeDomBridge(&self.js);
 
         // ── Populate window.location from the requested URL ───────────────

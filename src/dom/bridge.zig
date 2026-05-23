@@ -37,7 +37,7 @@ const render = @import("../render.zig");
 const storage_mod = @import("../js/storage.zig");
 const history_mod = @import("history.zig");
 const sse_mod = @import("../net/sse.zig");
-const ws_mod = @import("../net/websocket.zig");
+pub const ws_mod = @import("../net/websocket.zig");
 
 // ── BridgeCtx ─────────────────────────────────────────────────────────────
 
@@ -45,6 +45,8 @@ const ws_mod = @import("../net/websocket.zig");
 const BridgeCtx = struct {
     doc: *dom.Document,
     allocator: std.mem.Allocator,
+    io: std.Io,
+    dirty: bool = false,
     elem_to_handle: std.AutoHashMap(*dom.Element, u32),
     handle_to_elem: std.ArrayList(*dom.Element),
     viewport_width: usize,
@@ -59,10 +61,12 @@ const BridgeCtx = struct {
     /// `setLocationFromUrl` (which calls `seedHistory` below).
     history: history_mod.HistoryStack,
 
-    fn init(doc: *dom.Document, allocator: std.mem.Allocator) BridgeCtx {
+    fn init(doc: *dom.Document, io: std.Io, allocator: std.mem.Allocator) BridgeCtx {
         return .{
             .doc = doc,
             .allocator = allocator,
+            .io = io,
+            .dirty = false,
             .elem_to_handle = std.AutoHashMap(*dom.Element, u32).init(allocator),
             .handle_to_elem = std.ArrayList(*dom.Element).empty,
             .viewport_width = 80,
@@ -89,7 +93,19 @@ fn getBridge(ctx: ?*qjs.Context) ?*BridgeCtx {
     return @ptrCast(@alignCast(ext));
 }
 
-// ── Public API ────────────────────────────────────────────────────────────
+pub fn isDomDirty(eng: *engine.JsEngine) bool {
+    const host = eng.ctx.getOpaque(engine.EngineHostData) orelse return false;
+    const ext = host.extension orelse return false;
+    const bctx: *BridgeCtx = @ptrCast(@alignCast(ext));
+    return bctx.dirty;
+}
+
+pub fn clearDomDirty(eng: *engine.JsEngine) void {
+    const host = eng.ctx.getOpaque(engine.EngineHostData) orelse return;
+    const ext = host.extension orelse return;
+    const bctx: *BridgeCtx = @ptrCast(@alignCast(ext));
+    bctx.dirty = false;
+}
 
 pub const BridgeError = error{ AllocFailed, EvalFailed };
 
@@ -98,10 +114,11 @@ pub const BridgeError = error{ AllocFailed, EvalFailed };
 pub fn installDomBridge(
     eng: *engine.JsEngine,
     doc: *dom.Document,
+    io: std.Io,
     alloc: std.mem.Allocator,
 ) BridgeError!void {
     const bctx = alloc.create(BridgeCtx) catch return BridgeError.AllocFailed;
-    bctx.* = BridgeCtx.init(doc, alloc);
+    bctx.* = BridgeCtx.init(doc, io, alloc);
 
     // Store in host extension
     eng.host.extension = @ptrCast(bctx);
@@ -781,6 +798,7 @@ fn setTitleFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs")
         .parent = title.?,
     };
     title.?.children.append(alloc, .{ .text = text_node }) catch return qjs.Value.initBool(false);
+    bridge.dirty = true;
     return qjs.Value.initBool(true);
 }
 
@@ -834,6 +852,7 @@ fn setAttributeFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quick
     for (elem.attributes) |*a| {
         if (std.ascii.eqlIgnoreCase(a.name, name)) {
             a.value = value;
+            bridge.dirty = true;
             return qjs.Value.initBool(true);
         }
     }
@@ -842,6 +861,7 @@ fn setAttributeFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quick
     @memcpy(next[0..old.len], old);
     next[old.len] = .{ .name = name, .value = value };
     elem.attributes = next;
+    bridge.dirty = true;
     return qjs.Value.initBool(true);
 }
 
@@ -870,6 +890,7 @@ fn removeAttributeFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("qu
         }
     }
     elem.attributes = next;
+    bridge.dirty = true;
     return qjs.Value.initBool(true);
 }
 
@@ -887,6 +908,7 @@ fn setTextContentFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("qui
     const t = alloc.create(dom.Text) catch return qjs.Value.initBool(false);
     t.* = .{ .data = alloc.dupe(u8, std.mem.span(txt_c)) catch return qjs.Value.initBool(false), .parent = elem };
     elem.children.append(alloc, .{ .text = t }) catch return qjs.Value.initBool(false);
+    bridge.dirty = true;
     return qjs.Value.initBool(true);
 }
 
@@ -973,6 +995,7 @@ fn setInnerHTMLFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quick
             };
         }
     }
+    bridge.dirty = true;
     return qjs.Value.initBool(true);
 }
 
@@ -1018,6 +1041,7 @@ fn appendChildFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickj
     if (child.parent) |old| _ = detachChild(old, child);
     parent.children.append(bridge.doc.arena.allocator(), .{ .element = child }) catch return qjs.Value.initBool(false);
     child.parent = parent;
+    bridge.dirty = true;
     return qjs.Value.initBool(true);
 }
 
@@ -1044,6 +1068,7 @@ fn insertBeforeFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quick
     }
     parent.children.insert(alloc, idx, .{ .element = node }) catch return qjs.Value.initBool(false);
     node.parent = parent;
+    bridge.dirty = true;
     return qjs.Value.initBool(true);
 }
 
@@ -1055,7 +1080,9 @@ fn removeChildFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickj
     const ch = parseHandleArg(c, args[1]) orelse return qjs.Value.initBool(false);
     const parent = getElemByHandle(bridge, ph) orelse return qjs.Value.initBool(false);
     const child = getElemByHandle(bridge, ch) orelse return qjs.Value.initBool(false);
-    return qjs.Value.initBool(detachChild(parent, child));
+    const detached = detachChild(parent, child);
+    if (detached) bridge.dirty = true;
+    return qjs.Value.initBool(detached);
 }
 
 // ── Cookie host bindings for document.cookie ─────────────────────────────
@@ -1398,14 +1425,16 @@ fn wsConnectAndRecvFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("q
     const sends_cstr = sends_v.toCString(c) orelse return qjs.Value.initStringLen(c, "{\"error\":\"bad sends\"}");
     defer c.freeCString(sends_cstr);
 
-    const result = wsDoConnect(bridge.allocator, std.mem.span(url_cstr), std.mem.span(sends_cstr)) catch {
+    const result = wsDoConnect(bridge.io, bridge.allocator, std.mem.span(url_cstr), std.mem.span(sends_cstr)) catch {
         return qjs.Value.initStringLen(c, "{\"error\":\"connection failed\"}");
     };
     defer bridge.allocator.free(result);
     return qjs.Value.initStringLen(c, result);
 }
 
-fn wsDoConnect(allocator: std.mem.Allocator, url_str: []const u8, sends_json: []const u8) ![]u8 {
+fn wsDoConnect(io: std.Io, allocator: std.mem.Allocator, url_str: []const u8, sends_json: []const u8) ![]u8 {
+    const tcp_mod = @import("../net/tcp.zig");
+    const dns_mod = @import("../util/dns.zig");
     const tls_conn_mod = @import("../net/tls_conn.zig");
     const io_mod = @import("../util/io.zig");
     const url_mod = @import("../net/url.zig");
@@ -1414,14 +1443,14 @@ fn wsDoConnect(allocator: std.mem.Allocator, url_str: []const u8, sends_json: []
     if (!url.is_websocket) return error.NotWebSocket;
 
     // Parse pending sends from JSON array of strings.
-    var sends = std.ArrayList([]const u8).init(allocator);
-    defer sends.deinit();
+    var sends = std.ArrayList([]const u8).empty;
+    defer sends.deinit(allocator);
     {
         const p = try std.json.parseFromSlice(std.json.Value, allocator, sends_json, .{});
         defer p.deinit();
         if (p.value == .array) {
             for (p.value.array.items) |item| {
-                if (item == .string) try sends.append(item.string);
+                if (item == .string) try sends.append(allocator, item.string);
             }
         }
     }
@@ -1429,15 +1458,17 @@ fn wsDoConnect(allocator: std.mem.Allocator, url_str: []const u8, sends_json: []
     var path_buf: [2048]u8 = undefined;
     const path = url.pathWithQuery(&path_buf);
 
-    const stream = try std.net.tcpConnectToHost(allocator, url.host, url.port);
-    defer stream.close();
+    const addr = try dns_mod.resolve(io, url.host, url.port);
+    var tcp_conn = try tcp_mod.TcpConn.init(allocator, addr);
+    defer tcp_conn.deinit();
+    try tcp_conn.connect();
 
     if (url.is_https) {
         var tls_ctx = try tls_conn_mod.initCompatHttp11WithBundle();
         defer tls_ctx.deinit();
         const hostname_z = try allocator.dupeZ(u8, url.host);
         defer allocator.free(hostname_z);
-        var conn = try tls_conn_mod.TlsConn.connectNoAlps(&tls_ctx, stream.handle, hostname_z.ptr);
+        var conn = try tls_conn_mod.TlsConn.connectNoAlps(&tls_ctx, tcp_conn.socket.?.fd, hostname_z.ptr);
         defer conn.deinit();
 
         const TlsReader = io_mod.BlockingReader(*tls_conn_mod.TlsConn, tls_conn_mod.TlsError, tls_conn_mod.TlsConn.readFn);
@@ -1455,28 +1486,23 @@ fn wsDoConnect(allocator: std.mem.Allocator, url_str: []const u8, sends_json: []
         defer session.deinit();
         return buildWsResultJson(allocator, &session);
     } else {
-        const TcpReader = io_mod.BlockingReader(std.net.Stream, anyerror, tcpStreamRead);
-        var reader: TcpReader = .{ .context = stream };
+        const TcpReader = io_mod.BlockingReader(*tcp_mod.TcpConn, tcp_mod.TcpError, tcp_mod.TcpConn.readFn);
+        var reader: TcpReader = .{ .context = &tcp_conn };
         const TcpWriter = struct {
-            inner: std.net.Stream,
+            inner: *tcp_mod.TcpConn,
             pub fn writeAll(self: *@This(), data: []const u8) !void {
                 var off: usize = 0;
                 while (off < data.len) {
-                    const n = std.posix.write(self.inner.handle, data[off..]) catch return error.WriteFailed;
-                    off += n;
+                    off += try self.inner.write(data[off..]);
                 }
             }
         };
-        var writer: TcpWriter = .{ .inner = stream };
+        var writer: TcpWriter = .{ .inner = &tcp_conn };
 
         var session = try ws_mod.runSession(&reader, &writer, allocator, url.host, path, sends.items);
         defer session.deinit();
         return buildWsResultJson(allocator, &session);
     }
-}
-
-fn tcpStreamRead(stream: std.net.Stream, buf: []u8) anyerror!usize {
-    return std.posix.read(stream.handle, buf);
 }
 
 fn buildWsResultJson(allocator: std.mem.Allocator, session: *ws_mod.WsSession) ![]u8 {
@@ -2733,7 +2759,7 @@ test "installDomBridge — basic smoke test" {
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
 
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     // document should be defined
@@ -2747,7 +2773,7 @@ test "bridge — document.querySelector returns element" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool("document.querySelector('p') !== null");
@@ -2760,7 +2786,7 @@ test "bridge — document.querySelector returns null for missing selector" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool("document.querySelector('h2') === null");
@@ -2773,7 +2799,7 @@ test "bridge — element.getAttribute works" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool("document.querySelector('a').getAttribute('href') === '/page'");
@@ -2786,7 +2812,7 @@ test "bridge — document.getElementById finds element" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool("document.getElementById('main') !== null");
@@ -2799,7 +2825,7 @@ test "bridge — document.getElementById returns null for missing" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool("document.getElementById('nope') === null");
@@ -2812,7 +2838,7 @@ test "bridge — document.title returns page title" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool("document.title === 'My Page'");
@@ -2825,7 +2851,7 @@ test "bridge — document.body is not null" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool("document.body !== null");
@@ -2838,7 +2864,7 @@ test "bridge — element.textContent contains text" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool("document.querySelector('p').textContent.includes('hello')");
@@ -2851,7 +2877,7 @@ test "bridge — element.addEventListener does not throw" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     try eng.eval(
@@ -2866,7 +2892,7 @@ test "bridge — element.setAttribute mutates JS-side attr" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     try eng.eval(
@@ -2883,7 +2909,7 @@ test "bridge — document.querySelectorAll returns array" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool("document.querySelectorAll('p').length === 3");
@@ -2896,7 +2922,7 @@ test "bridge — document.createElement returns object with tagName" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool("document.createElement('div').tagName === 'DIV'");
@@ -2909,7 +2935,7 @@ test "bridge — window === globalThis" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool("window === globalThis");
@@ -2922,7 +2948,7 @@ test "bridge — navigator.userAgent is non-empty" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool("navigator.userAgent.length > 0");
@@ -2935,7 +2961,7 @@ test "bridge — MutationObserver is constructable" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     try eng.eval("const mo = new MutationObserver(function(){}); mo.observe(document.body, {});", "<test>");
@@ -2950,7 +2976,7 @@ test "bridge — localStorage set/get works" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     try run(&eng, "localStorage.setItem('k', 'v');", "<test>");
@@ -2966,7 +2992,7 @@ test "bridge — localStorage length / key / removeItem / clear from JS" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     try run(&eng,
@@ -2991,7 +3017,7 @@ test "bridge — sessionStorage is independent of localStorage" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     try run(&eng,
@@ -3009,7 +3035,7 @@ test "bridge — localStorage QuotaExceededError is throwable" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     // 5 MB + 1 byte → must throw QuotaExceededError. Catch in JS so
@@ -3037,7 +3063,7 @@ test "bridge — history back/forward fires popstate with state" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     // Seed the stack like Page would after fetching a URL.
@@ -3066,7 +3092,7 @@ test "bridge — pushState after back() truncates forward history" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     seedHistory(&eng, "https://example.com/");
@@ -3091,7 +3117,7 @@ test "bridge — replaceState updates state without changing length" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     seedHistory(&eng, "https://example.com/");
@@ -3111,7 +3137,7 @@ test "bridge — sse_parse_all native parses a simple stream" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     try run(&eng,
@@ -3132,7 +3158,7 @@ test "bridge — EventSource constructor + close() shape" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     // No fetch host attached → EventSource will reject async, but the
@@ -3160,7 +3186,7 @@ test "bridge — sse_parse_all handles multi-line data + retry field" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     try run(&eng,
@@ -3189,7 +3215,7 @@ test "bridge — setStorageOrigin enables cross-process disk persistence" {
         defer doc.deinit();
         var eng = try engine.JsEngine.init(a, null);
         defer eng.deinit();
-        try installDomBridge(&eng, &doc, a);
+        try installDomBridge(&eng, &doc, io, a);
         defer removeDomBridge(&eng);
         try setStorageOrigin(&eng, "https://example.com", dir_path, io);
         try run(&eng, "localStorage.setItem('token', 'tok-abc');", "<test>");
@@ -3201,7 +3227,7 @@ test "bridge — setStorageOrigin enables cross-process disk persistence" {
         defer doc.deinit();
         var eng = try engine.JsEngine.init(a, null);
         defer eng.deinit();
-        try installDomBridge(&eng, &doc, a);
+        try installDomBridge(&eng, &doc, io, a);
         defer removeDomBridge(&eng);
         try setStorageOrigin(&eng, "https://example.com", dir_path, io);
         const v = try eng.evalString("localStorage.getItem('token')");
@@ -3216,7 +3242,7 @@ test "bridge — DOM mutations reflect into Zig querySelector" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     try eng.eval(
@@ -3236,7 +3262,7 @@ test "bridge — element.querySelector scopes to descendants" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool(
@@ -3251,7 +3277,7 @@ test "bridge — element.querySelectorAll scopes to descendants" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool(
@@ -3266,7 +3292,7 @@ test "bridge — element.matches and closest use Zig selector engine" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool(
@@ -3282,7 +3308,7 @@ test "bridge — WebSocket constructor shape" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     // Verify the class constants and synchronous constructor shape without
@@ -3307,7 +3333,7 @@ test "bridge — WebSocket close() before open sets CLOSED" {
 
     var eng = try engine.JsEngine.init(std.testing.allocator, null);
     defer eng.deinit();
-    try installDomBridge(&eng, &doc, std.testing.allocator);
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
     defer removeDomBridge(&eng);
 
     try run(&eng,
