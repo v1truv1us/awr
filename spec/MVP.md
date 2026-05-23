@@ -59,6 +59,7 @@ Tests and Test262 cases.
 | `spec/subspecs/browser-storage.md` | **Tier 3 closed sub-spec**: Web Storage (`localStorage` persisted, `sessionStorage` in-memory) |
 | `spec/subspecs/browser-realtime.md` | **Tier 3 closed sub-spec**: real-time connections — SSE (T3.D.1) + WebSocket (T3.D.2), both CLOSED 2026-05-22 |
 | `spec/subspecs/browser-events.md` | **Tier 3 closed sub-spec**: browser events (synthetic input, `DOMContentLoaded`/`load`, `requestAnimationFrame`, `matchMedia` evaluation) |
+| `spec/subspecs/cssom.md` | **Active starter sub-spec**: non-layout CSSOM, stylesheet loading, cascade, and simple `getComputedStyle()` values |
 | `docs/adr/0001-spec-governance.md` | Historical record for spec/documentation governance decisions |
 | `docs/adr/0003-tier4-layout-strategy.md` | Living decision record for Tier 4 layout strategy, layout-adapter design, and embed-vs-native evidence |
 
@@ -151,11 +152,12 @@ The closed MVP surface is:
    free. Per-image safety caps (4 MiB encoded / 16 MP decoded) and a
    per-page fetch budget (32 images, surplus → text alt-refs). See
    `spec/subspecs/rendering.md`;
-8. a starter CSSOM subset: `<style>` and `<link rel="stylesheet">` loading,
-   inline `element.style`, and `getComputedStyle()` for simple selector-matched
-   properties such as `display` and `visibility`. This is intentionally **not**
-   a layout engine: cascade completeness, box model, flex/grid, text shaping,
-   scroll-driven layout, and geometry-backed observers remain Tier 4.
+8. a starter CSSOM subset governed by `spec/subspecs/cssom.md`: `<style>` and
+   `<link rel="stylesheet">` loading, inline `element.style`, and
+   `getComputedStyle()` for simple selector-matched properties such as `display`
+   and `visibility`. This is intentionally **not** a layout engine: box model,
+   flex/grid, text shaping, scroll-driven layout, and geometry-backed observers
+   remain Tier 4.
 
 The closure record and remaining follow-on work live in
 `spec/subspecs/mvp-remainder.md`.

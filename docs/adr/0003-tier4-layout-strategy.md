@@ -3,7 +3,7 @@
 - Status: Proposed / living decision record
 - Date: 2026-05-23
 - Owners: AWR maintainers
-- Related specs: `spec/MVP.md`, `spec/subspecs/browser-roadmap.md`, `spec/subspecs/wpt-conformance.md`
+- Related specs: `spec/MVP.md`, `spec/subspecs/browser-roadmap.md`, `spec/subspecs/cssom.md`, `spec/subspecs/wpt-conformance.md`
 
 ## Context
 
@@ -22,7 +22,7 @@ This decision affects AWR's core product identity:
 
 | Decision | What was decided | Why |
 |---|---|---|
-| Starter CSSOM boundary | AWR may continue stylesheet loading, inline `element.style`, and simple non-layout `getComputedStyle()` values. | These improve real-page compatibility and can be covered by deterministic WPT cases without committing to a layout engine. |
+| Starter CSSOM boundary | AWR may continue stylesheet loading, inline `element.style`, cascade for a small property set, and simple non-layout `getComputedStyle()` values under `spec/subspecs/cssom.md`. | These improve real-page compatibility and can be covered by deterministic WPT cases without committing to a layout engine. |
 | Tier 4 remains deferred | Full CSS layout, geometry-backed observers, flex/grid, box model, text shaping, and scroll layout are not active work. | Building or embedding layout changes AWR's architecture, packaging, security model, and maintenance burden. It needs explicit evidence first. |
 | Add a layout adapter seam first | AWR should introduce a `LayoutAdapter` boundary before selecting a backend. | This keeps the TUI and agent APIs stable and lets us compare current heuristics, an external oracle, and possible native layout behind one contract. |
 | First embed experiment is layout-only | If embedding is prototyped, use it as an out-of-process layout oracle first, not a full browser-runtime replacement. | AWR's product differentiator is one shared runtime for humans and agents. Replacing fetch/DOM/JS/cookies is a larger decision. |
@@ -137,9 +137,21 @@ JSON is acceptable for the first IPC prototype. Binary encodings can wait until 
 
 ### 2026-05-23 — Starter CSSOM remains non-layout
 
-Decision: Starter CSSOM may continue, but full CSS layout remains deferred.
+Decision: Starter CSSOM may continue under `spec/subspecs/cssom.md`, but full CSS layout remains deferred.
 
 Reason: The current implementation loads stylesheets and exposes simple computed style. That is useful and WPT-gated, but does not answer the Tier 4 layout strategy.
+
+### 2026-05-23 — CSSOM gets its own active sub-spec
+
+Decision: Added `spec/subspecs/cssom.md` to define the non-layout CSSOM path separately from Tier 4 layout.
+
+Reason: CSSOM can make measurable progress through parser/cascade/computed-style WPT cases without selecting a layout backend. A dedicated sub-spec prevents this starter track from silently expanding into full layout work.
+
+### 2026-05-23 — Native Zig CSSOM starts with declarations and rule parsing
+
+Decision: Started the CSSOM implementation in `src/cssom/` with a pure-Zig declaration model and simple stylesheet rule parser.
+
+Reason: CSSOM does not require a browser engine for the starter scope. Keeping parsing/model code in Zig preserves AWR's shared runtime and gives us a deterministic base for WPT-backed cascade/computed-style slices.
 
 ### 2026-05-23 — Prefer layout-adapter seam before backend commitment
 

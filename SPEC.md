@@ -26,6 +26,7 @@ This is the entry point for AWR product and engineering scope. If a document con
    - `spec/subspecs/browser-storage.md` — Web Storage.
    - `spec/subspecs/browser-realtime.md` — SSE and WebSocket.
    - `spec/subspecs/browser-events.md` — events, timers, `matchMedia`.
+   - `spec/subspecs/cssom.md` — starter non-layout CSSOM track.
 
 5. **Deferred strategy docs**
    - `spec/subspecs/mcp-stdio.md` — native MCP stdio server track.

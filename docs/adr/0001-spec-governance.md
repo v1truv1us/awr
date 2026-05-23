@@ -624,6 +624,17 @@ documentation governance.
   `spec/subspecs/wpt-conformance.md`, `README.md`, `docs/MVP-SHARE-BRIEF.md`,
   this ADR.
 
+### 2026-05-23 — CSSOM starter track gets dedicated sub-spec
+
+- Date: 2026-05-23
+- Change: Added `spec/subspecs/cssom.md` as the active starter CSSOM spec.
+- Reason: CSSOM work can progress independently from Tier 4 layout as long as
+  it stays limited to stylesheet loading, declaration APIs, cascade, and
+  non-layout computed values. A dedicated spec makes that boundary explicit.
+- Documents updated: `SPEC.md`, `spec/MVP.md`, `spec/subspecs/cssom.md`,
+  `spec/subspecs/browser-roadmap.md`, `docs/adr/0003-tier4-layout-strategy.md`,
+  this ADR.
+
 ### Template for future amendments
 
 - Date:

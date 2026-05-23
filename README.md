@@ -20,8 +20,9 @@ pool, one rendered DOM.
   keyboard input, history, URL bar, cookie inspector, browser-cookie
   import) is CLOSED and shipped.
 - **Tiers 2–3** (render/UX polish and lightly dynamic site support: History,
-  Storage, SSE, WebSocket, events, starter CSSOM) are CLOSED under curated
-  WPT/Test262 gates.
+  Storage, SSE, WebSocket, events) are CLOSED under curated WPT/Test262 gates.
+- **Starter CSSOM** is active under `spec/subspecs/cssom.md` and remains
+  explicitly non-layout.
 - **Tiers 4–5** (real CSS/layout engine and full SPA parity) are documented in
   `spec/subspecs/browser-roadmap.md §3` and deferred.
 
@@ -151,9 +152,10 @@ JS sees real page data through a thin polyfill over five Zig callbacks:
   bodies are strings or `URLSearchParams` instances stringified to
   `application/x-www-form-urlencoded`. Other methods, init keys, and body
   shapes still throw. See `spec/subspecs/agent-browser.md`.
-- Starter CSSOM is intentionally narrow: stylesheet loading, inline
-  `element.style`, and simple non-layout `getComputedStyle()` values such as
-  `display` / `visibility`.
+- Starter CSSOM is intentionally narrow and governed by
+  `spec/subspecs/cssom.md`: stylesheet loading, inline `element.style`, cascade
+  for a small property set, and simple non-layout `getComputedStyle()` values
+  such as `display` / `visibility`.
 - `IntersectionObserver` and `ResizeObserver` are not part of the shipped MVP
   surface.
 - `window.location` is populated from the requested URL
@@ -261,7 +263,8 @@ spec/
     wpt-conformance.md   Curated WPT/Test262 corpus + gates
     agent-browser.md     Tier 0 agent surface (closed)
     rendering.md         Tier 0 terminal renderer (closed)
-    daemon-mode.md       Tier 0 long-lived `awrd` (active → closing)
+    daemon-mode.md       Tier 0 long-lived `awrd` (closed)
+    cssom.md             Active starter CSSOM: non-layout style/cascade
     mcp-stdio.md         Deferred native MCP stdio server
 third_party/lexbor/       Build notes for lexbor dependency
 ```

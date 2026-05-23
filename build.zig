@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
     const test_test262_step = b.step("test-test262", "Run curated Test262 JS runtime tests");
     const test_corpus_step = b.step("test-corpus", "Run real-page render-quality corpus harness");
     const test_image_step = b.step("test-image", "Run image decoder + protocol + cache tests");
+    const test_cssom_step = b.step("test-cssom", "Run starter CSSOM parser/cascade tests");
     const test_doc_step = b.step("test-doc", "Run \xc2\xa78 \xe2\x86\x94 curated_cases doc-alignment check");
     const test_integration_step = b.step("test-integration", "Run binary-spawning Zig integration tests (requires built awr/awrd binaries)");
     const test_daemon_step = b.step("test-daemon", "Run daemon integration tests (requires built awr/awrd binaries)");
@@ -120,6 +121,28 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_t.step);
         test_net_step.dependOn(&run_t.step);
         if (std.mem.eql(u8, m.name, "http2")) test_h2_step.dependOn(&run_t.step);
+    }
+
+    // ── CSSOM modules (pure-Zig, no deps) ────────────────────────────────
+    {
+        const cssom_modules = [_]struct { name: []const u8, src: []const u8 }{
+            .{ .name = "cssom-style", .src = "src/cssom/style.zig" },
+            .{ .name = "cssom-parser", .src = "src/cssom/parser.zig" },
+        };
+        for (cssom_modules) |m| {
+            const cssom_mod = b.createModule(.{
+                .root_source_file = b.path(m.src),
+                .target = target,
+                .optimize = optimize,
+            });
+            const cssom_test = b.addTest(.{
+                .name = m.name,
+                .root_module = cssom_mod,
+            });
+            const run_cssom = b.addRunArtifact(cssom_test);
+            test_step.dependOn(&run_cssom.step);
+            test_cssom_step.dependOn(&run_cssom.step);
+        }
     }
 
     // ── telemetry module (pure-Zig, no deps) ──────────────────────────────

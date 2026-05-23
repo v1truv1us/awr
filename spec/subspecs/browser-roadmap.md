@@ -239,10 +239,11 @@ work end-to-end.
   a real 60 Hz tick from the libxev event loop.
 - `MediaQueryList` (`matchMedia`) — basic predicate evaluation
   against terminal dimensions.
-- starter CSSOM — load `<style>` and `<link rel="stylesheet">`, expose
-  inline `element.style`, and compute simple non-layout properties such as
-  `display` / `visibility`. This improves script feature-detection and
-  lets AWR grow upstream CSS WPT coverage without implying a layout engine.
+- starter CSSOM — governed by `spec/subspecs/cssom.md`: load `<style>` and
+  `<link rel="stylesheet">`, expose inline `element.style`, implement cascade
+  for a small non-layout property set, and compute values such as `display` /
+  `visibility`. This improves script feature-detection and lets AWR grow
+  upstream CSS WPT coverage without implying a layout engine.
 
 **Sub-spec(s)**: `spec/subspecs/browser-history.md` (History API,
 **CLOSED 2026-05-13**),

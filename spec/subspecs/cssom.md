@@ -1,0 +1,123 @@
+# CSSOM Starter Sub-spec
+
+Status: ACTIVE starter track
+Date: 2026-05-23
+Authority: `SPEC.md` → `spec/MVP.md` → this file
+Related: `spec/subspecs/browser-roadmap.md`, `spec/subspecs/wpt-conformance.md`, `docs/adr/0003-tier4-layout-strategy.md`
+
+## 1. Scope
+
+This sub-spec defines AWR's pre-layout CSSOM track. It exists to make CSS-visible browser APIs correct enough for scripts and terminal rendering decisions without claiming a full layout engine.
+
+In scope:
+
+- CSS resource loading:
+  - `<style>` blocks;
+  - `<link rel="stylesheet" href="...">`;
+  - same URL resolution/fetch behavior as external scripts where practical.
+- CSS declaration APIs:
+  - `element.style`;
+  - `CSSStyleDeclaration.cssText`;
+  - `getPropertyValue(name)`;
+  - `setProperty(name, value, priority)`;
+  - `removeProperty(name)`;
+  - property reflection for common camelCase properties.
+- Author stylesheet rules:
+  - parse into rule objects, not regex scans;
+  - support simple selector lists through AWR's existing selector engine;
+  - preserve source order.
+- Cascade for the starter property set:
+  - user-agent defaults;
+  - author stylesheets;
+  - inline styles;
+  - specificity;
+  - source order;
+  - `!important`.
+- `getComputedStyle(element)` for non-layout properties that AWR can compute deterministically.
+
+Out of scope:
+
+- full CSS parser coverage;
+- layout tree / box tree construction;
+- block/inline layout algorithms;
+- flexbox, grid, floats, positioning, transforms;
+- text shaping and font metrics;
+- real scroll geometry;
+- `getBoundingClientRect()` parity;
+- geometry-backed `IntersectionObserver` / `ResizeObserver`.
+
+Those remain Tier 4 per `docs/adr/0003-tier4-layout-strategy.md`.
+
+## 2. Starter property set
+
+The first computed-style properties should be small and terminal-useful:
+
+| Property | Why |
+|---|---|
+| `display` | Controls visibility and future box generation. |
+| `visibility` | Hides rendered output without removing DOM. |
+| `white-space` | Controls terminal text wrapping/preservation. |
+| `text-transform` | Affects displayed text deterministically. |
+| `font-weight` | Maps to bold terminal styling. |
+| `font-style` | Maps to italic/emphasis terminal styling where supported. |
+| `color` | Maps to ANSI foreground color where safe. |
+| `background-color` | Maps to ANSI background color where safe. |
+
+Properties may be added only with WPT coverage or a documented render/corpus test.
+
+## 3. Implementation shape
+
+Move CSS behavior out of the JS bridge over time:
+
+```text
+src/cssom/
+  style.zig         // CSSStyleDeclaration model (started)
+  parser.zig        // stylesheet rule parsing (started)
+  cascade.zig       // specificity, importance, source order
+  computed.zig      // getComputedStyle property resolution
+```
+
+The JS bridge should become a thin adapter that calls this deterministic style engine instead of owning parsing/cascade logic in embedded JavaScript strings.
+
+## 4. WPT growth plan
+
+Add curated cases in this order:
+
+1. Inline declaration basics:
+   - `element.style.cssText`;
+   - `getPropertyValue`;
+   - `setProperty`;
+   - `removeProperty`.
+2. Stylesheet loading:
+   - `<style>` block;
+   - external `<link rel="stylesheet">`;
+   - relative URL resolution.
+3. Cascade basics:
+   - stylesheet source order;
+   - inline style wins over author stylesheet;
+   - selector specificity.
+4. `!important`:
+   - author important beats normal inline only where spec says;
+   - inline important precedence.
+5. Computed style properties from §2.
+6. Renderer integration:
+   - `display:none` is not rendered;
+   - `visibility:hidden` has documented terminal behavior;
+   - `white-space` affects wrapping/preservation.
+
+## 5. Closure gates
+
+This starter CSSOM track can be marked CLOSED when:
+
+1. CSS parsing/cascade lives in a Zig `src/cssom/` module, not primarily in the bridge JS string.
+2. Curated WPT cases cover §4 items 1–5.
+3. Renderer/corpus tests cover §4 item 6.
+4. `zig build test-wpt`, `zig build test-doc`, and relevant render tests are green.
+5. `spec/MVP.md`, `SPEC.md`, `spec/subspecs/wpt-conformance.md`, and ADRs reflect the final closed scope.
+
+## 6. Non-goals and guardrails
+
+- Do not add layout-dependent WPT cases to this track.
+- Do not expose geometry APIs as correct unless backed by Tier 4 layout.
+- Do not let the CSSOM starter track silently become a layout engine.
+- Prefer small, source-backed WPT slices over broad compatibility claims.
