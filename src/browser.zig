@@ -1251,6 +1251,13 @@ pub const BrowserSession = struct {
         var local_result = result;
         errdefer local_result.deinit();
 
+        // Navigation replaces page content, so page-scoped overlays must not
+        // survive onto the new origin. Otherwise a user can navigate while the
+        // cookie inspector/select picker is open and see the old modal over the
+        // newly loaded page, which looks like the page rendered blank.
+        self.cancelSelectPicker();
+        self.closeCookieInspector();
+
         const fvl: page_mod.FieldValueLookup = .{
             .ctx = self,
             .lookup_fn = fieldValueLookupCallback,
@@ -1459,11 +1466,18 @@ pub const BrowserSession = struct {
     /// focus is on a link (or nothing) — link highlighting is a
     /// separate code path the renderer already handles.
     fn focusedElementPtrForRender(self: *const BrowserSession) ?usize {
-        if (self.focus_target != .field) return null;
-        const idx = self.selected_field orelse return null;
-        const model = self.screenModel() orelse return null;
-        if (idx >= model.fields.len) return null;
-        return model.fields[idx].element_ptr;
+        if (self.focus_target == .field) {
+            const idx = self.selected_field orelse return null;
+            const model = self.screenModel() orelse return null;
+            if (idx >= model.fields.len) return null;
+            return model.fields[idx].element_ptr;
+        } else if (self.focus_target == .link) {
+            const idx = self.selected_link orelse return null;
+            const model = self.screenModel() orelse return null;
+            if (idx >= model.links.len) return null;
+            return model.links[idx].element_ptr;
+        }
+        return null;
     }
 
     fn rerenderCurrent(self: *BrowserSession) !void {
@@ -1887,9 +1901,60 @@ pub fn drawFrame(
     const viewport_height = viewportHeight(size);
     const model = session.screenModel();
     const url = session.currentUrl() orelse "";
-    try writeClippedLine(writer, size.cols, "AWR — ");
-    try writeClippedLine(writer, size.cols, url);
-    try writer.writeAll("\n");
+    const cols = size.cols;
+
+    // Header styling
+    const left_base = " AWR 🌐 ";
+    var right_buf: [64]u8 = undefined;
+    const right_str = if (session.history.items.len > 0)
+        std.fmt.bufPrint(&right_buf, " [Hist: {d}/{d}] (q: quit) ", .{ session.history_index + 1, session.history.items.len }) catch " (q: quit) "
+    else
+        " (q: quit) ";
+    const right_len = visualLen(right_str);
+    const left_base_len = visualLen(left_base);
+    const reserved = left_base_len + right_len;
+
+    var url_display = url;
+    var url_owned: ?[]u8 = null;
+    defer if (url_owned) |u| session.allocator.free(u);
+
+    if (cols > reserved + 5) {
+        const max_url_len = cols - reserved;
+        if (url.len > max_url_len) {
+            url_owned = std.fmt.allocPrint(session.allocator, "{s}...", .{url[0..(max_url_len - 3)]}) catch null;
+            if (url_owned) |u| url_display = u;
+        }
+    } else if (cols > left_base_len + 5) {
+        const max_url_len = cols - left_base_len;
+        if (url.len > max_url_len) {
+            url_owned = std.fmt.allocPrint(session.allocator, "{s}...", .{url[0..(max_url_len - 3)]}) catch null;
+            if (url_owned) |u| url_display = u;
+        }
+    }
+
+    var header_line: std.ArrayList(u8) = .empty;
+    defer header_line.deinit(session.allocator);
+
+    if (cols > reserved + 5) {
+        try header_line.appendSlice(session.allocator, left_base);
+        try header_line.appendSlice(session.allocator, url_display);
+        const cur_len = visualLen(header_line.items) + right_len;
+        const padding = if (cols > cur_len) cols - cur_len else 0;
+        var p: usize = 0;
+        while (p < padding) : (p += 1) try header_line.append(session.allocator, ' ');
+        try header_line.appendSlice(session.allocator, right_str);
+    } else {
+        try header_line.appendSlice(session.allocator, left_base);
+        try header_line.appendSlice(session.allocator, url_display);
+        const cur_len = visualLen(header_line.items);
+        const padding = if (cols > cur_len) cols - cur_len else 0;
+        var p: usize = 0;
+        while (p < padding) : (p += 1) try header_line.append(session.allocator, ' ');
+    }
+
+    try writer.writeAll("\x1b[7m\x1b[1m"); // REVERSE + BOLD
+    try writeClippedLine(writer, cols, header_line.items);
+    try writer.writeAll("\x1b[0m\n");
 
     // T-83: when a `<select>` picker is open it replaces the body
     // area entirely so the user's attention is on the option list.
@@ -1934,8 +1999,19 @@ pub fn drawFrame(
 
     const footer = try session.footerText(session.allocator);
     defer session.allocator.free(footer);
-    try writeClippedLine(writer, size.cols, footer);
-    try writer.writeAll("\x1b[K");
+
+    const is_input_mode = session.prompt_mode != .none or session.field_editing;
+    if (is_input_mode) {
+        try writeClippedLine(writer, size.cols, footer);
+        try writer.writeAll("\x1b[K");
+    } else {
+        const footer_len = visualLen(footer);
+        try writer.writeAll("\x1b[7m\x1b[1m");
+        try writeClippedLine(writer, size.cols, footer);
+        var pad = if (size.cols > footer_len) size.cols - footer_len else 0;
+        while (pad > 0) : (pad -= 1) try writer.writeByte(' ');
+        try writer.writeAll("\x1b[0m\x1b[K");
+    }
 }
 
 /// Render the open `<select>` picker as a centered list inside the
@@ -2236,25 +2312,29 @@ fn drawWelcome(writer: anytype, cols: usize, viewport_height: usize) !void {
     else
         0;
 
+    // Keep the welcome copy in one readable block. Centering each line
+    // independently spreads shortcuts across wide terminals, which is
+    // hard for humans to scan; a left-aligned card preserves grouping.
+    const block_width: usize = @min(cols, 72);
+    const block_left: usize = if (cols > block_width) (cols - block_width) / 2 else 0;
+
     var row: usize = 0;
     while (row < top_pad) : (row += 1) try writer.writeAll("\x1b[K\n");
 
     for (tips) |line| {
         if (row >= viewport_height) break;
-        // Horizontal centering: left-pad by half of the leftover
-        // space. visualLen ignores ANSI so the math is correct even
-        // for the BOLD/DIM-wrapped strings above.
-        const vl = visualLen(line);
-        if (cols > vl) {
-            const lpad = (cols - vl) / 2;
-            for (0..lpad) |_| try writer.writeByte(' ');
-        }
-        try writeClippedLine(writer, cols, line);
-        try writer.writeAll("\x1b[K\n");
+        try writeWelcomeLine(writer, cols, block_left, line);
         row += 1;
     }
 
     while (row < viewport_height) : (row += 1) try writer.writeAll("\x1b[K\n");
+}
+
+fn writeWelcomeLine(writer: anytype, cols: usize, left_pad: usize, line: []const u8) !void {
+    const pad = @min(left_pad, cols);
+    for (0..pad) |_| try writer.writeByte(' ');
+    try writeClippedLine(writer, cols - pad, line);
+    try writer.writeAll("\x1b[K\n");
 }
 
 /// Read the URL-history capacity from $AWR_URL_HISTORY_LEN with a
@@ -2874,6 +2954,36 @@ test "harness: welcome screen paints on fresh session" {
     try std.testing.expect(try h.frameContains("AWR — Agentic Web Runtime"));
     try std.testing.expect(try h.frameContains("URL bar"));
     try std.testing.expect(try h.frameContains("URL: "));
+}
+
+test "harness: welcome screen stays in a readable block on wide terminals" {
+    var h = try TuiHarness.init(std.testing.allocator, 200, 24);
+    defer h.deinit();
+    try h.session.startPrompt(.url);
+
+    const raw = try h.render();
+    var stripped: std.ArrayList(u8) = .empty;
+    defer stripped.deinit(std.testing.allocator);
+
+    var i: usize = 0;
+    while (i < raw.len) {
+        if (raw[i] == '\x1b') {
+            while (i < raw.len and raw[i] != 'm') : (i += 1) {}
+            if (i < raw.len) i += 1;
+            continue;
+        }
+        try stripped.append(std.testing.allocator, raw[i]);
+        i += 1;
+    }
+
+    var lines = std.mem.splitScalar(u8, stripped.items, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "URL bar")) |idx| {
+            try std.testing.expectEqual(@as(usize, 64), idx);
+            return;
+        }
+    }
+    return error.ExpectedWelcomeShortcutLine;
 }
 
 test "harness: URL prompt accepts typed chars and shows them in footer" {

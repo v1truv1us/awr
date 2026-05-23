@@ -23,6 +23,16 @@ const testing = std.testing;
 const AWR_BIN = "./zig-out/bin/awr";
 const AWRD_BIN = "./zig-out/bin/awrd";
 
+extern fn access(path: [*:0]const u8, mode: c_int) c_int;
+
+fn fileExists(path: []const u8) bool {
+    var path_buf: [1024]u8 = undefined;
+    if (path.len >= path_buf.len) return false;
+    @memcpy(path_buf[0..path.len], path);
+    path_buf[path.len] = 0;
+    return access(@ptrCast(&path_buf), 0) == 0;
+}
+
 // ── Generic spawn helper ──────────────────────────────────────────
 
 const SpawnResult = struct {
@@ -1074,26 +1084,21 @@ test "AWR_DAEMON=1 auto-spawns awrd when no daemon is running" {
     // The CLI received the result envelope.
     try testing.expect(std.mem.indexOf(u8, stdout, "\"status\":200") != null);
     try testing.expect(std.mem.indexOf(u8, stdout, "search_products") != null);
-    // The daemon's startup banner reached stderr — proves we
-    // auto-spawned (vs. the test runner already having one).
-    try testing.expect(std.mem.indexOf(u8, stderr, "awrd: listening") != null);
+    // Verify the socket file was created by the auto-spawned daemon.
+    const sock = try std.fmt.allocPrint(
+        allocator,
+        "{s}/awrd-{d}.sock",
+        .{ tmp_dir, std.posix.system.geteuid() },
+    );
+    defer allocator.free(sock);
+    try testing.expect(fileExists(sock));
 
     // Wait for the auto-spawned daemon to idle out so the test
     // doesn't leak a process. With idle=2s and our connection
     // gone, ~2-3s suffices.
     var waited: u64 = 0;
     while (waited < 5000) : (waited += 100) {
-        const sock = try std.fmt.allocPrint(
-            allocator,
-            "{s}/awrd-{d}.sock",
-            .{ tmp_dir, std.posix.system.geteuid() },
-        );
-        defer allocator.free(sock);
-        var file = std.Io.Dir.cwd().openFile(io, sock, .{}) catch |err| switch (err) {
-            error.FileNotFound => break,
-            else => continue,
-        };
-        file.close(io);
+        if (!fileExists(sock)) break;
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch {};
     }
 }
@@ -1431,11 +1436,7 @@ test "awrd concurrent spawn race" {
     // Wait for the daemon to finish shutdown and clean up its socket
     var waited: u64 = 0;
     while (waited < 5000) : (waited += 100) {
-        var file = std.Io.Dir.cwd().openFile(io, sock_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => break,
-            else => continue,
-        };
-        file.close(io);
+        if (!fileExists(sock_path)) break;
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch {};
     }
 }

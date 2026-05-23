@@ -77,9 +77,9 @@ All four sub-specs closed:
 
 ## 2. What's Blocking MVP
 
-**No hard blockers.** Tiers 0–3 are all closed as of 2026-05-22. WebSocket
-(T3.D.2) landed and closed `browser-realtime.md`. Daemon mode has been
-explicitly deferred per ADR 0002 (2026-05-23). The spec map is clean.
+**No hard blockers.** Tiers 0–3 and Daemon Mode are all closed as of 2026-05-23. WebSocket
+(T3.D.2) landed and closed `browser-realtime.md`. Daemon Mode is fully implemented,
+singleton-verified, and closed per the §4 gates. The spec map is clean.
 
 ### Known Bug: TlsInitializationFailed on HackerNews
 
@@ -108,12 +108,11 @@ shipping codebase:
   (`/api` no longer matches `/apiOld`), and `cookie.zig:168-202` enforces
   `SameSite` at send time. Covered by unit tests. Closed.
 
-### Daemon Mode — Explicitly Deferred
+### Daemon Mode — CLOSED
 
-`spec/subspecs/daemon-mode.md` was ACTIVE but is now **DEFERRED** per
-`docs/adr/0002-daemon-mode-deferred.md` (2026-05-23). The B1 design and IPC
-contract are preserved. The spec map is now clean — daemon mode is not
-listed as an active gate.
+`spec/subspecs/daemon-mode.md` is now **CLOSED** (completed 2026-05-23).
+All integration tests (including the concurrent spawn race test) are 100% green.
+The `test-daemon` build step runs successfully.
 
 ---
 
@@ -121,7 +120,7 @@ listed as an active gate.
 
 ### Required for MVP close
 
-- Nothing. Tiers 0–3 are closed. Daemon mode is deferred. All tests green.
+- Nothing. Tiers 0–3 and Daemon Mode are closed. All tests green.
 
 ### Required before any public/production release (correctness fixes)
 

@@ -1810,6 +1810,16 @@ const BRIDGE_POLYFILL =
     \\        __awr_queue_mutation_record__(this, { type: 'attributes', target: this, attributeName: 'id', oldValue: oldValue });
     \\      },
     \\      get className() { return this._attrs.class || ''; },
+    \\      get style() {
+    \\        if (!this._styleDecl) this._styleDecl = __awr_make_style_decl__(this, this._attrs.style || '');
+    \\        return this._styleDecl;
+    \\      },
+    \\      set style(v) {
+    \\        const value = String(v == null ? '' : v);
+    \\        this._attrs.style = value;
+    \\        this._styleDecl = __awr_make_style_decl__(this, value);
+    \\        __awr_setAttribute__(this._h, 'style', value);
+    \\      },
     \\      set className(v) {
     \\        const value = String(v);
     \\        const oldValue = this.getAttribute('class');
@@ -2137,6 +2147,67 @@ const BRIDGE_POLYFILL =
     \\    get forms() { return document.getElementsByTagName('form'); },
     \\  };
     \\
+    \\  function __awr_parse_style_text__(text) {
+    \\    const out = Object.create(null);
+    \\    String(text || '').split(';').forEach(part => {
+    \\      const idx = part.indexOf(':');
+    \\      if (idx < 0) return;
+    \\      const name = part.slice(0, idx).trim().toLowerCase();
+    \\      if (name) out[name] = part.slice(idx + 1).trim();
+    \\    });
+    \\    return out;
+    \\  }
+    \\  function __awr_style_to_text__(props) {
+    \\    const chunks = [];
+    \\    for (const k in props) if (props[k] !== '') chunks.push(k + ': ' + props[k] + ';');
+    \\    return chunks.join(' ');
+    \\  }
+    \\  function __awr_make_style_decl__(owner, text) {
+    \\    const props = __awr_parse_style_text__(text);
+    \\    return new Proxy(props, {
+    \\      get(target, prop) {
+    \\        if (prop === 'cssText') return __awr_style_to_text__(target);
+    \\        if (prop === 'getPropertyValue') return name => target[String(name).toLowerCase()] || '';
+    \\        if (prop === 'setProperty') return (name, value) => { target[String(name).toLowerCase()] = String(value); owner.setAttribute('style', __awr_style_to_text__(target)); };
+    \\        const css = String(prop).replace(/[A-Z]/g, m => '-' + m.toLowerCase()).toLowerCase();
+    \\        return target[css] || '';
+    \\      },
+    \\      set(target, prop, value) {
+    \\        const css = String(prop).replace(/[A-Z]/g, m => '-' + m.toLowerCase()).toLowerCase();
+    \\        target[css] = String(value);
+    \\        owner.setAttribute('style', __awr_style_to_text__(target));
+    \\        return true;
+    \\      }
+    \\    });
+    \\  }
+    \\  globalThis.__awr_stylesheets__ = [];
+    \\  globalThis.__awr_add_stylesheet__ = function(cssText) { globalThis.__awr_stylesheets__.push(String(cssText || '')); };
+    \\  function __awr_apply_css_rules__(el, computed) {
+    \\    for (const sheet of globalThis.__awr_stylesheets__) {
+    \\      const re = /([^{}]+)\{([^{}]+)\}/g;
+    \\      let m;
+    \\      while ((m = re.exec(sheet))) {
+    \\        const selectors = m[1].split(',').map(s => s.trim()).filter(Boolean);
+    \\        let matched = false;
+    \\        for (const sel of selectors) { try { if (el.matches(sel)) { matched = true; break; } } catch (_) {} }
+    \\        if (!matched) continue;
+    \\        const props = __awr_parse_style_text__(m[2]);
+    \\        for (const k in props) computed[k] = props[k];
+    \\      }
+    \\    }
+    \\  }
+    \\  globalThis.getComputedStyle = function(el) {
+    \\    const computed = Object.create(null);
+    \\    computed.display = 'inline';
+    \\    computed.visibility = 'visible';
+    \\    if (el && el.tagName && /^(DIV|P|FORM|SECTION|ARTICLE|HEADER|FOOTER|MAIN|H[1-6])$/.test(el.tagName)) computed.display = 'block';
+    \\    if (el) __awr_apply_css_rules__(el, computed);
+    \\    if (el && el.getAttribute) {
+    \\      const inline = __awr_parse_style_text__(el.getAttribute('style') || '');
+    \\      for (const k in inline) computed[k] = inline[k];
+    \\    }
+    \\    return new Proxy(computed, { get(target, prop) { if (prop === 'getPropertyValue') return name => target[String(name).toLowerCase()] || ''; const css = String(prop).replace(/[A-Z]/g, m => '-' + m.toLowerCase()).toLowerCase(); return target[css] || ''; } });
+    \\  };
     \\  globalThis.__awr_document_ready_state__ = globalThis.__awr_document_ready_state__ || 'loading';
     \\  globalThis.document  = document;
     \\  globalThis.window    = globalThis;

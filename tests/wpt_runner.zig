@@ -504,6 +504,17 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/match_media.js"),
     },
     .{
+        .filename = "css_inline_computed_style.js",
+        .html = "<html><body><div id=\"inline-css\" style=\"display: none; visibility: hidden\"></div><div id=\"mutable-css\"></div></body></html>",
+        .script = @embedFile("wpt/css_inline_computed_style.js"),
+    },
+    .{
+        .filename = "css_external_stylesheet.js",
+        .html = @embedFile("wpt/css_external_stylesheet.html"),
+        .script = @embedFile("wpt/css_external_stylesheet.js"),
+        .url = "file://tests/wpt/css_external_stylesheet.html",
+    },
+    .{
         .filename = "form_properties.js",
         .html =
         \\<html><body>

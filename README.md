@@ -5,11 +5,12 @@ serves both **humans** in the terminal (`awr browse`) and **AI agents**
 via JSON / Markdown / WebMCP — sharing one cookie jar, one connection
 pool, one rendered DOM.
 
+> **Spec index:** `SPEC.md`
 > **Canonical spec:** `spec/MVP.md`
 > **Cross-tier roadmap:** `spec/subspecs/browser-roadmap.md`
 > **Tier 0 closure record:** `spec/subspecs/mvp-remainder.md`, `spec/subspecs/wpt-conformance.md`
-> **Tier 1 active sub-spec:** `spec/subspecs/browser-tui.md`
-> **Deferred tracks:** `spec/subspecs/mcp-stdio.md`, `spec/Fingerprint-Plan.md`
+> **Tier 1 closed sub-spec:** `spec/subspecs/browser-tui.md`
+> **Deferred tracks:** Tier 4 layout engine, Tier 5 SPA parity, `spec/subspecs/mcp-stdio.md`, `spec/Fingerprint-Plan.md`
 > **Governance ADR:** `docs/adr/0001-spec-governance.md`
 
 **Status:**
@@ -17,9 +18,11 @@ pool, one rendered DOM.
   CLOSED and shipped.
 - **Tier 1** (interactive TUI parity with lynx/w3m: form fields, focus,
   keyboard input, history, URL bar, cookie inspector, browser-cookie
-  import) is ACTIVE.
-- Tiers 2–5 (rendering polish, dynamic-site browser APIs, layout engine,
-  full SPA parity) are documented in
+  import) is CLOSED and shipped.
+- **Tiers 2–3** (render/UX polish and lightly dynamic site support: History,
+  Storage, SSE, WebSocket, events, starter CSSOM) are CLOSED under curated
+  WPT/Test262 gates.
+- **Tiers 4–5** (real CSS/layout engine and full SPA parity) are documented in
   `spec/subspecs/browser-roadmap.md §3` and deferred.
 
 If canonical spec boundaries or document authority change, update both
@@ -148,7 +151,10 @@ JS sees real page data through a thin polyfill over five Zig callbacks:
   bodies are strings or `URLSearchParams` instances stringified to
   `application/x-www-form-urlencoded`. Other methods, init keys, and body
   shapes still throw. See `spec/subspecs/agent-browser.md`.
-- `IntersectionObserver` and `ResizeObserver` are not exposed on the shipped MVP
+- Starter CSSOM is intentionally narrow: stylesheet loading, inline
+  `element.style`, and simple non-layout `getComputedStyle()` values such as
+  `display` / `visibility`.
+- `IntersectionObserver` and `ResizeObserver` are not part of the shipped MVP
   surface.
 - `window.location` is populated from the requested URL
   (`href`, `hostname`, `pathname`, `origin`, `search`, `protocol`).
@@ -221,7 +227,7 @@ See the canonical spec map in `spec/MVP.md`.
 - **Cross-tier roadmap:** `spec/subspecs/browser-roadmap.md`
 - **Tier 0 closure record:** `spec/subspecs/mvp-remainder.md`
 - **Conformance authority (corpus grows with active tiers):** `spec/subspecs/wpt-conformance.md`
-- **Tier 1 active sub-spec:** `spec/subspecs/browser-tui.md`
+- **Tier 1 closed sub-spec:** `spec/subspecs/browser-tui.md`
 - **Deferred MCP stdio:** `spec/subspecs/mcp-stdio.md`
 - **Deferred fingerprint roadmap:** `spec/Fingerprint-Plan.md`
 
@@ -250,7 +256,7 @@ spec/
   Fingerprint-Plan.md
   subspecs/
     browser-roadmap.md   Cross-tier capability ladder (T0-T5)
-    browser-tui.md       Tier 1 active: interactive TUI parity
+    browser-tui.md       Tier 1 closed: interactive TUI parity
     mvp-remainder.md     Tier 0 closure record
     wpt-conformance.md   Curated WPT/Test262 corpus + gates
     agent-browser.md     Tier 0 agent surface (closed)

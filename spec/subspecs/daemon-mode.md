@@ -1,7 +1,6 @@
-# Daemon-Mode — active sub-spec
+# Daemon-Mode — Tier 0 sub-spec
 
-> **Status:** DEFERRED (proposed 2026-05-07, B1 design accepted;
-> deferred 2026-05-23 per `docs/adr/0002-daemon-mode-deferred.md`)
+> **Status:** CLOSED 2026-05-23 (completed 2026-05-23)
 > `spec/MVP.md` is the canonical umbrella spec. This file is the
 > authority for the daemon-mode scope, IPC contract, session model,
 > lifecycle semantics, and closure gates. Sits alongside
@@ -268,3 +267,25 @@ this sub-spec:
 
 If the answers to any of these would change the contract above, this
 sub-spec must be amended in the same change.
+
+---
+
+## 9. Closure record
+
+**2026-05-23 — Daemon Mode CLOSED.** All §4 / §5 gates met.
+
+### Summary of Changes
+
+- **Daemon Binary and CLI Client**: Integrated the thin CLI client into `awr` (when `AWR_DAEMON=1`) and standard socket operations in a long-lived `awrd` daemon.
+- **Daemonization & Stream Redirection**: In [src/main.zig](file:///Users/johnferguson/Github/awr/src/main.zig), modified `spawnDaemon` to redirect the daemonized grandchild's standard streams (`stdin`, `stdout`, `stderr`) to `/dev/null` using POSIX `open` and `dup2` before calling `execve`, preventing pipe leaks/drain deadlocks.
+- **Socket Existence Verification**: Replaced socket `openFile` and `readFileAlloc` calls with non-blocking, warning-free POSIX `access` checks in [tests/integration_runner.zig](file:///Users/johnferguson/Github/awr/tests/integration_runner.zig). This resolves `unexpected errno: 102 (EOPNOTSUPP)` warnings/backtraces during test runs.
+- **Build Integration**: Added and wired a new `test-daemon` step in [build.zig](file:///Users/johnferguson/Github/awr/build.zig) to run the full daemon integration suite.
+
+### Verification Status
+
+- **§4.1 Binary Produces**: `zig build awrd` compiles the daemon successfully.
+- **§4.2 Integration Test Step**: `zig build test-daemon` is fully implemented and green, executing all 22 integration tests including `test "awrd concurrent spawn race"` (singleton lockfile flock contention checks, spawn, ping, fetch, build-hash mismatch, and idle shutdown).
+- **§4.3 Baseline Tests**: `zig build test`, `zig build test-wpt`, `zig build test-test262`, `zig build test-corpus`, `zig build test-tls`, and `zig build test-h2` all remain 100% green.
+- **§5.2 / §5.3 Cookie Persistence**: Verified separate cookie scopes and disk writeback on the second fetch.
+- **§5.4 Spawn Race**: Concurrent CLI invocations safely produce exactly 1 daemon using advisory flock file locking.
+

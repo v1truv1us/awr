@@ -85,6 +85,7 @@ pub fn build(b: *std.Build) void {
     const test_image_step = b.step("test-image", "Run image decoder + protocol + cache tests");
     const test_doc_step = b.step("test-doc", "Run \xc2\xa78 \xe2\x86\x94 curated_cases doc-alignment check");
     const test_integration_step = b.step("test-integration", "Run binary-spawning Zig integration tests (requires built awr/awrd binaries)");
+    const test_daemon_step = b.step("test-daemon", "Run daemon integration tests (requires built awr/awrd binaries)");
     const smoke_step = b.step("smoke", "Run mvp + regression smoke suites against the built binary");
     const bench_daemon_step = b.step("bench-daemon", "Daemon vs per-process chained-flow benchmark (spec §4.5 gate)");
 
@@ -644,6 +645,7 @@ pub fn build(b: *std.Build) void {
         run_integration.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
         run_integration.step.dependOn(&b.addInstallArtifact(awrd_exe, .{}).step);
         test_integration_step.dependOn(&run_integration.step);
+        test_daemon_step.dependOn(&run_integration.step);
 
         // `zig build smoke` — runs the two shell suites against the
         // freshly-built binary. mvp_smoke.sh covers the original

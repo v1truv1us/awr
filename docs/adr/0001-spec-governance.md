@@ -582,6 +582,48 @@ documentation governance.
   `spec/subspecs/wpt-conformance.md` (109 → 110 WPT cases, new
   EventSource (SSE) row), this ADR.
 
+### 2026-05-22 — T3.D.2 WebSocket CLOSED (browser-realtime CLOSED)
+
+- Date: 2026-05-22
+- Change: `spec/subspecs/browser-realtime.md` status changed from PARTIAL to CLOSED.
+  RFC 6455 client-side WebSocket support implemented and verified.
+- Reason: The T3.D.2 WebSocket sub-spec closure gate has been fully met, closing the remaining real-time connection requirements under Tier 3.
+- Documents updated: `spec/subspecs/browser-realtime.md`, `spec/subspecs/browser-roadmap.md`, `spec/MVP.md`, this ADR.
+
+### 2026-05-23 — Daemon Mode CLOSED
+
+- Date: 2026-05-23
+- Change: `spec/subspecs/daemon-mode.md` status changed from DEFERRED to CLOSED.
+- Reason: Daemon Mode has been fully implemented, resolving process stream inheritance pipe deadlocks and test socket check warnings. All 22 integration tests including concurrent spawn race are 100% green under the newly added `test-daemon` step.
+- Documents updated: `spec/subspecs/daemon-mode.md`, `spec/MVP.md`, `docs/adr/0002-daemon-mode-deferred.md`, this ADR.
+
+### 2026-05-23 — Tier 4 layout strategy gets dedicated ADR
+
+- Date: 2026-05-23
+- Change: Added `docs/adr/0003-tier4-layout-strategy.md` as the living decision
+  record for Tier 4 layout strategy, layout-adapter design, and embed-vs-native
+  evidence gathering.
+- Reason: Tier 4 is the largest unresolved product/architecture decision. It
+  needs a dedicated ADR that is updated as discussions, audits, and prototypes
+  change the recommendation.
+- Documents updated: `docs/adr/0003-tier4-layout-strategy.md`, this ADR.
+
+### 2026-05-23 — Starter CSSOM clarified as non-layout MVP surface
+
+- Date: 2026-05-23
+- Change: Clarified that AWR may ship a starter CSSOM subset before Tier 4:
+  stylesheet loading, inline `element.style`, and simple non-layout
+  `getComputedStyle()` values covered by curated WPT cases. Full CSS layout,
+  cascade completeness, flex/grid, box model, and geometry-backed observers
+  remain Tier 4.
+- Reason: The implementation now loads `<style>` / `<link rel="stylesheet">`
+  and has starter CSSOM WPT coverage, but the strategic layout-engine decision
+  remains deferred. The spec needed to separate this small CSSOM slice from the
+  much larger layout tier.
+- Documents updated: `spec/MVP.md`, `spec/subspecs/browser-roadmap.md`,
+  `spec/subspecs/wpt-conformance.md`, `README.md`, `docs/MVP-SHARE-BRIEF.md`,
+  this ADR.
+
 ### Template for future amendments
 
 - Date:

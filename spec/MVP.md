@@ -45,13 +45,14 @@ Tests and Test262 cases.
 
 | Document | Role |
 |---|---|
+| `SPEC.md` | Repository-level spec index; points to canonical and specific specs |
 | `spec/MVP.md` | Top-level canonical umbrella spec and change-control point |
 | `spec/subspecs/browser-roadmap.md` | **Cross-tier capability ladder.** Tier ordering, tier-promotion gates, and the WPT-growth contract that ties tier closure to corpus growth |
 | `spec/subspecs/mvp-remainder.md` | Tier 0 closure record (was: active MVP completion track) |
 | `spec/subspecs/wpt-conformance.md` | Canonical WPT/Test262 runner, corpus, and merge-gate spec; corpus grows with each active tier |
 | `spec/subspecs/agent-browser.md` | Tier 0 agent-browser scope (closed): POST in fetch+XHR, form `method=post`, cookie persistence |
 | `spec/subspecs/rendering.md` | Tier 0 rendering scope (closed): terminal render + image protocols |
-| `spec/subspecs/daemon-mode.md` | Daemon-mode scope (DEFERRED per ADR 0002, 2026-05-23): long-lived `awrd` + JSON-RPC IPC for amortized startup |
+| `spec/subspecs/daemon-mode.md` | Tier 0 daemon-mode scope (closed): long-lived `awrd` + JSON-RPC IPC for amortized startup |
 | `spec/subspecs/browser-tui.md` | **Tier 1 closed sub-spec**: interactive TUI parity (form fields, focus, keyboard input, history, URL bar, cookie inspector, browser-cookie import) |
 | `spec/subspecs/render-polish.md` | **Tier 2 closed sub-spec**: render + UX polish (bookmarks, URL-bar autocomplete, form/table/code/diff/image polish, cookie inspector enrichment) |
 | `spec/subspecs/browser-history.md` | **Tier 3 closed sub-spec**: History API (`pushState`, `replaceState`, `popstate`, `back`/`forward`/`go`) |
@@ -59,6 +60,7 @@ Tests and Test262 cases.
 | `spec/subspecs/browser-realtime.md` | **Tier 3 closed sub-spec**: real-time connections — SSE (T3.D.1) + WebSocket (T3.D.2), both CLOSED 2026-05-22 |
 | `spec/subspecs/browser-events.md` | **Tier 3 closed sub-spec**: browser events (synthetic input, `DOMContentLoaded`/`load`, `requestAnimationFrame`, `matchMedia` evaluation) |
 | `docs/adr/0001-spec-governance.md` | Historical record for spec/documentation governance decisions |
+| `docs/adr/0003-tier4-layout-strategy.md` | Living decision record for Tier 4 layout strategy, layout-adapter design, and embed-vs-native evidence |
 
 ### Deferred, documented, not active now
 
@@ -111,7 +113,10 @@ The MVP is only considered complete when all of the following are true:
    `spec/subspecs/agent-browser.md`).
 5. curated Test262 coverage is wired into the build and passes for the intended
    embedded JS runtime surface.
-6. shipped APIs follow the **no-stubs rule**: any exposed surface must be real,
+6. starter CSSOM coverage is wired into the curated WPT corpus for stylesheet
+   loading, inline `element.style`, and simple `getComputedStyle()` values that
+   do not require layout.
+7. shipped APIs follow the **no-stubs rule**: any exposed surface must be real,
    or removed until it can be implemented correctly.
 
 Those gates are the closure definition for the shipped MVP surface.
@@ -145,7 +150,12 @@ The closed MVP surface is:
    non-TTY override that forces `.none` so `awr render | tee` stays escape-
    free. Per-image safety caps (4 MiB encoded / 16 MP decoded) and a
    per-page fetch budget (32 images, surplus → text alt-refs). See
-   `spec/subspecs/rendering.md`.
+   `spec/subspecs/rendering.md`;
+8. a starter CSSOM subset: `<style>` and `<link rel="stylesheet">` loading,
+   inline `element.style`, and `getComputedStyle()` for simple selector-matched
+   properties such as `display` and `visibility`. This is intentionally **not**
+   a layout engine: cascade completeness, box model, flex/grid, text shaping,
+   scroll-driven layout, and geometry-backed observers remain Tier 4.
 
 The closure record and remaining follow-on work live in
 `spec/subspecs/mvp-remainder.md`.
@@ -176,7 +186,8 @@ These tracks stay documented, but they are **not** in the active queue:
 - later fingerprinting / owned browser identity work →
   `spec/Fingerprint-Plan.md`
 - Tiers 4–5 of the browser-roadmap (layout engine, full SPA parity) →
-  `spec/subspecs/browser-roadmap.md §3`. Tiers 2 and 3 are closed;
+  `spec/subspecs/browser-roadmap.md §3`. Tier 4 strategy and evidence live in
+  `docs/adr/0003-tier4-layout-strategy.md`. Tiers 2 and 3 are closed;
   Tiers 4–5 do not have dedicated sub-specs yet; sub-specs are created
   at promotion time.
 
@@ -203,10 +214,10 @@ test surface via `zig build test-image` (113 tests across 8 modules).
 
 The daemon-mode scope (long-lived `awrd` process + Unix-socket JSON-RPC
 IPC + per-cookie-scope state partitioning) is governed by
-`spec/subspecs/daemon-mode.md` and is **deferred** per
-`docs/adr/0002-daemon-mode-deferred.md` (deferred 2026-05-23). The B1
-design and IPC contract are preserved for when the track is promoted.
-Companion design doc: `docs/research/2026-05-07-daemon-mode-design.md`.
+`spec/subspecs/daemon-mode.md` and is **closed** (completed 2026-05-23).
+All integration tests (including the concurrent spawn race test) are 100% green,
+and the `test-daemon` build step runs successfully. Companion design doc:
+`docs/research/2026-05-07-daemon-mode-design.md`.
 
 Do not treat deferred tracks as blockers for the active MVP closure work unless
 this spec is amended.

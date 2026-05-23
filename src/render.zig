@@ -194,6 +194,7 @@ pub const ScreenField = struct {
 };
 
 pub const ScreenLink = struct {
+    element_ptr: usize,
     index: usize,
     href: []const u8,
     text: []const u8,
@@ -283,6 +284,7 @@ const FieldRef = struct {
 };
 
 const LinkRef = struct {
+    element_ptr: usize,
     index: usize,
     href: []const u8,
     text: []const u8,
@@ -426,9 +428,10 @@ const RenderState = struct {
         return self.pre_depth > 0;
     }
 
-    fn registerLink(self: *RenderState, href: []const u8, text: []const u8) !usize {
+    fn registerLink(self: *RenderState, element_ptr: usize, href: []const u8, text: []const u8) !usize {
         const idx = self.links.items.len + 1;
         try self.links.append(self.allocator, .{
+            .element_ptr = element_ptr,
             .index = idx,
             .href = try self.allocator.dupe(u8, href),
             .text = try self.allocator.dupe(u8, text),
@@ -641,6 +644,7 @@ fn buildScreenModel(
     }
     for (link_refs, 0..) |link, i| {
         links[i] = .{
+            .element_ptr = link.element_ptr,
             .index = link.index,
             .href = try allocator.dupe(u8, link.href),
             .text = try allocator.dupe(u8, link.text),
@@ -917,7 +921,13 @@ fn renderParagraph(state: *RenderState, w: anytype, elem: *const dom.Element) an
 }
 
 fn renderLink(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
-    try state.ansi(w, UNDERLINE);
+    const focused = focusMatches(state.opts.focused_element_ptr, elem);
+    if (focused and state.opts.ansi_colors) {
+        try state.ansi(w, REVERSE);
+        try state.ansi(w, BOLD);
+    } else {
+        try state.ansi(w, UNDERLINE);
+    }
     try renderChildren(state, w, elem);
     try state.ansi(w, RESET);
 
@@ -926,7 +936,7 @@ fn renderLink(state: *RenderState, w: anytype, elem: *const dom.Element) anyerro
         if (href.len > 0) {
             const raw_text = elem.textContentForExtract(state.allocator) catch return;
             defer state.allocator.free(raw_text);
-            const idx = state.registerLink(href, std.mem.trim(u8, raw_text, " \t\r\n")) catch return;
+            const idx = state.registerLink(@intFromPtr(elem), href, std.mem.trim(u8, raw_text, " \t\r\n")) catch return;
             const ref = try std.fmt.allocPrint(state.allocator, "[{d}]", .{idx});
             defer state.allocator.free(ref);
             try state.ansi(w, DIM);
@@ -1448,7 +1458,7 @@ fn renderImage(state: *RenderState, w: anytype, elem: *const dom.Element) anyerr
     if (state.opts.show_links) {
         const src = elem.getAttribute("src") orelse "";
         if (src.len > 0) {
-            const idx = state.registerLink(src, alt) catch return;
+            const idx = state.registerLink(@intFromPtr(elem), src, alt) catch return;
             if (state.opts.profile == .default) {
                 const ref = try std.fmt.allocPrint(state.allocator, "[{d}]", .{idx});
                 defer state.allocator.free(ref);
@@ -2179,7 +2189,7 @@ fn appendTableCellLinkMarker(
     const idx = if (preview_link_index) |next| blk: {
         next.* += 1;
         break :blk next.*;
-    } else state.registerLink(href, trimmed) catch return;
+    } else state.registerLink(@intFromPtr(elem), href, trimmed) catch return;
 
     if (state.opts.profile == .default) {
         const marker = std.fmt.allocPrint(state.allocator, "[{d}]", .{idx}) catch return;
@@ -3100,3 +3110,33 @@ test "T2.8: uniform focus highlight — button and select show REVERSE when focu
     defer focused_model.deinit();
     try std.testing.expect(std.mem.indexOf(u8, focused_model.text, REVERSE) != null);
 }
+
+test "T2.8: focused link shows REVERSE when focused" {
+    const html =
+        \\<html><body>
+        \\  <a href="https://example.com">Click me</a>
+        \\</body></html>
+    ;
+    var doc = try dom.parseDocument(std.testing.allocator, html);
+    defer doc.deinit();
+
+    // First get the model without focus to find element pointers.
+    var unfocused = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = true,
+        .show_links = true,
+    });
+    defer unfocused.deinit();
+
+    try std.testing.expect(unfocused.links.len >= 1);
+    const link_ptr = unfocused.links[0].element_ptr;
+
+    // Focus the link and verify REVERSE appears.
+    var focused_model = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = true,
+        .show_links = true,
+        .focused_element_ptr = link_ptr,
+    });
+    defer focused_model.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, focused_model.text, REVERSE) != null);
+}
+

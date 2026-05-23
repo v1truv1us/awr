@@ -313,6 +313,14 @@ fn writeJsStr(w: anytype, s: []const u8) !void {
     try w.writeByte('\'');
 }
 
+fn asciiTokenContains(value: []const u8, token: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    while (it.next()) |part| {
+        if (std.ascii.eqlIgnoreCase(part, token)) return true;
+    }
+    return false;
+}
+
 fn appendJsonQuoted(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
     try list.append(alloc, '"');
     for (s) |c| {
@@ -1265,6 +1273,7 @@ pub const Page = struct {
         self.setLocationFromUrl(url);
         self.setViewportGlobals();
         bridge.setDocumentReadyState(&self.js, "loading");
+        if (zig_doc.htmlElement()) |root| self.loadStylesheets(root, url);
         probe.mark("bridge");
 
         // ── Pre-fetch external scripts in parallel ────────────────────────
@@ -1667,6 +1676,46 @@ pub const Page = struct {
             spawned = i + 1;
         }
         for (0..spawned) |i| threads[i].join();
+    }
+
+    fn loadStylesheets(self: *Page, elem: *const dom.Element, page_url: []const u8) void {
+        if (std.ascii.eqlIgnoreCase(elem.tag, "style")) {
+            const css = elem.textContent(self.allocator) catch return;
+            defer self.allocator.free(css);
+            self.installStylesheet(css);
+            return;
+        }
+        if (std.ascii.eqlIgnoreCase(elem.tag, "link")) {
+            if (elem.getAttribute("rel")) |rel| {
+                if (asciiTokenContains(rel, "stylesheet")) {
+                    if (elem.getAttribute("href")) |href| {
+                        const resolved = resolveUrlAlloc(self.allocator, page_url, std.mem.trim(u8, href, " \t\r\n")) catch return;
+                        defer self.allocator.free(resolved);
+                        const css = self.fetchExternalResource(resolved) catch return;
+                        defer self.allocator.free(css);
+                        self.installStylesheet(css);
+                    }
+                }
+            }
+        }
+        for (elem.children.items) |child| {
+            if (child == .element) self.loadStylesheets(child.element, page_url);
+        }
+    }
+
+    fn installStylesheet(self: *Page, css: []const u8) void {
+        const cap = css.len * 2 + 32;
+        const storage = self.allocator.alloc(u8, cap) catch return;
+        defer self.allocator.free(storage);
+        var w = std.Io.Writer.fixed(storage);
+        w.writeAll("__awr_add_stylesheet__(") catch return;
+        writeJsStr(&w, css) catch return;
+        w.writeAll(")") catch return;
+        const script = w.buffered();
+        const src = self.allocator.allocSentinel(u8, script.len, 0) catch return;
+        defer self.allocator.free(src);
+        @memcpy(src, script);
+        self.js.eval(src, "<stylesheet>") catch {};
     }
 
     fn executeScriptsInElement(

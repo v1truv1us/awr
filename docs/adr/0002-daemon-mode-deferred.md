@@ -2,7 +2,7 @@
 
 ## Status
 
-**ACCEPTED** — 2026-05-23
+**SUPERSEDED** — 2026-05-23 (promoted and implemented per T3 WebSocket & Daemon Mode completion)
 
 ## Context
 

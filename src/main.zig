@@ -109,6 +109,30 @@ fn resolveDaemonSocket(allocator: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/awrd-{d}.sock", .{ dir, uid });
 }
 
+extern fn realpath(path: [*:0]const u8, resolved_path: [*]u8) ?[*:0]u8;
+extern fn access(path: [*:0]const u8, mode: c_int) c_int;
+
+fn findExecutablePath(allocator: std.mem.Allocator, args0: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, args0, '/') != null) {
+        return try allocator.dupe(u8, args0);
+    }
+
+    const path_env_c = std.c.getenv("PATH") orelse return error.PathNotFound;
+    const path_env = std.mem.span(path_env_c);
+    var it = std.mem.splitScalar(u8, path_env, ':');
+    while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        const joined = try std.fs.path.join(allocator, &.{ dir, args0 });
+        const joined_z = try allocator.dupeZ(u8, joined);
+        defer allocator.free(joined_z);
+        if (access(joined_z, 0) == 0) {
+            return joined;
+        }
+        allocator.free(joined);
+    }
+    return error.ExecutableNotFound;
+}
+
 /// Resolve the path to the `awrd` binary as a sibling of our own
 /// argv[0]. Both binaries ship together: an installed `awr` at
 /// `/usr/local/bin/awr` finds `/usr/local/bin/awrd`; an in-tree
@@ -117,7 +141,24 @@ fn resolveDaemonSocket(allocator: std.mem.Allocator) ![]u8 {
 /// directory component (shouldn't happen — Zig's argv always has
 /// the full path).
 fn resolveAwrdPath(allocator: std.mem.Allocator, args0: []const u8) !?[]u8 {
-    const dir = std.fs.path.dirname(args0) orelse return null;
+    const found_path = findExecutablePath(allocator, args0) catch |err| switch (err) {
+        error.PathNotFound, error.ExecutableNotFound => try allocator.dupe(u8, args0),
+        else => return err,
+    };
+    defer allocator.free(found_path);
+
+    const found_path_z = try allocator.dupeZ(u8, found_path);
+    defer allocator.free(found_path_z);
+
+    var resolved_buf: [4096]u8 = undefined;
+    const resolved_res = realpath(found_path_z, &resolved_buf);
+
+    const real_args0 = if (resolved_res != null) blk: {
+        const len = std.mem.indexOfScalar(u8, &resolved_buf, 0) orelse resolved_buf.len;
+        break :blk resolved_buf[0..len];
+    } else found_path;
+
+    const dir = std.fs.path.dirname(real_args0) orelse return null;
     return try std.fmt.allocPrint(allocator, "{s}/awrd", .{dir});
 }
 
@@ -147,6 +188,19 @@ fn spawnDaemon(allocator: std.mem.Allocator, awrd_path: []const u8) !void {
         if (pid2 < 0) std.posix.system._exit(1);
         if (pid2 == 0) {
             // Grandchild — exec awrd. argv must be [path, null].
+            // Redirect stdin, stdout, stderr to /dev/null so we detach from the parent's pipes.
+            const null_fd = std.posix.system.open(
+                "/dev/null",
+                .{ .ACCMODE = .RDWR },
+                @as(std.posix.mode_t, 0),
+            );
+            if (null_fd >= 0) {
+                _ = std.posix.system.dup2(null_fd, 0);
+                _ = std.posix.system.dup2(null_fd, 1);
+                _ = std.posix.system.dup2(null_fd, 2);
+                _ = std.posix.system.close(null_fd);
+            }
+
             // We reuse path_z as both argv[0] and the executable.
             const argv = [_:null]?[*:0]const u8{path_z};
             // execve preserves env; we want the daemon to inherit
@@ -167,6 +221,31 @@ fn spawnDaemon(allocator: std.mem.Allocator, awrd_path: []const u8) !void {
                    // variants that may want to allocate buffers.
 }
 
+fn isDaemonListening(sock_path: []const u8) bool {
+    const sys = struct {
+        extern fn socket(domain: c_int, @"type": c_int, protocol: c_int) c_int;
+        extern fn connect(socket_fd: c_int, address: *const anyopaque, address_len: c_uint) c_int;
+        extern fn close(fd: c_int) c_int;
+    };
+    const fd = sys.socket(1, 1, 0); // AF_UNIX=1, SOCK_STREAM=1
+    if (fd < 0) return false;
+    defer _ = sys.close(fd);
+
+    var addr: std.posix.sockaddr.un = .{
+        .family = 1, // AF_UNIX=1
+        .path = undefined,
+    };
+    if (sock_path.len >= addr.path.len) return false;
+    @memcpy(addr.path[0..sock_path.len], sock_path);
+    addr.path[sock_path.len] = 0;
+
+    const len = @as(c_uint, @intCast(@offsetOf(std.posix.sockaddr.un, "path") + sock_path.len + 1));
+    if (sys.connect(fd, &addr, len) < 0) {
+        return false;
+    }
+    return true;
+}
+
 /// Connect-probe the daemon socket with a short retry loop. Used
 /// after a spawn to wait for the daemon to bind. Returns a
 /// connected stream on success; null after `total_ms` of failed
@@ -180,10 +259,11 @@ fn connectWithRetry(
     const step_ms: u64 = 20;
     var waited: u64 = 0;
     while (waited < total_ms) {
-        if (ua.connect(io)) |s| return s else |_| {
-            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(@intCast(step_ms)), .awake) catch {};
-            waited += step_ms;
+        if (isDaemonListening(sock_path)) {
+            if (ua.connect(io)) |s| return s else |_| {}
         }
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(@intCast(step_ms)), .awake) catch {};
+        waited += step_ms;
     }
     return null;
 }
@@ -311,33 +391,35 @@ fn ensureDaemonConnected(
 
     // First attempt: try connecting to an already-running daemon.
     var verified = false;
-    if (ua.connect(io)) |s| {
-        var ping_stream = s;
-        // Connected — verify the version matches our build hash.
-        if (versionMatches(alloc, io, &ping_stream)) |matched| {
-            ping_stream.close(io);
-            if (matched) {
-                verified = true;
-            } else {
-                // Mismatch — tell the daemon to shut down, then
-                // respawn ours below. Reconnect for the shutdown
-                // call (ping already consumed the prior conn).
-                if (ua.connect(io)) |s2| {
-                    var sd_stream = s2;
-                    sendShutdown(io, &sd_stream) catch {};
-                    sd_stream.close(io);
-                } else |_| {}
-                // Wait briefly for the daemon to release the lock
-                // so our spawn can acquire it.
-                std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch {};
+    if (isDaemonListening(sock_path)) {
+        if (ua.connect(io)) |s| {
+            var ping_stream = s;
+            // Connected — verify the version matches our build hash.
+            if (versionMatches(alloc, io, &ping_stream)) |matched| {
+                ping_stream.close(io);
+                if (matched) {
+                    verified = true;
+                } else {
+                    // Mismatch — tell the daemon to shut down, then
+                    // respawn ours below. Reconnect for the shutdown
+                    // call (ping already consumed the prior conn).
+                    if (isDaemonListening(sock_path)) {
+                        if (ua.connect(io)) |s2| {
+                            var sd_stream = s2;
+                            sendShutdown(io, &sd_stream) catch {};
+                            sd_stream.close(io);
+                        } else |_| {}
+                    }
+                    // Wait briefly for the daemon to release the lock
+                    // so our spawn can acquire it.
+                    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch {};
+                }
+            } else |_| {
+                // Couldn't ping — assume the existing daemon is
+                // unhealthy. Respawn.
+                ping_stream.close(io);
             }
-        } else |_| {
-            // Couldn't ping — assume the existing daemon is
-            // unhealthy. Respawn.
-            ping_stream.close(io);
-        }
-    } else |_| {
-        // Connection failure → continue to spawn path.
+        } else |_| {}
     }
 
     if (!verified) {

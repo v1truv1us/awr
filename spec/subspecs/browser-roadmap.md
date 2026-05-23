@@ -137,6 +137,9 @@ they would in lynx / w3m / elinks.
   `WebSocket`, etc.) — those land in Tier 3
 - real layout, scroll-driven loads, or `IntersectionObserver` —
   Tier 4
+- full CSS layout. A starter CSSOM subset may ship earlier only for
+  stylesheet loading, inline `element.style`, and non-layout
+  `getComputedStyle()` values covered by curated WPT cases.
 - full-SPA support — Tier 5
 
 **Active sub-spec**: `spec/subspecs/browser-tui.md` (this file's
@@ -236,6 +239,10 @@ work end-to-end.
   a real 60 Hz tick from the libxev event loop.
 - `MediaQueryList` (`matchMedia`) — basic predicate evaluation
   against terminal dimensions.
+- starter CSSOM — load `<style>` and `<link rel="stylesheet">`, expose
+  inline `element.style`, and compute simple non-layout properties such as
+  `display` / `visibility`. This improves script feature-detection and
+  lets AWR grow upstream CSS WPT coverage without implying a layout engine.
 
 **Sub-spec(s)**: `spec/subspecs/browser-history.md` (History API,
 **CLOSED 2026-05-13**),
@@ -248,7 +255,8 @@ requestAnimationFrame, matchMedia, **CLOSED 2026-05-13**). All four
 sub-specs closed; Tier 3 is fully complete.
 
 **WPT corpus area**: history, storage, websocket, mutation
-observer, event constructors.
+observer, event constructors, timer / animation frame, media query
+matching, starter CSSOM cases that do not require layout.
 
 **Closure gates**: defined when activated. Indicative target:
 Reddit (new design), Stack Overflow, modern Discourse forums,
@@ -264,8 +272,9 @@ returns true coordinates, scroll positions are real,
 
 **What it covers**:
 
-- CSS parser (the subset real sites use — flexbox, grid, block,
-  inline, position, transforms)
+- complete CSS parser/cascade beyond the starter CSSOM subset
+- CSS parser features real sites use — flexbox, grid, block,
+  inline, position, transforms
 - box model: margins, padding, borders, content-box vs border-box
 - block flow + inline layout + text shaping
 - flexbox layout
