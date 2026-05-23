@@ -1,7 +1,7 @@
 /// url.zig — URL parser for AWR.
 ///
 /// Parses scheme://host[:port]/path[?query] into a Url struct.
-/// Supports http (default port 80) and https (default port 443).
+/// Supports http (port 80), https (port 443), ws (port 80), wss (port 443).
 const std = @import("std");
 
 pub const ParseError = error{
@@ -22,8 +22,10 @@ pub const Url = struct {
     path: []const u8,
     /// Query string without leading '?', or null if absent
     query: ?[]const u8,
-    /// True when scheme == "https"
+    /// True when scheme is "https" or "wss" (TLS required).
     is_https: bool,
+    /// True when scheme is "ws" or "wss" (WebSocket connection).
+    is_websocket: bool,
 
     /// Parse a URL string. All returned slices point into `input` — no allocation.
     pub fn parse(input: []const u8) ParseError!Url {
@@ -36,9 +38,13 @@ pub const Url = struct {
 
         const is_https = blk: {
             if (std.ascii.eqlIgnoreCase(scheme, "https")) break :blk true;
-            if (std.ascii.eqlIgnoreCase(scheme, "http")) break :blk false;
+            if (std.ascii.eqlIgnoreCase(scheme, "http"))  break :blk false;
+            if (std.ascii.eqlIgnoreCase(scheme, "wss"))   break :blk true;
+            if (std.ascii.eqlIgnoreCase(scheme, "ws"))    break :blk false;
             return ParseError.UnsupportedScheme;
         };
+        const is_websocket = std.ascii.eqlIgnoreCase(scheme, "ws") or
+            std.ascii.eqlIgnoreCase(scheme, "wss");
         const default_port: u16 = if (is_https) 443 else 80;
 
         if (rest.len == 0) return ParseError.MissingHost;
@@ -85,6 +91,7 @@ pub const Url = struct {
             .path = path,
             .query = query,
             .is_https = is_https,
+            .is_websocket = is_websocket,
         };
     }
 
@@ -176,4 +183,31 @@ test "error on missing scheme" {
 
 test "error on unsupported scheme" {
     try std.testing.expectError(ParseError.UnsupportedScheme, Url.parse("ftp://example.com"));
+}
+
+test "parse wss://echo.websocket.org/" {
+    const u = try Url.parse("wss://echo.websocket.org/");
+    try std.testing.expectEqualStrings("wss", u.scheme);
+    try std.testing.expectEqualStrings("echo.websocket.org", u.host);
+    try std.testing.expectEqual(@as(u16, 443), u.port);
+    try std.testing.expectEqualStrings("/", u.path);
+    try std.testing.expect(u.is_https);
+    try std.testing.expect(u.is_websocket);
+}
+
+test "parse ws://localhost:9000/chat" {
+    const u = try Url.parse("ws://localhost:9000/chat");
+    try std.testing.expectEqualStrings("ws", u.scheme);
+    try std.testing.expectEqualStrings("localhost", u.host);
+    try std.testing.expectEqual(@as(u16, 9000), u.port);
+    try std.testing.expectEqualStrings("/chat", u.path);
+    try std.testing.expect(!u.is_https);
+    try std.testing.expect(u.is_websocket);
+}
+
+test "http and https are not websocket" {
+    const h = try Url.parse("http://example.com/");
+    try std.testing.expect(!h.is_websocket);
+    const hs = try Url.parse("https://example.com/");
+    try std.testing.expect(!hs.is_websocket);
 }

@@ -1,7 +1,7 @@
 # Real-time connections — Tier 3 sub-spec
 
-> **Status:** PARTIAL — SSE landed 2026-05-13 (T3.D.1); WebSocket
-> remains active for a follow-up session (T3.D.2).
+> **Status:** CLOSED — SSE landed 2026-05-13 (T3.D.1); WebSocket
+> landed 2026-05-22 (T3.D.2). Both gates satisfied.
 > `spec/MVP.md` is the canonical umbrella spec.
 > `spec/subspecs/browser-roadmap.md` is the cross-tier ladder
 > authority; this file owns Tier 3 real-time connection execution
@@ -142,13 +142,13 @@ Indicative slice order (defer detailed plan to implementation time):
 
 | Field | Value |
 |-------|-------|
-| Status | PARTIAL — SSE shipped, WebSocket pending |
-| Date | 2026-05-13 (T3.D.1 — SSE only) |
-| Final commit (so far) | (this commit — T3.D.1 EventSource) |
-| Gates satisfied | §4.1 prior-tier gates ✓ / §4.2 SSE parsing (data/event/id/retry, multi-line, BOM, CR/LF/CRLF) ✓ / §4.3 WebSocket — **not yet** / §4.4 SSE round-trip — **partial** (parse-only WPT case; no live test server) / §4.5 SSE manual smoke — pending |
-| Sign-off (T3.D.1) | AWR Dev |
+| Status | **CLOSED** |
+| T3.D.1 date | 2026-05-13 (SSE / EventSource) |
+| T3.D.2 date | 2026-05-22 (WebSocket RFC 6455) |
+| Gates satisfied | §4.1 prior-tier gates ✓ / §4.2 SSE parsing ✓ / §4.3 WebSocket handshake + frame codec ✓ / §4.4 SSE round-trip (parse-only) ✓ / §4.5 manual smoke — deferred |
+| Sign-off | AWR Dev |
 
-**Delivered surface (T3.D.1 — SSE):**
+**Delivered surface (T3.D.1 — SSE / EventSource):**
 
 - `src/net/sse.zig`: WHATWG-compliant incremental parser. Handles
   `data:` / `event:` / `id:` / `retry:` fields, multi-line data
@@ -161,37 +161,43 @@ Indicative slice order (defer detailed plan to implementation time):
 - JS-side `EventSource` class: standard `CONNECTING/OPEN/CLOSED`
   constants, `addEventListener`/`removeEventListener`/`close()`,
   `onopen`/`onmessage`/`onerror` properties, dispatches events
-  with `.data`/`.lastEventId`/`.origin` set per spec. Wraps
-  `fetch` for the body, then drains parsed events.
+  with `.data`/`.lastEventId`/`.origin` set per spec.
 
-**Honest scope limitation (intentional):**
+**Delivered surface (T3.D.2 — WebSocket RFC 6455):**
 
-EventSource is **request/response, not streaming**. AWR's page-
-processing model has a bounded `drainAll` budget (1-2s), so
-there is no "always-on" runtime where a long-lived background
-SSE connection could deliver events. The current implementation:
+- `src/net/websocket.zig`: RFC 6455 frame codec (read + masked
+  write), HTTP Upgrade handshake with Sec-WebSocket-Accept SHA-1
+  validation, `runSession` handling text/binary/continuation
+  fragmentation, ping→pong echo, close echo. 9 unit tests.
+- `src/net/url.zig`: `ws`/`wss` scheme support, `is_websocket`
+  flag. 3 new tests.
+- One native callback `__awr_ws_connect_and_recv__(url, sendsJson)`
+  that TCP-connects (plain or TLS), runs the WebSocket session,
+  returns `{messages, closeCode, closeReason}` as JSON.
+- JS-side `WebSocket` class: `CONNECTING/OPEN/CLOSING/CLOSED`
+  constants, `send()` with pre-open buffering, `close()`,
+  `addEventListener`/`removeEventListener`, `onopen`/`onmessage`/
+  `onerror`/`onclose` — dispatches post-session. 2 bridge tests.
 
-- Fetches the full event-stream body, parses, dispatches all
-  events at once — works for sites that send initial state via
-  SSE (status pages, news bootstraps).
-- Does NOT auto-reconnect on disconnect.
-- Does NOT maintain the connection across navigations.
+**Honest scope limitation (both T3.D.1 and T3.D.2):**
+
+Both EventSource and WebSocket are **one-shot request/response**,
+not streaming. AWR's bounded `drainAll` budget means there is no
+"always-on" runtime. The implementations:
+
+- Collect the full response (SSE) or receive all frames until
+  CLOSE (WebSocket), then dispatch events in one batch.
+- Do NOT auto-reconnect, do NOT maintain connections across
+  navigations, do NOT support post-open `send()` for WebSocket.
 
 This is deliberately conservative. Real streaming + reconnect
 will land in a follow-up slice once daemon-mode + TUI session
 work creates a place for background connections to live.
 
-**WebSocket — DEFERRED to next session (T3.D.2):**
+**Test surface:**
 
-Not implemented. Sub-spec sections §2.2 (WebSocket), §4.3
-(closure gate), and §6.2 (slice 2) remain ACTIVE. Closure of
-this sub-spec requires both T3.D.1 (done) and T3.D.2 (pending).
-
-**Test surface (T3.D.1):**
-
-- `src/net/sse.zig` — 13 unit tests covering the spec's parsing
-  surface end-to-end.
-- `src/dom/bridge.zig` — 3 JS-level tests (parse via the native,
-  EventSource constructor + close shape, multi-line + retry).
-- `tests/wpt/eventsource_parser.js` — new WPT case covering the
-  EventSource shape + parser surface that closure gates require.
+- `src/net/sse.zig` — 13 unit tests (SSE parser).
+- `src/net/websocket.zig` — 9 unit tests (frame codec, handshake,
+  key derivation, RFC 6455 example vector).
+- `src/net/url.zig` — 3 new tests (ws/wss scheme parsing).
+- `src/dom/bridge.zig` — 5 JS-level tests (SSE: 3, WebSocket: 2).
