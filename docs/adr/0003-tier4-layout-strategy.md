@@ -153,6 +153,12 @@ Decision: Started the CSSOM implementation in `src/cssom/` with a pure-Zig decla
 
 Reason: CSSOM does not require a browser engine for the starter scope. Keeping parsing/model code in Zig preserves AWR's shared runtime and gives us a deterministic base for WPT-backed cascade/computed-style slices.
 
+### 2026-05-23 — Precedence matching rules added to Cascade Engine
+
+Decision: Added `MatchResult` and standard CSS rule precedence logic (`isPrecedentOver`) in `src/cssom/cascade.zig`.
+
+Reason: This sets up the deterministic engine behavior where normal vs `!important` flags, specificity, source stylesheet indexes, and rule positions resolve into a single winning value.
+
 ### 2026-05-23 — Specificity calculations added to CSSOM
 
 Decision: Implemented selector specificity scoring in `src/cssom/cascade.zig`.

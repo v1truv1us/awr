@@ -1,4 +1,6 @@
 const std = @import("std");
+const parser_mod = @import("parser.zig");
+const style_mod = @import("style.zig");
 
 pub const Specificity = struct {
     id: u16 = 0,
@@ -57,6 +59,31 @@ fn isIdentChar(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_' or c == '-';
 }
 
+pub const MatchResult = struct {
+    specificity: Specificity,
+    source_index: usize,
+    rule_index: usize,
+    value: []const u8,
+    important: bool,
+
+    pub fn isPrecedentOver(self: MatchResult, other: MatchResult) bool {
+        // 1. !important always beats normal
+        if (self.important != other.important) {
+            return self.important; // true if self is important, false if other is
+        }
+        // 2. Specificity beats
+        const comp = self.specificity.compare(other.specificity);
+        if (comp != .eq) {
+            return comp == .gt;
+        }
+        // 3. Source order / rule index beats (last declared wins)
+        if (self.source_index != other.source_index) {
+            return self.source_index > other.source_index;
+        }
+        return self.rule_index > other.rule_index;
+    }
+};
+
 test "Specificity calculation" {
     const s1 = Specificity.calculate("div");
     try std.testing.expectEqual(@as(u16, 0), s1.id);
@@ -87,4 +114,42 @@ test "Specificity comparison" {
     try std.testing.expect(s1.isLessThan(s2));
     try std.testing.expect(s2.isLessThan(s3));
     try std.testing.expect(!s3.isLessThan(s1));
+}
+
+test "Match precedence rules" {
+    const r_normal_low = MatchResult{
+        .specificity = Specificity.calculate("p"),
+        .source_index = 0,
+        .rule_index = 0,
+        .value = "red",
+        .important = false,
+    };
+    const r_normal_high_spec = MatchResult{
+        .specificity = Specificity.calculate(".class"),
+        .source_index = 0,
+        .rule_index = 1,
+        .value = "blue",
+        .important = false,
+    };
+    const r_normal_high_source = MatchResult{
+        .specificity = Specificity.calculate("p"),
+        .source_index = 1,
+        .rule_index = 0,
+        .value = "green",
+        .important = false,
+    };
+    const r_important_low = MatchResult{
+        .specificity = Specificity.calculate("p"),
+        .source_index = 0,
+        .rule_index = 0,
+        .value = "yellow",
+        .important = true,
+    };
+
+    // Specificity beats source order
+    try std.testing.expect(r_normal_high_spec.isPrecedentOver(r_normal_low));
+    // Source order beats same specificity
+    try std.testing.expect(r_normal_high_source.isPrecedentOver(r_normal_low));
+    // !important beats specificity
+    try std.testing.expect(r_important_low.isPrecedentOver(r_normal_high_spec));
 }
