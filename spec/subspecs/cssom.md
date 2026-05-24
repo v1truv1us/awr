@@ -74,7 +74,7 @@ src/cssom/
   style.zig         // CSSStyleDeclaration model (started)
   parser.zig        // stylesheet rule parsing (started -> pre-parsed selectors)
   cascade.zig       // specificity, importance, source order (started)
-  computed.zig      // getComputedStyle property resolution
+  computed.zig      // getComputedStyle property resolution (started -> resolved)
 ```
 
 The JS bridge should become a thin adapter that calls this deterministic style engine instead of owning parsing/cascade logic in embedded JavaScript strings.

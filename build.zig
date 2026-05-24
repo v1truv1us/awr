@@ -144,6 +144,32 @@ pub fn build(b: *std.Build) void {
             test_step.dependOn(&run_cssom.step);
             test_cssom_step.dependOn(&run_cssom.step);
         }
+
+        // cssom-computed requires dom module imports
+        const dom_mod = b.createModule(.{
+            .root_source_file = b.path("src/dom/node.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        dom_mod.addIncludePath(lexbor_include);
+        dom_mod.addLibraryPath(lexbor_lib);
+        dom_mod.linkSystemLibrary("lexbor", .{});
+
+        const cssom_computed_mod = b.createModule(.{
+            .root_source_file = b.path("src/cssom/computed.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        cssom_computed_mod.addImport("dom", dom_mod);
+
+        const cssom_computed_test = b.addTest(.{
+            .name = "cssom-computed",
+            .root_module = cssom_computed_mod,
+        });
+        const run_cssom_computed = b.addRunArtifact(cssom_computed_test);
+        test_step.dependOn(&run_cssom_computed.step);
+        test_cssom_step.dependOn(&run_cssom_computed.step);
     }
 
     // ── telemetry module (pure-Zig, no deps) ──────────────────────────────
