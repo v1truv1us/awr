@@ -153,6 +153,12 @@ Decision: Started the CSSOM implementation in `src/cssom/` with a pure-Zig decla
 
 Reason: CSSOM does not require a browser engine for the starter scope. Keeping parsing/model code in Zig preserves AWR's shared runtime and gives us a deterministic base for WPT-backed cascade/computed-style slices.
 
+### 2026-05-23 — Fast pre-parsed Selector representations added to parser
+
+Decision: Refactored `src/cssom/parser.zig` to parse stylesheet selectors into fine-grained structures (`SelectorType`, `Selector`, and calculated `Specificity` tuples) upon sheet loading.
+
+Reason: Splitting `.class`, `#id`, `tag`, and `*` universal selectors when parsing prevents expensive, dynamic regex-based selector split runs during page rendering and TUI loop traversal.
+
 ### 2026-05-23 — Precedence matching rules added to Cascade Engine
 
 Decision: Added `MatchResult` and standard CSS rule precedence logic (`isPrecedentOver`) in `src/cssom/cascade.zig`.
