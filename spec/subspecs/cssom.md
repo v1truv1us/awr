@@ -73,7 +73,7 @@ Move CSS behavior out of the JS bridge over time:
 src/cssom/
   style.zig         // CSSStyleDeclaration model (started)
   parser.zig        // stylesheet rule parsing (started)
-  cascade.zig       // specificity, importance, source order
+  cascade.zig       // specificity, importance, source order (started)
   computed.zig      // getComputedStyle property resolution
 ```
 

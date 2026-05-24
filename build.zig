@@ -128,6 +128,7 @@ pub fn build(b: *std.Build) void {
         const cssom_modules = [_]struct { name: []const u8, src: []const u8 }{
             .{ .name = "cssom-style", .src = "src/cssom/style.zig" },
             .{ .name = "cssom-parser", .src = "src/cssom/parser.zig" },
+            .{ .name = "cssom-cascade", .src = "src/cssom/cascade.zig" },
         };
         for (cssom_modules) |m| {
             const cssom_mod = b.createModule(.{

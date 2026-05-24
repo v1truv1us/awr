@@ -153,6 +153,12 @@ Decision: Started the CSSOM implementation in `src/cssom/` with a pure-Zig decla
 
 Reason: CSSOM does not require a browser engine for the starter scope. Keeping parsing/model code in Zig preserves AWR's shared runtime and gives us a deterministic base for WPT-backed cascade/computed-style slices.
 
+### 2026-05-23 — Specificity calculations added to CSSOM
+
+Decision: Implemented selector specificity scoring in `src/cssom/cascade.zig`.
+
+Reason: To correctly resolve CSS rule conflicts, we must calculate specificity scores (ID, Class, Element counts). This provides the mathematical basis for sorting cascading styles.
+
 ### 2026-05-23 — Starter CSSOM feeds terminal rendering
 
 Decision: Loaded stylesheets are now passed from `Page` into the renderer, and the renderer applies starter CSSOM visibility decisions for `display:none` and `visibility:hidden`.
