@@ -101,8 +101,8 @@ Add curated cases in this order:
    - inline important precedence.
 5. Computed style properties from §2.
 6. Renderer integration:
-   - `display:none` is not rendered;
-   - `visibility:hidden` has documented terminal behavior;
+   - `display:none` is not rendered; **started**
+   - `visibility:hidden` is not rendered in the current terminal model; **started**
    - `white-space` affects wrapping/preservation.
 
 ## 5. Closure gates

@@ -20,6 +20,8 @@
 const std = @import("std");
 const dom = @import("dom/node.zig");
 const browse_heuristics = @import("browse_heuristics.zig");
+const css_parser = @import("cssom/parser.zig");
+const css_style = @import("cssom/style.zig");
 const image_protocol = @import("image_protocol");
 
 // ── Public types ──────────────────────────────────────────────────────────
@@ -123,6 +125,10 @@ pub const RenderOptions = struct {
     /// `.auto` / `.tag` activate highlighting (T2.5). Stored here so
     /// `awr render --code-style=auto` round-trips through RenderOptions.
     code_style: CodeStyle = .none,
+    /// Stylesheet bodies loaded for the current document. The renderer uses
+    /// these for the starter CSSOM subset so TUI output reflects simple
+    /// `display` / `visibility` author CSS without requiring full layout.
+    css_stylesheets: []const []u8 = &.{},
     /// T2.6: treat every `<pre>` block as a unified diff. Set when
     /// `Content-Type: text/x-diff` or `text/x-patch` is present.
     /// Auto-detection via `looksLikeDiff` runs regardless.
@@ -736,6 +742,7 @@ fn renderElement(state: *RenderState, w: anytype, elem: *const dom.Element) anye
     const tag = elem.tag;
 
     if (isHiddenTag(tag)) return;
+    if (isCssHidden(state, elem)) return;
 
     if (state.opts.profile == .browse) {
         if (isCompactLandmarkTag(tag)) {
@@ -2245,6 +2252,40 @@ fn isHiddenTag(tag: []const u8) bool {
     return false;
 }
 
+fn isCssHidden(state: *RenderState, elem: *const dom.Element) bool {
+    for (state.opts.css_stylesheets) |css| {
+        var sheet = css_parser.parseStylesheet(state.allocator, css) catch continue;
+        defer sheet.deinit();
+        for (sheet.rules.items) |rule| {
+            var selectors = std.mem.splitScalar(u8, rule.selector_text, ',');
+            var matched = false;
+            while (selectors.next()) |sel| {
+                if (elem.matches(sel)) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) continue;
+            if (isHiddenCssValue(rule.declarations.getPropertyValue("display"), "none")) return true;
+            if (isHiddenCssValue(rule.declarations.getPropertyValue("visibility"), "hidden")) return true;
+        }
+    }
+
+    if (elem.getAttribute("style")) |style_attr| {
+        var style = css_style.StyleDeclaration.parse(state.allocator, style_attr) catch return false;
+        defer style.deinit();
+        if (isHiddenCssValue(style.getPropertyValue("display"), "none")) return true;
+        if (isHiddenCssValue(style.getPropertyValue("visibility"), "hidden")) return true;
+    }
+
+    return false;
+}
+
+fn isHiddenCssValue(value: []const u8, expected: []const u8) bool {
+    if (value.len == 0) return false;
+    return std.ascii.eqlIgnoreCase(std.mem.trim(u8, value, " \t\r\n"), expected);
+}
+
 fn isBlockTag(tag: []const u8) bool {
     inline for (.{
         "div",        "p",        "h1",      "h2",      "h3",         "h4",      "h5",    "h6",
@@ -2746,6 +2787,22 @@ test "renderModel captures lines and interactive links" {
     try std.testing.expect(std.mem.indexOf(u8, model.lineText(0), "Hello") != null);
     try std.testing.expectEqualStrings("/next", model.links[0].href);
     try std.testing.expectEqualStrings("next page", model.links[0].text);
+}
+
+test "render browse profile applies starter CSSOM display and visibility" {
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><head><style>.hide-me { display: none; } #ghost { visibility: hidden; }</style></head><body><main><p>Visible</p><p class=\"hide-me\">Hidden by class</p><p id=\"ghost\">Hidden by id</p><p style=\"display: none\">Hidden inline</p></main></body></html>");
+    defer doc.deinit();
+
+    var model = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = false,
+        .css_stylesheets = &.{".hide-me { display: none; } #ghost { visibility: hidden; }"},
+    });
+    defer model.deinit();
+
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Visible") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Hidden by class") == null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Hidden by id") == null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Hidden inline") == null);
 }
 
 test "render browse profile omits references but keeps interactive links" {

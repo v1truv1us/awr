@@ -393,6 +393,12 @@ pub const Page = struct {
     /// Default false — JS runs normally per spec.
     disable_scripts: bool = false,
 
+    /// Stylesheet bodies loaded for the current document. Owned by Page and
+    /// passed to render so the TUI/non-interactive renderer can apply the
+    /// starter CSSOM subset (display/visibility today) instead of keeping CSS
+    /// visible only to JS getComputedStyle().
+    css_stylesheets: std.ArrayListUnmanaged([]u8) = .empty,
+
     /// Initialise a new Page with default client options.
     /// `io` is threaded through to the HTTP client for all network fetches
     /// and to `std.Io.Dir.readFileAlloc` for `file://` external scripts.
@@ -638,6 +644,7 @@ pub const Page = struct {
         if (self.cookie_jar_path) |p| self.allocator.free(p);
         if (self.tls_fail_cache_path) |p| self.allocator.free(p);
         if (self.storage_dir) |p| self.allocator.free(p);
+        self.clearStylesheets();
     }
 
     /// Wire the Page's event loop and fetch adapter into the JsEngine so
@@ -1242,6 +1249,8 @@ pub const Page = struct {
         self.attachHosts();
         probe.mark("js_reset");
 
+        self.clearStylesheets();
+
         // Update base URL for fetch() relative resolution.
         gpa.free(self.base_url);
         self.base_url = try gpa.dupe(u8, url);
@@ -1601,7 +1610,9 @@ pub const Page = struct {
 
     pub fn renderBrowseModel(self: *Page, allocator: std.mem.Allocator, _: *const PageResult, opts: render.RenderOptions) !render.ScreenModel {
         const doc_ref = &(self.current_doc orelse return error.NoDocument);
-        return render.renderBrowseModel(allocator, doc_ref, opts);
+        var render_opts = opts;
+        render_opts.css_stylesheets = self.css_stylesheets.items;
+        return render.renderBrowseModel(allocator, doc_ref, render_opts);
     }
 
     pub fn resolveUrl(self: *Page, base: []const u8, ref: []const u8) ![]u8 {
@@ -1678,10 +1689,24 @@ pub const Page = struct {
         for (0..spawned) |i| threads[i].join();
     }
 
+    fn clearStylesheets(self: *Page) void {
+        for (self.css_stylesheets.items) |css| self.allocator.free(css);
+        self.css_stylesheets.clearAndFree(self.allocator);
+    }
+
+    fn rememberStylesheet(self: *Page, css: []const u8) void {
+        const owned = self.allocator.dupe(u8, css) catch return;
+        self.css_stylesheets.append(self.allocator, owned) catch {
+            self.allocator.free(owned);
+            return;
+        };
+    }
+
     fn loadStylesheets(self: *Page, elem: *const dom.Element, page_url: []const u8) void {
         if (std.ascii.eqlIgnoreCase(elem.tag, "style")) {
             const css = elem.textContent(self.allocator) catch return;
             defer self.allocator.free(css);
+            self.rememberStylesheet(css);
             self.installStylesheet(css);
             return;
         }
@@ -1693,6 +1718,7 @@ pub const Page = struct {
                         defer self.allocator.free(resolved);
                         const css = self.fetchExternalResource(resolved) catch return;
                         defer self.allocator.free(css);
+                        self.rememberStylesheet(css);
                         self.installStylesheet(css);
                     }
                 }
