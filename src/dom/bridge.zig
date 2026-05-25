@@ -2147,42 +2147,77 @@ const BRIDGE_POLYFILL =
     \\    get forms() { return document.getElementsByTagName('form'); },
     \\  };
     \\
+    \\  // __awr_parse_style_text__ returns {values: {name:val}, important: {name:true}}
+    \\  // Strips !important from values and records the flag separately.
     \\  function __awr_parse_style_text__(text) {
-    \\    const out = Object.create(null);
+    \\    const values = Object.create(null);
+    \\    const important = Object.create(null);
     \\    String(text || '').split(';').forEach(part => {
     \\      const idx = part.indexOf(':');
     \\      if (idx < 0) return;
     \\      const name = part.slice(0, idx).trim().toLowerCase();
-    \\      if (name) out[name] = part.slice(idx + 1).trim();
+    \\      if (!name) return;
+    \\      let val = part.slice(idx + 1).trim();
+    \\      if (/\s*!important\s*$/i.test(val)) { val = val.replace(/\s*!important\s*$/i, '').trim(); important[name] = true; }
+    \\      values[name] = val;
     \\    });
-    \\    return out;
+    \\    return {values, important};
     \\  }
-    \\  function __awr_style_to_text__(props) {
+    \\  function __awr_style_to_text__(values, important) {
+    \\    const imp = important || {};
     \\    const chunks = [];
-    \\    for (const k in props) if (props[k] !== '') chunks.push(k + ': ' + props[k] + ';');
+    \\    for (const k in values) { if (values[k] === '') continue; chunks.push(k + ': ' + values[k] + (imp[k] ? ' !important' : '') + ';'); }
     \\    return chunks.join(' ');
     \\  }
     \\  function __awr_make_style_decl__(owner, text) {
-    \\    const props = __awr_parse_style_text__(text);
-    \\    return new Proxy(props, {
+    \\    const parsed = __awr_parse_style_text__(text);
+    \\    const vals = parsed.values;
+    \\    const imps = parsed.important;
+    \\    return new Proxy(vals, {
     \\      get(target, prop) {
-    \\        if (prop === 'cssText') return __awr_style_to_text__(target);
+    \\        if (prop === 'cssText') return __awr_style_to_text__(target, imps);
     \\        if (prop === 'getPropertyValue') return name => target[String(name).toLowerCase()] || '';
-    \\        if (prop === 'setProperty') return (name, value) => { target[String(name).toLowerCase()] = String(value); owner.setAttribute('style', __awr_style_to_text__(target)); };
+    \\        if (prop === 'setProperty') return (name, value, priority) => {
+    \\          const k = String(name).toLowerCase();
+    \\          let v = String(value);
+    \\          let imp = String(priority || '').trim().toLowerCase() === 'important';
+    \\          if (/\s*!important\s*$/i.test(v)) { v = v.replace(/\s*!important\s*$/i, '').trim(); imp = true; }
+    \\          target[k] = v;
+    \\          if (imp) imps[k] = true; else delete imps[k];
+    \\          owner.setAttribute('style', __awr_style_to_text__(target, imps));
+    \\        };
+    \\        if (prop === 'removeProperty') return name => {
+    \\          const k = String(name).toLowerCase();
+    \\          const old = target[k] || '';
+    \\          target[k] = '';
+    \\          delete imps[k];
+    \\          owner.setAttribute('style', __awr_style_to_text__(target, imps));
+    \\          return old;
+    \\        };
     \\        const css = String(prop).replace(/[A-Z]/g, m => '-' + m.toLowerCase()).toLowerCase();
     \\        return target[css] || '';
     \\      },
     \\      set(target, prop, value) {
+    \\        if (prop === 'cssText') {
+    \\          for (const k of Object.keys(target)) delete target[k];
+    \\          for (const k of Object.keys(imps)) delete imps[k];
+    \\          const p2 = __awr_parse_style_text__(String(value));
+    \\          for (const k in p2.values) target[k] = p2.values[k];
+    \\          for (const k in p2.important) imps[k] = true;
+    \\          owner.setAttribute('style', __awr_style_to_text__(target, imps));
+    \\          return true;
+    \\        }
     \\        const css = String(prop).replace(/[A-Z]/g, m => '-' + m.toLowerCase()).toLowerCase();
     \\        target[css] = String(value);
-    \\        owner.setAttribute('style', __awr_style_to_text__(target));
+    \\        owner.setAttribute('style', __awr_style_to_text__(target, imps));
     \\        return true;
     \\      }
     \\    });
     \\  }
     \\  globalThis.__awr_stylesheets__ = [];
     \\  globalThis.__awr_add_stylesheet__ = function(cssText) { globalThis.__awr_stylesheets__.push(String(cssText || '')); };
-    \\  function __awr_apply_css_rules__(el, computed) {
+    \\  // sheet_imp tracks which computed properties are locked by author !important.
+    \\  function __awr_apply_css_rules__(el, computed, sheet_imp) {
     \\    for (const sheet of globalThis.__awr_stylesheets__) {
     \\      const re = /([^{}]+)\{([^{}]+)\}/g;
     \\      let m;
@@ -2191,20 +2226,24 @@ const BRIDGE_POLYFILL =
     \\        let matched = false;
     \\        for (const sel of selectors) { try { if (el.matches(sel)) { matched = true; break; } } catch (_) {} }
     \\        if (!matched) continue;
-    \\        const props = __awr_parse_style_text__(m[2]);
-    \\        for (const k in props) computed[k] = props[k];
+    \\        const parsed = __awr_parse_style_text__(m[2]);
+    \\        for (const k in parsed.values) {
+    \\          if (parsed.important[k]) { computed[k] = parsed.values[k]; sheet_imp[k] = true; }
+    \\          else if (!sheet_imp[k]) { computed[k] = parsed.values[k]; }
+    \\        }
     \\      }
     \\    }
     \\  }
     \\  globalThis.getComputedStyle = function(el) {
     \\    const computed = Object.create(null);
+    \\    const sheet_imp = Object.create(null);
     \\    computed.display = 'inline';
     \\    computed.visibility = 'visible';
     \\    if (el && el.tagName && /^(DIV|P|FORM|SECTION|ARTICLE|HEADER|FOOTER|MAIN|H[1-6])$/.test(el.tagName)) computed.display = 'block';
-    \\    if (el) __awr_apply_css_rules__(el, computed);
+    \\    if (el) __awr_apply_css_rules__(el, computed, sheet_imp);
     \\    if (el && el.getAttribute) {
-    \\      const inline = __awr_parse_style_text__(el.getAttribute('style') || '');
-    \\      for (const k in inline) computed[k] = inline[k];
+    \\      const parsed = __awr_parse_style_text__(el.getAttribute('style') || '');
+    \\      for (const k in parsed.values) { if (parsed.important[k] || !sheet_imp[k]) computed[k] = parsed.values[k]; }
     \\    }
     \\    return new Proxy(computed, { get(target, prop) { if (prop === 'getPropertyValue') return name => target[String(name).toLowerCase()] || ''; const css = String(prop).replace(/[A-Z]/g, m => '-' + m.toLowerCase()).toLowerCase(); return target[css] || ''; } });
     \\  };

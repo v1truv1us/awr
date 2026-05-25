@@ -515,6 +515,87 @@ const curated_cases = [_]WptCase{
         .url = "file://tests/wpt/css_external_stylesheet.html",
     },
     .{
+        .filename = "css_style_declaration.js",
+        .html = "<html><body><div id=\"target\" style=\"color: red; font-weight: bold\"></div><div id=\"empty\"></div></body></html>",
+        .script = @embedFile("wpt/css_style_declaration.js"),
+    },
+    .{
+        .filename = "css_style_block.js",
+        .html =
+        \\<html><head><style>
+        \\  p { color: green; }
+        \\  #hero { display: none; }
+        \\  .banner { visibility: hidden; }
+        \\  span, em { font-weight: bold; }
+        \\</style></head><body>
+        \\<p id="para">text</p>
+        \\<div id="hero">hero</div>
+        \\<section class="banner" id="banner">banner</section>
+        \\<span id="span1">s</span>
+        \\<em id="em1">e</em>
+        \\<div id="unaffected">other</div>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_style_block.js"),
+    },
+    .{
+        .filename = "css_cascade_basics.js",
+        .html =
+        \\<html><head><style>
+        \\  p { color: red; }
+        \\  p { color: blue; }
+        \\  .accent { color: green; }
+        \\  #special { color: purple; }
+        \\</style></head><body>
+        \\<p id="source-order">text</p>
+        \\<p id="inline-wins" style="color: orange">text</p>
+        \\<p class="accent" id="class-rule">text</p>
+        \\<p class="accent" id="special">text</p>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_cascade_basics.js"),
+    },
+    .{
+        .filename = "css_important.js",
+        .html =
+        \\<html><head><style>
+        \\  #beats-inline { color: red !important; }
+        \\  #normal-vs-inline-imp { color: red; }
+        \\  #both-imp { color: red !important; }
+        \\</style></head><body>
+        \\<div id="beats-inline" style="color: blue">text</div>
+        \\<div id="normal-vs-inline-imp" style="color: blue !important">text</div>
+        \\<div id="both-imp" style="color: blue !important">text</div>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_important.js"),
+    },
+    .{
+        .filename = "css_computed_properties.js",
+        .html =
+        \\<html><head><style>
+        \\  #ws  { white-space: pre; }
+        \\  #tt  { text-transform: uppercase; }
+        \\  #fw  { font-weight: bold; }
+        \\  #fs  { font-style: italic; }
+        \\  #col { color: red; }
+        \\  #bg  { background-color: blue; }
+        \\</style></head><body>
+        \\<div id="display-none" style="display: none">a</div>
+        \\<span id="display-inline">b</span>
+        \\<p id="display-block">c</p>
+        \\<div id="vis-hidden" style="visibility: hidden">d</div>
+        \\<div id="ws">e</div>
+        \\<div id="tt">f</div>
+        \\<div id="fw">g</div>
+        \\<div id="fs">h</div>
+        \\<div id="col">i</div>
+        \\<div id="bg">j</div>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_computed_properties.js"),
+    },
+    .{
         .filename = "form_properties.js",
         .html =
         \\<html><body>
