@@ -640,27 +640,31 @@ pub const Client = struct {
             if (self.options.user_agent.len != 0)
                 self.options.user_agent
             else if (self.options.use_chrome_headers)
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+                http1.chrome132_user_agent
             else
                 "awr";
 
-        // Capacity 11: up to 9 chrome + 1 content-type + 1 cookie.
+        // Capacity 16: chrome132 regular headers + content-type + cookie.
         // user-agent and accept-encoding go through std.http's
         // Headers.override knobs (below) to avoid std.http's
         // auto-injected `zig/0.16.0 (std.http)` user-agent
         // showing up alongside ours — that double-UA was the
         // single biggest anti-bot tell (T-74).
-        var extra_headers: [11]std.http.Header = undefined;
+        var extra_headers: [16]std.http.Header = undefined;
         var extra_header_count: usize = 0;
 
         if (self.options.use_chrome_headers) {
-            extra_headers[extra_header_count] = .{ .name = "accept", .value = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,*/*;q=0.8" };
+            extra_headers[extra_header_count] = .{ .name = "accept", .value = http1.chrome132_accept };
             extra_header_count += 1;
-            extra_headers[extra_header_count] = .{ .name = "accept-language", .value = "en-US,en;q=0.9" };
+            extra_headers[extra_header_count] = .{ .name = "accept-language", .value = http1.chrome132_accept_language };
             extra_header_count += 1;
             extra_headers[extra_header_count] = .{ .name = "cache-control", .value = "max-age=0" };
             extra_header_count += 1;
-            extra_headers[extra_header_count] = .{ .name = "pragma", .value = "no-cache" };
+            extra_headers[extra_header_count] = .{ .name = "sec-ch-ua", .value = "\"Not A(Brand\";v=\"8\", \"Chromium\";v=\"132\", \"Google Chrome\";v=\"132\"" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "sec-ch-ua-mobile", .value = "?0" };
+            extra_header_count += 1;
+            extra_headers[extra_header_count] = .{ .name = "sec-ch-ua-platform", .value = "\"macOS\"" };
             extra_header_count += 1;
             extra_headers[extra_header_count] = .{ .name = "sec-fetch-dest", .value = "document" };
             extra_header_count += 1;
@@ -726,7 +730,7 @@ pub const Client = struct {
         const std_request_headers: std.http.Client.Request.Headers = if (self.options.use_chrome_headers)
             .{
                 .user_agent = .{ .override = effective_user_agent },
-                .accept_encoding = .{ .override = "gzip, deflate, zstd" },
+                .accept_encoding = .{ .override = http1.chrome132_accept_encoding_decodable },
             }
         else
             .{
@@ -1039,39 +1043,26 @@ pub const Client = struct {
         const path = try pathWithQueryAlloc(self.allocator, u);
         defer self.allocator.free(path);
 
-        const method_str: []const u8 = switch (method) {
-            .GET => "GET",
-            .POST => "POST",
+        const http_method: http1.Method = switch (method) {
+            .GET => .GET,
+            .POST => .POST,
         };
 
         var req_buf: std.Io.Writer.Allocating = .init(self.allocator);
         defer req_buf.deinit();
-        // HTTP/1.1 — keep-alive by default. No `Connection: close` so the
-        // server is willing to leave the connection open after the response.
-        try req_buf.writer.print("{s} {s} HTTP/1.1\r\n", .{ method_str, path });
-        try req_buf.writer.print("Host: {s}\r\n", .{host_header});
-        try req_buf.writer.print("User-Agent: {s}\r\n", .{effectiveUserAgent(self.options)});
-        try req_buf.writer.writeAll("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n");
-        try req_buf.writer.writeAll("Accept-Language: en-US,en;q=0.9\r\n");
-        try req_buf.writer.writeAll("Accept-Encoding: identity\r\n");
-        // Cookie header — empty if the jar has no matching cookies.
-        // Position before Content-* headers matches Chrome 132's typical
-        // outbound order; doesn't affect JA4 (TLS-only) but keeps the
-        // HTTP-level ordering consistent across paths.
+
         const cookie_header = try buildCookieHeaderValue(self.cookieJar(), self.allocator, u.host, path, u.is_https);
         defer self.allocator.free(cookie_header);
-        if (cookie_header.len > 0) {
-            try req_buf.writer.print("Cookie: {s}\r\n", .{cookie_header});
-        }
-        if (method == .POST) {
-            const body_bytes = body orelse "";
-            try req_buf.writer.writeAll("Content-Type: application/x-www-form-urlencoded\r\n");
-            try req_buf.writer.print("Content-Length: {d}\r\n", .{body_bytes.len});
-            try req_buf.writer.writeAll("\r\n");
-            try req_buf.writer.writeAll(body_bytes);
-        } else {
-            try req_buf.writer.writeAll("\r\n");
-        }
+
+        try writeChrome132Http1Request(
+            self,
+            &req_buf.writer,
+            http_method,
+            host_header,
+            path,
+            cookie_header,
+            if (method == .POST) body orelse "" else null,
+        );
         try writeAllTls(&entry.tls, req_buf.written());
 
         // client.Method is a narrow GET/POST enum; map to http1.Method for
@@ -1126,34 +1117,17 @@ pub const Client = struct {
         const path_z = try self.allocator.dupeZ(u8, path);
         defer self.allocator.free(path_z);
 
-        // Chrome 132 mirrors of the H1.1 headers, lowercased per the H2
-        // spec. The HPACK encoder will compress these on subsequent
-        // requests across the same H2 session — connection reuse is the
-        // perf win Lane A is chasing.
-        const ua = effectiveUserAgent(self.options);
-        const accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
-        const accept_lang = "en-US,en;q=0.9";
-        const accept_enc = "identity";
-
-        // Cookie value, optionally added to the headers array below.
-        // Always allocates (possibly empty); we free unconditionally
-        // via defer.
         const cookie_value = try buildCookieHeaderValue(self.cookieJar(), self.allocator, u.host, path, u.is_https);
         defer self.allocator.free(cookie_value);
 
-        // Build the header array on the stack with worst-case length.
-        // The cookie slot is conditional — when empty, we drop the entry
-        // and submit count=4 instead of 5.
-        var headers_buf: [5]h2session.H2Session.HeaderField = undefined;
-        headers_buf[0] = .{ .name = "user-agent", .name_len = 10, .value = ua.ptr, .value_len = ua.len };
-        headers_buf[1] = .{ .name = "accept", .name_len = 6, .value = accept, .value_len = accept.len };
-        headers_buf[2] = .{ .name = "accept-language", .name_len = 15, .value = accept_lang, .value_len = accept_lang.len };
-        headers_buf[3] = .{ .name = "accept-encoding", .name_len = 15, .value = accept_enc, .value_len = accept_enc.len };
-        var header_count: usize = 4;
-        if (cookie_value.len > 0) {
-            headers_buf[4] = .{ .name = "cookie", .name_len = 6, .value = cookie_value.ptr, .value_len = cookie_value.len };
-            header_count = 5;
-        }
+        var headers_buf: [16]h2session.H2Session.HeaderField = undefined;
+        const header_count = try fillChrome132H2Headers(
+            self,
+            &headers_buf,
+            authority,
+            path,
+            cookie_value,
+        );
 
         const sid = sess.submitGetWithHeaders(
             "GET",
@@ -1232,11 +1206,90 @@ pub const Client = struct {
     }
 };
 
+/// Serialize an HTTP/1.1 request on the BoringSSL path using the same
+/// Chrome 132 header set as `http1.Request.setChrome132Defaults`.
+fn writeChrome132Http1Request(
+    self: *Client,
+    writer: anytype,
+    method: http1.Method,
+    host_header: []const u8,
+    path: []const u8,
+    cookie_header: []const u8,
+    post_body: ?[]const u8,
+) !void {
+    var req = http1.Request{ .method = method, .path = path, .host = host_header };
+    defer req.headers.deinit(self.allocator);
+
+    if (self.options.use_chrome_headers) {
+        try req.setChrome132Defaults(self.allocator);
+    } else {
+        try req.headers.append(self.allocator, "host", host_header);
+        try req.headers.append(self.allocator, "user-agent", effectiveUserAgent(self.options));
+        try req.headers.append(self.allocator, "accept", "*/*");
+        try req.headers.append(self.allocator, "accept-language", "en-US,en;q=0.9");
+        try req.headers.append(self.allocator, "accept-encoding", "identity");
+    }
+
+    if (cookie_header.len > 0) {
+        try req.headers.append(self.allocator, "cookie", cookie_header);
+    }
+
+    if (post_body) |body_bytes| {
+        var cl_buf: [32]u8 = undefined;
+        const cl = try std.fmt.bufPrint(&cl_buf, "{d}", .{body_bytes.len});
+        try req.headers.append(self.allocator, "content-type", "application/x-www-form-urlencoded");
+        try req.headers.append(self.allocator, "content-length", cl);
+    }
+
+    try req.write(writer);
+    if (post_body) |body_bytes| try writer.writeAll(body_bytes);
+}
+
+/// Copy Chrome 132 regular headers into the H2 submit buffer. Skips
+/// HTTP/1-only `host` and H2 pseudo-headers (the shim adds those).
+fn fillChrome132H2Headers(
+    self: *Client,
+    out: []h2session.H2Session.HeaderField,
+    authority: []const u8,
+    path: []const u8,
+    cookie_header: []const u8,
+) !usize {
+    var req = http1.Request{ .method = .GET, .path = path, .host = authority };
+    defer req.headers.deinit(self.allocator);
+
+    if (self.options.use_chrome_headers) {
+        try req.setChrome132Defaults(self.allocator);
+    } else {
+        const ua = effectiveUserAgent(self.options);
+        try req.headers.append(self.allocator, "user-agent", ua);
+        try req.headers.append(self.allocator, "accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+        try req.headers.append(self.allocator, "accept-language", "en-US,en;q=0.9");
+        try req.headers.append(self.allocator, "accept-encoding", "identity");
+    }
+
+    if (cookie_header.len > 0) {
+        try req.headers.append(self.allocator, "cookie", cookie_header);
+    }
+
+    var count: usize = 0;
+    for (req.headers.items.items) |h| {
+        if (h.name.len > 0 and h.name[0] == ':') continue;
+        if (std.ascii.eqlIgnoreCase(h.name, "host")) continue;
+        if (count >= out.len) return FetchError.ConnectionFailed;
+        out[count] = .{
+            .name = h.name.ptr,
+            .name_len = @intCast(h.name.len),
+            .value = h.value.ptr,
+            .value_len = @intCast(h.value.len),
+        };
+        count += 1;
+    }
+    return count;
+}
+
 fn effectiveUserAgent(options: ClientOptions) []const u8 {
     if (options.user_agent.len != 0) return options.user_agent;
-    if (options.use_chrome_headers) {
-        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36";
-    }
+    if (options.use_chrome_headers) return http1.chrome132_user_agent;
     return "awr";
 }
 
@@ -1550,6 +1603,11 @@ test "Client options defaults" {
     try std.testing.expectEqual(@as(u32, 30_000), opts.timeout_ms);
     try std.testing.expectEqual(@as(usize, 64 * 1024), opts.max_response_header_bytes);
     try std.testing.expect(opts.use_chrome_headers);
+    try std.testing.expectEqualStrings("", opts.user_agent);
+}
+
+test "effectiveUserAgent matches chrome132_user_agent" {
+    try std.testing.expectEqualStrings(http1.chrome132_user_agent, effectiveUserAgent(.{}));
 }
 
 test "fetch returns InvalidUrl for bad URL" {

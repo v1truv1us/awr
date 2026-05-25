@@ -56,6 +56,18 @@ pub const HeaderList = struct {
 
 pub const Method = enum { GET, POST, PUT, DELETE, HEAD, OPTIONS, PATCH };
 
+/// Chrome 132 HTTP-layer fingerprint constants (macOS desktop).
+/// Shared by std.http, BoringSSL HTTP/1.1, and BoringSSL H2 paths.
+pub const chrome132_user_agent =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36";
+pub const chrome132_accept =
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7";
+/// Full Chrome advertisement (includes br). Use when the response path can ignore br.
+pub const chrome132_accept_encoding = "gzip, deflate, br, zstd";
+/// Encodings AWR can decode today (no brotli yet).
+pub const chrome132_accept_encoding_decodable = "gzip, deflate, zstd";
+pub const chrome132_accept_language = "en-US,en;q=0.9";
+
 pub const Request = struct {
     method: Method,
     path: []const u8, // e.g. "/index.html" or "/search?q=zig"
@@ -93,9 +105,9 @@ pub const Request = struct {
         // because :authority carries the same information.
         try self.headers.append(allocator, "host", self.host);
         // Regular headers in Chrome 132 order
-        try self.headers.append(allocator, "accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
-        try self.headers.append(allocator, "accept-encoding", "gzip, deflate, br, zstd");
-        try self.headers.append(allocator, "accept-language", "en-US,en;q=0.9");
+        try self.headers.append(allocator, "accept", chrome132_accept);
+        try self.headers.append(allocator, "accept-encoding", chrome132_accept_encoding);
+        try self.headers.append(allocator, "accept-language", chrome132_accept_language);
         try self.headers.append(allocator, "cache-control", "max-age=0");
         try self.headers.append(allocator, "sec-ch-ua", "\"Not A(Brand\";v=\"8\", \"Chromium\";v=\"132\", \"Google Chrome\";v=\"132\"");
         try self.headers.append(allocator, "sec-ch-ua-mobile", "?0");
@@ -105,7 +117,7 @@ pub const Request = struct {
         try self.headers.append(allocator, "sec-fetch-site", "none");
         try self.headers.append(allocator, "sec-fetch-user", "?1");
         try self.headers.append(allocator, "upgrade-insecure-requests", "1");
-        try self.headers.append(allocator, "user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36");
+        try self.headers.append(allocator, "user-agent", chrome132_user_agent);
     }
 };
 

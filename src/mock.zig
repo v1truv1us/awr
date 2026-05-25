@@ -75,6 +75,13 @@ fn handleConnection(
     // echoes received Cookie: headers. Routed BEFORE the static-file
     // path so /set-cookie/... and /show-cookie/... never fall through
     // to a file lookup.
+    if (handleEchoHeadersFixture(allocator, &request)) |handled| {
+        if (handled) return;
+    } else |err| {
+        log("awr-mock: echo-headers fixture error: {t}", .{err});
+        return;
+    }
+
     if (handleCookieFixtures(allocator, &request)) |handled| {
         if (handled) return;
     } else |err| {
@@ -111,6 +118,35 @@ fn handleConnection(
             .{ .name = "content-type", .value = mimeFor(path) },
         },
     });
+}
+
+/// T-74: dump every request header as `name: value\n` lines for
+/// comparing AWR's outbound fingerprint against Chrome.
+fn handleEchoHeadersFixture(
+    allocator: std.mem.Allocator,
+    request: *std.http.Server.Request,
+) !bool {
+    const target = request.head.target;
+    const q = std.mem.indexOfScalar(u8, target, '?');
+    const path = if (q) |i| target[0..i] else target;
+    if (!std.mem.eql(u8, path, "/echo-headers")) return false;
+
+    var body = std.ArrayList(u8).empty;
+    defer body.deinit(allocator);
+    var it = request.iterateHeaders();
+    while (it.next()) |h| {
+        try body.appendSlice(allocator, h.name);
+        try body.appendSlice(allocator, ": ");
+        try body.appendSlice(allocator, h.value);
+        try body.append(allocator, '\n');
+    }
+    try request.respond(body.items, .{
+        .status = .ok,
+        .extra_headers = &.{
+            .{ .name = "content-type", .value = "text/plain; charset=utf-8" },
+        },
+    });
+    return true;
 }
 
 /// Cookie test fixtures: `/set-cookie/<name>/<value>` emits a Set-Cookie
