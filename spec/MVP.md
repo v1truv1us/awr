@@ -2,12 +2,13 @@
 
 > **Canonical execution spec.** If any other planning doc disagrees, this file wins.
 >
-> **Current status:** Tiers 0–3 are **CLOSED**. Tier 0 (agent runtime
+> **Current status:** Tiers 0–3 are **CLOSED**, plus the starter CSSOM track
+> (`spec/subspecs/cssom.md`) closed 2026-05-27. Tier 0 (agent runtime
 > baseline), Tier 1 (interactive TUI parity), Tier 2 (render + UX polish),
 > and Tier 3 (lightly dynamic site support — History, Storage, SSE, WebSocket,
-> events) are all closed under curated WPT/Test262 gates. Tiers 4–5
-> (layout engine, full SPA parity) are documented and deferred per
-> `spec/subspecs/browser-roadmap.md`. Daemon mode is active per
+> events, starter CSSOM) are all closed under curated WPT/Test262 gates.
+> Tiers 4–5 (layout engine, full SPA parity) are documented and deferred per
+> `spec/subspecs/browser-roadmap.md`. Daemon mode is closed per
 > `spec/subspecs/daemon-mode.md`. This file remains the change-control
 > point for any tier promotion or scope change.
 
@@ -59,7 +60,7 @@ Tests and Test262 cases.
 | `spec/subspecs/browser-storage.md` | **Tier 3 closed sub-spec**: Web Storage (`localStorage` persisted, `sessionStorage` in-memory) |
 | `spec/subspecs/browser-realtime.md` | **Tier 3 closed sub-spec**: real-time connections — SSE (T3.D.1) + WebSocket (T3.D.2), both CLOSED 2026-05-22 |
 | `spec/subspecs/browser-events.md` | **Tier 3 closed sub-spec**: browser events (synthetic input, `DOMContentLoaded`/`load`, `requestAnimationFrame`, `matchMedia` evaluation) |
-| `spec/subspecs/cssom.md` | **Active starter sub-spec**: non-layout CSSOM, stylesheet loading, cascade, and simple `getComputedStyle()` values |
+| `spec/subspecs/cssom.md` | **Tier 3 closed sub-spec**: non-layout CSSOM, stylesheet loading, cascade, simple `getComputedStyle()` values, and `white-space` renderer integration |
 | `docs/adr/0001-spec-governance.md` | Historical record for spec/documentation governance decisions |
 | `docs/adr/0003-tier4-layout-strategy.md` | Living decision record for Tier 4 layout strategy, layout-adapter design, and embed-vs-native evidence |
 

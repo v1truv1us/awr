@@ -635,6 +635,43 @@ documentation governance.
   `spec/subspecs/browser-roadmap.md`, `docs/adr/0003-tier4-layout-strategy.md`,
   this ADR.
 
+### 2026-05-27 — Starter CSSOM CLOSED (final Tier 3 sub-spec)
+
+- Date: 2026-05-27
+- Change: `spec/subspecs/cssom.md` status changed from ACTIVE → CLOSED. All
+  §5 closure gates met:
+  - **§5.1 (parsing/cascade in Zig).** Migrated `__awr_apply_css_rules__` +
+    JS-side `getComputedStyle` cascade out of `src/dom/bridge.zig` into the
+    `src/cssom/{parser,style,cascade}.zig` modules. Two new native callbacks
+    (`__awr_css_register_stylesheet__`, `__awr_css_get_computed_property__`)
+    expose the Zig engine to JS. `BridgeCtx` now owns a parsed stylesheet
+    list (per-page lifetime). The JS polyfill `getComputedStyle` became a
+    thin proxy that delegates property reads to Zig with UA-default fallback
+    for `display` (block tags) and `visibility` (visible). The JS regex
+    stylesheet parser is gone.
+  - **§5.2 (WPT §4.1–5).** Already covered prior to this change set by the
+    seven `css_*.js` curated cases (latest growth in `7012fec`). All pass
+    against the new Zig-backed cascade.
+  - **§5.3 (renderer §4.6).** Added `white-space: pre | pre-wrap | pre-line`
+    integration in `src/render.zig` via `isCssWhiteSpacePreserved`, reusing
+    the existing `pre_depth` preservation path. Test
+    `render preserves whitespace under CSS white-space: pre / pre-wrap /
+    pre-line` covers stylesheet and inline-style paths plus the default
+    collapse behavior.
+  - **§5.4 (tests green).** `zig build`, `zig build test-page`, `zig build
+    test-wpt`, `zig build test-cssom`, `zig build test-tls`, `zig build
+    test-h2` all green. TLS fingerprint + HTTP/2 SETTINGS unchanged.
+  - **§5.5 (docs).** `spec/MVP.md`, `spec/subspecs/browser-roadmap.md`,
+    `spec/subspecs/cssom.md`, and this ADR amended in the same change set.
+- Reason: CSSOM was the last ACTIVE sub-spec on the Tier-3 closure path.
+  With it closed, Tiers 0–3 are fully complete; only Tier 4 (layout engine
+  — gated by the ADR-0003 strategic decision) and Tier 5 remain. Closing
+  the sub-spec when the bridge migration lands keeps doc/code in sync per
+  governance rule §8.1.
+- Documents updated: `spec/subspecs/cssom.md`, `spec/MVP.md`,
+  `spec/subspecs/browser-roadmap.md`, `src/dom/bridge.zig` (cssom natives +
+  polyfill rewrite), `src/render.zig` (white-space integration), this ADR.
+
 ### Template for future amendments
 
 - Date:

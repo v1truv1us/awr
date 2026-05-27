@@ -1,6 +1,6 @@
 # CSSOM Starter Sub-spec
 
-Status: ACTIVE starter track
+Status: CLOSED 2026-05-27
 Date: 2026-05-23
 Authority: `SPEC.md` → `spec/MVP.md` → this file
 Related: `spec/subspecs/browser-roadmap.md`, `spec/subspecs/wpt-conformance.md`, `docs/adr/0003-tier4-layout-strategy.md`
@@ -121,3 +121,37 @@ This starter CSSOM track can be marked CLOSED when:
 - Do not expose geometry APIs as correct unless backed by Tier 4 layout.
 - Do not let the CSSOM starter track silently become a layout engine.
 - Prefer small, source-backed WPT slices over broad compatibility claims.
+
+## 7. Closure record
+
+CLOSED 2026-05-27. All §5 gates met:
+
+1. **CSS parsing/cascade in Zig.** `src/cssom/{parser,style,cascade,computed}.zig`
+   own stylesheet parsing, the `StyleDeclaration` model, specificity +
+   precedence rules, and the high-level `StyleResolver`. The JS-side
+   `__awr_apply_css_rules__` regex stylesheet parser and JS-side cascade in
+   `src/dom/bridge.zig` were deleted; `getComputedStyle` is now a thin proxy
+   that calls the native `__awr_css_get_computed_property__` (which uses the
+   Zig cascade). Stylesheet registration goes via the native
+   `__awr_css_register_stylesheet__`, which parses with
+   `css_parser.parseStylesheet` and appends to `BridgeCtx.stylesheets`. The
+   dom-aware glue (element-selector matching) lives in `bridge.zig`'s
+   `ruleMatchesElement` so the `cssom/` modules stay dom-free.
+2. **WPT §4.1–5 coverage.** Seven curated cases land §4 items 1–5:
+   `css_style_declaration.js` (§4.1), `css_style_block.js` +
+   `css_external_stylesheet.js` (§4.2), `css_cascade_basics.js` (§4.3),
+   `css_important.js` (§4.4), `css_inline_computed_style.js` +
+   `css_computed_properties.js` (§4.5). All green under `zig build test-wpt`.
+3. **Renderer §4.6 coverage.** `display:none` and `visibility:hidden` covered
+   by `render browse profile applies starter CSSOM display and visibility`
+   in `src/render.zig`. `white-space: pre|pre-wrap|pre-line` covered by
+   `render preserves whitespace under CSS white-space: pre / pre-wrap /
+   pre-line`, also in `src/render.zig`. Renderer integration via
+   `isCssWhiteSpacePreserved` reuses the existing `<pre>` `pre_depth`
+   preservation path.
+4. **Test gates green.** `zig build`, `zig build test-page`, `zig build
+   test-wpt`, `zig build test-cssom`, `zig build test-tls`, `zig build
+   test-h2` all green. TLS fingerprint and HTTP/2 SETTINGS unchanged.
+5. **Canonical docs updated.** `spec/MVP.md`, `spec/subspecs/browser-roadmap.md`,
+   `spec/subspecs/wpt-conformance.md`, and `docs/adr/0001-spec-governance.md`
+   amended in the same change set.

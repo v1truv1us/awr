@@ -17,6 +17,8 @@ const client = @import("client.zig");
 const engine = @import("js/engine.zig");
 const webcrypto_backend = @import("js/webcrypto_backend.zig");
 const dom = @import("dom/node.zig"); // parseDocument handles HTML+DOM internally
+const css_parser = @import("cssom/parser.zig");
+const css_style = @import("cssom/style.zig");
 pub const bridge = @import("dom/bridge.zig");
 const render = @import("render.zig");
 const extract = @import("extract.zig");
@@ -1381,13 +1383,17 @@ pub const Page = struct {
         errdefer if (title) |t| gpa.free(t);
 
         // ── Extract body text ─────────────────────────────────────────────
-        // Uses textContentForExtract (not textContent) so embedded
-        // `<style>` / `<script>` source doesn't leak into the agent-facing
-        // body_text field. textContent itself remains DOM-spec-compliant
-        // for the curated WPT corpus. See src/dom/node.zig.
+        // CSS-aware extraction (CSSOM §4.6): walks the DOM like
+        // `textContentForExtract` (which strips `<style>`/`<script>`/etc.)
+        // but ALSO consults the page's parsed stylesheets and each
+        // element's inline style attribute to drop subtrees where
+        // `display:none` or `visibility:hidden` resolves. Without this,
+        // the agent-facing body_text leaked content that the renderer
+        // correctly hides — the JSON-envelope surface (the primary
+        // product path) is now consistent with `awr render` / `awr browse`.
         const body_text: []const u8 = blk: {
             const body = zig_doc.body() orelse break :blk try gpa.dupe(u8, "");
-            break :blk body.textContentForExtract(gpa) catch try gpa.dupe(u8, "");
+            break :blk extractBodyTextCssAware(gpa, body, self.css_stylesheets.items) catch try gpa.dupe(u8, "");
         };
         errdefer gpa.free(body_text);
 
@@ -2131,6 +2137,94 @@ fn parsePendingId(json: []const u8) ?u64 {
     return if (had_digit) n else null;
 }
 
+// ── CSS-aware body_text extraction (CSSOM §4.6) ───────────────────────────
+//
+// Walks the DOM and accumulates text content while dropping subtrees whose
+// computed `display` is `none` or `visibility` is `hidden`. Mirrors the
+// renderer's `isCssHidden` policy so the agent JSON `body_text` field shows
+// the same visible text as `awr render` / `awr browse`.
+//
+// The cascade is intentionally a simplified form of the bridge resolver:
+// inline style wins, otherwise the first matching rule across all
+// stylesheets sets the value. !important is honored. Stylesheets are
+// reparsed per element which is suboptimal — render.zig has the same
+// pattern; both can be amortized in a future pass without changing the
+// observable behavior.
+fn extractBodyTextCssAware(
+    allocator: std.mem.Allocator,
+    body: *const dom.Element,
+    css_sheets: []const []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    extractTextRecursive(allocator, body, css_sheets, &buf);
+    return buf.toOwnedSlice(allocator);
+}
+
+fn extractTextRecursive(
+    allocator: std.mem.Allocator,
+    elem: *const dom.Element,
+    css_sheets: []const []const u8,
+    buf: *std.ArrayList(u8),
+) void {
+    for (elem.children.items) |child| {
+        switch (child) {
+            .text => |t| buf.appendSlice(allocator, t.data) catch {},
+            .element => |e| {
+                if (isOpaqueExtractTag(e.tag)) continue;
+                if (isElementCssHiddenForExtract(allocator, e, css_sheets)) continue;
+                extractTextRecursive(allocator, e, css_sheets, buf);
+            },
+            else => {},
+        }
+    }
+}
+
+fn isOpaqueExtractTag(tag: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(tag, "style") or
+        std.ascii.eqlIgnoreCase(tag, "script") or
+        std.ascii.eqlIgnoreCase(tag, "noscript") or
+        std.ascii.eqlIgnoreCase(tag, "template");
+}
+
+fn isElementCssHiddenForExtract(
+    allocator: std.mem.Allocator,
+    elem: *const dom.Element,
+    css_sheets: []const []const u8,
+) bool {
+    // Inline style first — wins per cascade.
+    if (elem.getAttribute("style")) |style_attr| {
+        var style = css_style.StyleDeclaration.parse(allocator, style_attr) catch return false;
+        defer style.deinit();
+        if (isHiddenValue(style.getPropertyValue("display"), "none")) return true;
+        if (isHiddenValue(style.getPropertyValue("visibility"), "hidden")) return true;
+    }
+    // Author stylesheets.
+    for (css_sheets) |css| {
+        var sheet = css_parser.parseStylesheet(allocator, css) catch continue;
+        defer sheet.deinit();
+        for (sheet.rules.items) |rule| {
+            var selectors = std.mem.splitScalar(u8, rule.selector_text, ',');
+            var matched = false;
+            while (selectors.next()) |sel| {
+                if (elem.matches(sel)) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) continue;
+            if (isHiddenValue(rule.declarations.getPropertyValue("display"), "none")) return true;
+            if (isHiddenValue(rule.declarations.getPropertyValue("visibility"), "hidden")) return true;
+        }
+    }
+    return false;
+}
+
+fn isHiddenValue(value: []const u8, expected: []const u8) bool {
+    if (value.len == 0) return false;
+    return std.ascii.eqlIgnoreCase(std.mem.trim(u8, value, " \t\r\n"), expected);
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 test "Page.init and deinit" {
@@ -2201,6 +2295,31 @@ test "Page.processHtml — body_text excludes <style> and <script> source" {
         @as(?usize, null),
         std.mem.indexOf(u8, result.body_text, "should-not-appear"),
     );
+}
+
+test "Page.processHtml — body_text drops CSS-hidden elements (CSSOM §4.6)" {
+    var page = try Page.init(std.testing.allocator, std.testing.io);
+    defer page.deinit();
+    var result = try page.processHtml(
+        "http://example.com/",
+        200,
+        "<html><head><style>" ++
+            ".hide-by-class { display: none; }" ++
+            "#hide-by-id { visibility: hidden; }" ++
+            "</style></head><body>" ++
+            "<p>visible-prose</p>" ++
+            "<p class=\"hide-by-class\">CLASS-HIDDEN-LEAK</p>" ++
+            "<p id=\"hide-by-id\">ID-HIDDEN-LEAK</p>" ++
+            "<p style=\"display: none\">INLINE-HIDDEN-LEAK</p>" ++
+            "<p style=\"visibility: hidden\">INLINE-VISIBILITY-LEAK</p>" ++
+            "</body></html>",
+    );
+    defer result.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.body_text, "visible-prose") != null);
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, result.body_text, "CLASS-HIDDEN-LEAK"));
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, result.body_text, "ID-HIDDEN-LEAK"));
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, result.body_text, "INLINE-HIDDEN-LEAK"));
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, result.body_text, "INLINE-VISIBILITY-LEAK"));
 }
 
 test "decodeDataUrl: percent-encoded JS payload round-trips" {

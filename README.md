@@ -20,9 +20,12 @@ pool, one rendered DOM.
   keyboard input, history, URL bar, cookie inspector, browser-cookie
   import) is CLOSED and shipped.
 - **Tiers 2–3** (render/UX polish and lightly dynamic site support: History,
-  Storage, SSE, WebSocket, events) are CLOSED under curated WPT/Test262 gates.
-- **Starter CSSOM** is active under `spec/subspecs/cssom.md` and remains
-  explicitly non-layout.
+  Storage, SSE, WebSocket, events, starter CSSOM) are CLOSED under curated
+  WPT/Test262 gates.
+- **Starter CSSOM** is CLOSED under `spec/subspecs/cssom.md` (stylesheet
+  loading, declaration APIs, cascade with specificity + !important,
+  non-layout `getComputedStyle()`, and renderer integration for `display`,
+  `visibility`, and `white-space`). Remains explicitly non-layout.
 - **Tiers 4–5** (real CSS/layout engine and full SPA parity) are documented in
   `spec/subspecs/browser-roadmap.md §3` and deferred.
 
@@ -264,7 +267,7 @@ spec/
     agent-browser.md     Tier 0 agent surface (closed)
     rendering.md         Tier 0 terminal renderer (closed)
     daemon-mode.md       Tier 0 long-lived `awrd` (closed)
-    cssom.md             Active starter CSSOM: non-layout style/cascade
+    cssom.md             Tier 3 closed: starter CSSOM (non-layout style/cascade)
     mcp-stdio.md         Deferred native MCP stdio server
 third_party/lexbor/       Build notes for lexbor dependency
 ```

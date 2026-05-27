@@ -38,6 +38,12 @@ const storage_mod = @import("../js/storage.zig");
 const history_mod = @import("history.zig");
 const sse_mod = @import("../net/sse.zig");
 pub const ws_mod = @import("../net/websocket.zig");
+// CSSOM §5.1: the bridge owns parsed author stylesheets in Zig and resolves
+// computed properties via the dom-free `cssom/` modules. The JS polyfill is
+// a thin adapter — no regex stylesheet parser, no JS-side cascade.
+const css_parser = @import("../cssom/parser.zig");
+const css_style = @import("../cssom/style.zig");
+const css_cascade = @import("../cssom/cascade.zig");
 
 // ── BridgeCtx ─────────────────────────────────────────────────────────────
 
@@ -60,6 +66,11 @@ const BridgeCtx = struct {
     /// Tier 3 — T3.B. History API stack. Seeded by Page from
     /// `setLocationFromUrl` (which calls `seedHistory` below).
     history: history_mod.HistoryStack,
+    /// CSSOM §5.1: parsed author stylesheets (`<style>` / `<link rel=stylesheet>`).
+    /// JS registers each one via `__awr_register_stylesheet__`; getComputedStyle
+    /// resolves against this list with the cascade rules in `cssom/cascade.zig`.
+    /// Cleared on each bridge install (per-page lifetime).
+    stylesheets: std.ArrayList(css_parser.Stylesheet),
 
     fn init(doc: *dom.Document, io: std.Io, allocator: std.mem.Allocator) BridgeCtx {
         return .{
@@ -74,6 +85,7 @@ const BridgeCtx = struct {
             .local_storage = storage_mod.LocalStorage.init(allocator),
             .session_storage = storage_mod.SessionStorage.init(allocator),
             .history = history_mod.HistoryStack.init(allocator),
+            .stylesheets = .empty,
         };
     }
 
@@ -83,6 +95,8 @@ const BridgeCtx = struct {
         self.local_storage.deinit();
         self.session_storage.deinit();
         self.history.deinit();
+        for (self.stylesheets.items) |*sheet| sheet.deinit();
+        self.stylesheets.deinit(self.allocator);
     }
 };
 
@@ -258,6 +272,11 @@ fn installNativeCallbacks(eng: *engine.JsEngine) !void {
         // Tier 3 — T3.D.2 WebSocket. One native: connect, exchange frames,
         // return messages as JSON. WebSocket JS class wraps this.
         .{ "ws_connect_and_recv", wsConnectAndRecvFn },
+        // CSSOM §5.1. Two natives back getComputedStyle + stylesheet
+        // registration. JS polyfill is now a thin adapter — no regex
+        // stylesheet parser, no JS-side cascade.
+        .{ "css_register_stylesheet", cssRegisterStylesheetFn },
+        .{ "css_get_computed_property", cssGetComputedPropertyFn },
     }) |entry| {
         const fname: [:0]const u8 = "__awr_" ++ entry[0] ++ "__";
         const fn_val = qjs.Value.initCFunction(ctx, entry[1], fname, 1);
@@ -1526,6 +1545,182 @@ fn buildWsResultJson(allocator: std.mem.Allocator, session: *ws_mod.WsSession) !
     return buf.toOwnedSlice(allocator);
 }
 
+// ── CSSOM host bindings (§5.1) ────────────────────────────────────────────
+//
+// Two natives back the JS-side CSSOM surface:
+//   __awr_css_register_stylesheet__(text)  — parses + appends to BridgeCtx
+//   __awr_css_get_computed_property__(handle, name) — resolves via cascade
+//
+// The JS polyfill (below) is a thin adapter — no regex stylesheet parser,
+// no JS-side cascade. CSS parsing and the cascade live in
+// `src/cssom/{parser,style,cascade}.zig`; this file owns only the dom-aware
+// glue (element matching + handle lookup) because the cssom modules are
+// dom-free by design.
+
+fn cssRegisterStylesheetFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.undefined;
+    const bridge = getBridge(ctx) orelse return qjs.Value.undefined;
+    if (args.len == 0) return qjs.Value.undefined;
+    const v: qjs.Value = @bitCast(args[0]);
+    const cstr = v.toCString(c) orelse return qjs.Value.undefined;
+    defer c.freeCString(cstr);
+    const css_text = std.mem.span(cstr);
+
+    var sheet = css_parser.parseStylesheet(bridge.allocator, css_text) catch return qjs.Value.undefined;
+    bridge.stylesheets.append(bridge.allocator, sheet) catch {
+        sheet.deinit();
+        return qjs.Value.undefined;
+    };
+    return qjs.Value.undefined;
+}
+
+fn cssGetComputedPropertyFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
+    const c = ctx orelse return qjs.Value.initStringLen(undefined, "");
+    const bridge = getBridge(ctx) orelse return qjs.Value.initStringLen(c, "");
+    if (args.len < 2) return qjs.Value.initStringLen(c, "");
+
+    const handle_v: qjs.Value = @bitCast(args[0]);
+    const name_v: qjs.Value = @bitCast(args[1]);
+    const handle_u32: u32 = handle_v.toUint32(c) catch return qjs.Value.initStringLen(c, "");
+    const elem = getElemByHandle(bridge, handle_u32) orelse return qjs.Value.initStringLen(c, "");
+
+    const name_cstr = name_v.toCString(c) orelse return qjs.Value.initStringLen(c, "");
+    defer c.freeCString(name_cstr);
+    const prop_name = std.mem.span(name_cstr);
+
+    const value = resolveComputedProperty(bridge.allocator, elem, bridge.stylesheets.items, prop_name) catch return qjs.Value.initStringLen(c, "");
+    defer if (value) |v| bridge.allocator.free(v);
+    if (value) |v| return qjs.Value.initStringLen(c, v);
+    return qjs.Value.initStringLen(c, "");
+}
+
+/// Resolve a computed CSS property value for `elem` against the supplied
+/// `stylesheets` plus the element's inline `style="..."` attribute. Returns
+/// an owned slice (caller frees) containing the winning value per the
+/// cascade in `cssom/cascade.zig`, or null when no rule matches.
+///
+/// The dup-on-return is intentional: inline-style values are borrowed from
+/// a `StyleDeclaration` that gets freed inside this function, and
+/// stylesheet values are borrowed from `bridge.stylesheets` which can be
+/// mutated between calls. Returning owned bytes shields the JS side from
+/// either lifetime quirk.
+fn resolveComputedProperty(
+    allocator: std.mem.Allocator,
+    elem: *const dom.Element,
+    stylesheets: []const css_parser.Stylesheet,
+    prop_name: []const u8,
+) !?[]u8 {
+    // Track the best author-stylesheet match. We dup at the end so we don't
+    // pay an alloc-per-rule when many rules touch the same property.
+    var best_value: ?[]const u8 = null;
+    var best_spec = css_cascade.Specificity{};
+    var best_src_idx: usize = 0;
+    var best_rule_idx: usize = 0;
+    var best_important = false;
+
+    for (stylesheets, 0..) |sheet, src_idx| {
+        for (sheet.rules.items, 0..) |rule, rule_idx| {
+            if (!ruleMatchesElement(elem, &rule)) continue;
+            const val = rule.declarations.getPropertyValue(prop_name);
+            if (val.len == 0) continue;
+            const important = isPropImportantInDecl(&rule.declarations, prop_name);
+
+            const candidate = css_cascade.MatchResult{
+                .specificity = rule.specificity,
+                .source_index = src_idx,
+                .rule_index = rule_idx,
+                .value = val,
+                .important = important,
+            };
+            const current_best = css_cascade.MatchResult{
+                .specificity = best_spec,
+                .source_index = best_src_idx,
+                .rule_index = best_rule_idx,
+                .value = "",
+                .important = best_important,
+            };
+            if (best_value == null or candidate.isPrecedentOver(current_best)) {
+                best_value = val;
+                best_spec = rule.specificity;
+                best_src_idx = src_idx;
+                best_rule_idx = rule_idx;
+                best_important = important;
+            }
+        }
+    }
+
+    // Inline style. Treated as specificity (1,0,0,0)-ish — beats any selector
+    // unless a stylesheet rule has !important and the inline declaration
+    // does not. Encoded by using a synthetic specificity above any selector
+    // and letting `MatchResult.isPrecedentOver` apply the !important rule.
+    if (elem.getAttribute("style")) |style_attr| {
+        var inline_decl = css_style.StyleDeclaration.parse(allocator, style_attr) catch {
+            return if (best_value) |v| try allocator.dupe(u8, v) else null;
+        };
+        defer inline_decl.deinit();
+        const inline_val = inline_decl.getPropertyValue(prop_name);
+        if (inline_val.len > 0) {
+            const inline_important = isPropImportantInDecl(&inline_decl, prop_name);
+            const inline_match = css_cascade.MatchResult{
+                .specificity = .{ .id = 9999, .class = 0, .element = 0 },
+                .source_index = 9999,
+                .rule_index = 9999,
+                .value = inline_val,
+                .important = inline_important,
+            };
+            const current_best = css_cascade.MatchResult{
+                .specificity = best_spec,
+                .source_index = best_src_idx,
+                .rule_index = best_rule_idx,
+                .value = "",
+                .important = best_important,
+            };
+            if (best_value == null or inline_match.isPrecedentOver(current_best)) {
+                return try allocator.dupe(u8, inline_val);
+            }
+        }
+    }
+
+    return if (best_value) |v| try allocator.dupe(u8, v) else null;
+}
+
+fn isPropImportantInDecl(decl: *const css_style.StyleDeclaration, prop_name: []const u8) bool {
+    for (decl.declarations.items) |d| {
+        if (std.ascii.eqlIgnoreCase(d.name, prop_name)) return d.important;
+    }
+    return false;
+}
+
+/// Matches a parsed `Rule` against `elem` using the rule's pre-parsed selector
+/// list. Mirrors `cssom/computed.zig:matchesElement` but lives here so the
+/// cssom modules can stay dom-free (avoids a transitive lexbor link from
+/// every test target that touches cssom).
+fn ruleMatchesElement(elem: *const dom.Element, rule: *const css_parser.Rule) bool {
+    if (rule.selectors.items.len == 0) return false;
+    for (rule.selectors.items) |sel| {
+        switch (sel.sel_type) {
+            .universal => return true,
+            .tag => {
+                if (std.ascii.eqlIgnoreCase(elem.tag, sel.value)) return true;
+            },
+            .id => {
+                if (elem.getAttribute("id")) |id| {
+                    if (std.mem.eql(u8, id, sel.value)) return true;
+                }
+            },
+            .class => {
+                if (elem.getAttribute("class")) |classes| {
+                    var parts = std.mem.splitScalar(u8, classes, ' ');
+                    while (parts.next()) |class_name| {
+                        if (std.mem.eql(u8, class_name, sel.value)) return true;
+                    }
+                }
+            },
+        }
+    }
+    return false;
+}
+
 // ── JS polyfill ───────────────────────────────────────────────────────────
 
 const BRIDGE_POLYFILL =
@@ -2214,38 +2409,48 @@ const BRIDGE_POLYFILL =
     \\      }
     \\    });
     \\  }
-    \\  globalThis.__awr_stylesheets__ = [];
-    \\  globalThis.__awr_add_stylesheet__ = function(cssText) { globalThis.__awr_stylesheets__.push(String(cssText || '')); };
-    \\  // sheet_imp tracks which computed properties are locked by author !important.
-    \\  function __awr_apply_css_rules__(el, computed, sheet_imp) {
-    \\    for (const sheet of globalThis.__awr_stylesheets__) {
-    \\      const re = /([^{}]+)\{([^{}]+)\}/g;
-    \\      let m;
-    \\      while ((m = re.exec(sheet))) {
-    \\        const selectors = m[1].split(',').map(s => s.trim()).filter(Boolean);
-    \\        let matched = false;
-    \\        for (const sel of selectors) { try { if (el.matches(sel)) { matched = true; break; } } catch (_) {} }
-    \\        if (!matched) continue;
-    \\        const parsed = __awr_parse_style_text__(m[2]);
-    \\        for (const k in parsed.values) {
-    \\          if (parsed.important[k]) { computed[k] = parsed.values[k]; sheet_imp[k] = true; }
-    \\          else if (!sheet_imp[k]) { computed[k] = parsed.values[k]; }
-    \\        }
-    \\      }
+    \\  // CSSOM §5.1: stylesheet registration delegates to Zig.
+    \\  // Parsing and cascade live in src/cssom/; this is a thin adapter.
+    \\  globalThis.__awr_add_stylesheet__ = function(cssText) {
+    \\    if (typeof __awr_css_register_stylesheet__ === 'function') {
+    \\      __awr_css_register_stylesheet__(String(cssText || ''));
     \\    }
+    \\  };
+    \\  // UA defaults for tags that should compute display:block. Used when
+    \\  // no author rule matches — the Zig resolver only knows about parsed
+    \\  // stylesheets and inline style attributes.
+    \\  const __AWR_UA_BLOCK_TAGS__ = /^(DIV|P|FORM|SECTION|ARTICLE|HEADER|FOOTER|MAIN|H[1-6])$/;
+    \\  function __awr_ua_default__(el, css_name) {
+    \\    if (css_name === 'display') {
+    \\      if (el && el.tagName && __AWR_UA_BLOCK_TAGS__.test(el.tagName)) return 'block';
+    \\      return 'inline';
+    \\    }
+    \\    if (css_name === 'visibility') return 'visible';
+    \\    return '';
     \\  }
     \\  globalThis.getComputedStyle = function(el) {
-    \\    const computed = Object.create(null);
-    \\    const sheet_imp = Object.create(null);
-    \\    computed.display = 'inline';
-    \\    computed.visibility = 'visible';
-    \\    if (el && el.tagName && /^(DIV|P|FORM|SECTION|ARTICLE|HEADER|FOOTER|MAIN|H[1-6])$/.test(el.tagName)) computed.display = 'block';
-    \\    if (el) __awr_apply_css_rules__(el, computed, sheet_imp);
-    \\    if (el && el.getAttribute) {
-    \\      const parsed = __awr_parse_style_text__(el.getAttribute('style') || '');
-    \\      for (const k in parsed.values) { if (parsed.important[k] || !sheet_imp[k]) computed[k] = parsed.values[k]; }
-    \\    }
-    \\    return new Proxy(computed, { get(target, prop) { if (prop === 'getPropertyValue') return name => target[String(name).toLowerCase()] || ''; const css = String(prop).replace(/[A-Z]/g, m => '-' + m.toLowerCase()).toLowerCase(); return target[css] || ''; } });
+    \\    return new Proxy(Object.create(null), {
+    \\      get(_target, prop) {
+    \\        if (prop === 'getPropertyValue') {
+    \\          return function(name) {
+    \\            const css = String(name).toLowerCase();
+    \\            if (!el || typeof __awr_css_get_computed_property__ !== 'function') {
+    \\              return __awr_ua_default__(el, css);
+    \\            }
+    \\            const handle = el._h || 0;
+    \\            const v = __awr_css_get_computed_property__(handle, css);
+    \\            return v || __awr_ua_default__(el, css);
+    \\          };
+    \\        }
+    \\        const css = String(prop).replace(/[A-Z]/g, m => '-' + m.toLowerCase()).toLowerCase();
+    \\        if (!el || typeof __awr_css_get_computed_property__ !== 'function') {
+    \\          return __awr_ua_default__(el, css);
+    \\        }
+    \\        const handle = el._h || 0;
+    \\        const v = __awr_css_get_computed_property__(handle, css);
+    \\        return v || __awr_ua_default__(el, css);
+    \\      }
+    \\    });
     \\  };
     \\  globalThis.__awr_document_ready_state__ = globalThis.__awr_document_ready_state__ || 'loading';
     \\  globalThis.document  = document;

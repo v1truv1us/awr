@@ -128,7 +128,7 @@ pub const RenderOptions = struct {
     /// Stylesheet bodies loaded for the current document. The renderer uses
     /// these for the starter CSSOM subset so TUI output reflects simple
     /// `display` / `visibility` author CSS without requiring full layout.
-    css_stylesheets: []const []u8 = &.{},
+    css_stylesheets: []const []const u8 = &.{},
     /// T2.6: treat every `<pre>` block as a unified diff. Set when
     /// `Content-Type: text/x-diff` or `text/x-patch` is present.
     /// Auto-detection via `looksLikeDiff` runs regardless.
@@ -767,6 +767,17 @@ fn renderElement(state: *RenderState, w: anytype, elem: *const dom.Element) anye
 
     try state.beginElementBox(elem);
     defer state.endElementBox();
+
+    // CSSOM §4.6.3: honor `white-space: pre|pre-wrap|pre-line` from inline
+    // style or author stylesheet by reusing the existing <pre> preservation
+    // path. The per-element bump matches how `renderPre` toggles `pre_depth`,
+    // so all descendant text nodes flow through the inPre() branch of
+    // `renderTextNode`.
+    const ws_preserve = isCssWhiteSpacePreserved(state, elem);
+    if (ws_preserve) state.pre_depth += 1;
+    defer if (ws_preserve) {
+        state.pre_depth -= 1;
+    };
 
     // Step 10: CSS background-image emit. For content-bearing landmarks
     // (`<header>`, `<section>`, `<figure>`) with inline `style="...
@@ -2286,6 +2297,46 @@ fn isHiddenCssValue(value: []const u8, expected: []const u8) bool {
     return std.ascii.eqlIgnoreCase(std.mem.trim(u8, value, " \t\r\n"), expected);
 }
 
+/// True when the element's resolved `white-space` is `pre`, `pre-wrap`, or
+/// `pre-line` — all three preserve newlines/whitespace. Mirrors the
+/// stylesheet+inline scan in `isCssHidden`. CSSOM §4.6.3 closure gate.
+fn isCssWhiteSpacePreserved(state: *RenderState, elem: *const dom.Element) bool {
+    // Inline style wins over stylesheets per the cascade (specificity 1,0,0,0).
+    if (elem.getAttribute("style")) |style_attr| {
+        var style = css_style.StyleDeclaration.parse(state.allocator, style_attr) catch return false;
+        defer style.deinit();
+        const inline_val = style.getPropertyValue("white-space");
+        if (inline_val.len > 0) return whiteSpacePreservesWhitespace(inline_val);
+    }
+
+    for (state.opts.css_stylesheets) |css| {
+        var sheet = css_parser.parseStylesheet(state.allocator, css) catch continue;
+        defer sheet.deinit();
+        for (sheet.rules.items) |rule| {
+            var selectors = std.mem.splitScalar(u8, rule.selector_text, ',');
+            var matched = false;
+            while (selectors.next()) |sel| {
+                if (elem.matches(sel)) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) continue;
+            const val = rule.declarations.getPropertyValue("white-space");
+            if (val.len > 0) return whiteSpacePreservesWhitespace(val);
+        }
+    }
+
+    return false;
+}
+
+fn whiteSpacePreservesWhitespace(value: []const u8) bool {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    return std.ascii.eqlIgnoreCase(trimmed, "pre") or
+        std.ascii.eqlIgnoreCase(trimmed, "pre-wrap") or
+        std.ascii.eqlIgnoreCase(trimmed, "pre-line");
+}
+
 fn isBlockTag(tag: []const u8) bool {
     inline for (.{
         "div",        "p",        "h1",      "h2",      "h3",         "h4",      "h5",    "h6",
@@ -2803,6 +2854,35 @@ test "render browse profile applies starter CSSOM display and visibility" {
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Hidden by class") == null);
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Hidden by id") == null);
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Hidden inline") == null);
+}
+
+test "render preserves whitespace under CSS white-space: pre / pre-wrap / pre-line" {
+    // Three lines, each with multiple spaces and newlines that the default
+    // wrap-and-collapse path would flatten. CSSOM §4.6.3 keeps them intact.
+    var doc = try dom.parseDocument(std.testing.allocator,
+        "<html><head><style>.pre-class { white-space: pre-wrap; }</style></head>" ++
+        "<body><main>" ++
+        "<div class=\"pre-class\">stylesheet  preserves\nnewline</div>" ++
+        "<div style=\"white-space: pre\">inline  preserves\nnewline</div>" ++
+        "<div>collapsed   single   line</div>" ++
+        "</main></body></html>");
+    defer doc.deinit();
+
+    var model = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = false,
+        .css_stylesheets = &.{".pre-class { white-space: pre-wrap; }"},
+    });
+    defer model.deinit();
+
+    // Author stylesheet path: double-space + newline survive.
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "stylesheet  preserves") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "stylesheet  preserves\nnewline") != null);
+    // Inline style path: same.
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "inline  preserves") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "inline  preserves\nnewline") != null);
+    // Default (no white-space rule): collapsed to single spaces.
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "collapsed single line") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "collapsed   single") == null);
 }
 
 test "render browse profile omits references but keeps interactive links" {

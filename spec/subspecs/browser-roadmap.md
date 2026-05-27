@@ -252,8 +252,12 @@ work end-to-end.
 `spec/subspecs/browser-realtime.md` (WebSocket + EventSource/SSE,
 **CLOSED 2026-05-22 — T3.D.1 SSE + T3.D.2 WebSocket**),
 `spec/subspecs/browser-events.md` (synthetic input events,
-requestAnimationFrame, matchMedia, **CLOSED 2026-05-13**). All four
-sub-specs closed; Tier 3 is fully complete.
+requestAnimationFrame, matchMedia, **CLOSED 2026-05-13**),
+`spec/subspecs/cssom.md` (starter CSSOM — stylesheet loading,
+declaration APIs, cascade, non-layout `getComputedStyle()`,
+renderer integration for `display` / `visibility` / `white-space`,
+**CLOSED 2026-05-27**). All five sub-specs closed; Tier 3 is fully
+complete.
 
 **WPT corpus area**: history, storage, websocket, mutation
 observer, event constructors, timer / animation frame, media query
