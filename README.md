@@ -44,11 +44,21 @@ zig build -Doptimize=ReleaseSafe \
                                         # produces zig-out/bin/awr (~9.9 MB)
 
 ./zig-out/bin/awr --version            # prints 0.0.<git-hash>
+
+# Real-site examples (Chrome 132 TLS fingerprint, H2+gzip/zstd, inline CSS):
+./zig-out/bin/awr https://news.ycombinator.com          # HN front page   ~0.3s
+./zig-out/bin/awr https://en.wikipedia.org/wiki/Octopus # Wikipedia        ~0.4s
+./zig-out/bin/awr https://stackoverflow.com/questions   # Stack Overflow   ~4s
+./zig-out/bin/awr render https://en.wikipedia.org/wiki/Octopus  # TUI text output
+./zig-out/bin/awr extract https://news.ycombinator.com          # Markdown for LLMs
+
+# POST: JSON body
+./zig-out/bin/awr post https://httpbin.org/post --json '{"key":"value"}'
+
+# WebMCP tools (local mock):
 ./zig-out/bin/awr tools experiments/webmcp_mock.html
 ./zig-out/bin/awr call  experiments/webmcp_mock.html \
     search_products '{"q":"Widget"}'
-./zig-out/bin/awr call  experiments/webmcp_mock.html \
-    add_to_cart '{"sku":"w-001","qty":2}'
 
 # MVP operational smoke checks (local fixtures + mock server):
 ./scripts/mvp_smoke.sh
