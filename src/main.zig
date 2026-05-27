@@ -38,6 +38,57 @@ fn appendUrlEncoded(alloc: std.mem.Allocator, buf: *std.ArrayList(u8), s: []cons
     }
 }
 
+/// Load a JSON body for `awr post --json <source>`. Source is one of:
+///   - `-`           → read all of stdin
+///   - `@path`       → read file at `path`
+///   - any other     → treat as inline JSON bytes (duped so caller can free)
+///
+/// Bytes are validated with `std.json.parseFromSlice` before return; on parse
+/// failure the function writes a diagnostic to stdout and exits the process
+/// (mirrors the existing `each field arg must be name=value` error path so
+/// scripted callers see a single failure shape). The returned slice is always
+/// owned by the caller and must be freed with `alloc`.
+fn loadJsonBody(alloc: std.mem.Allocator, io: std.Io, source: []const u8) ![]u8 {
+    var bytes: []u8 = undefined;
+    if (std.mem.eql(u8, source, "-")) {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(alloc);
+        const stdin = std.Io.File.stdin();
+        var chunk: [4096]u8 = undefined;
+        while (true) {
+            const n = std.posix.system.read(stdin.handle, &chunk, chunk.len);
+            if (n <= 0) break;
+            try buf.appendSlice(alloc, chunk[0..@intCast(n)]);
+        }
+        bytes = try alloc.dupe(u8, buf.items);
+    } else if (source.len > 1 and source[0] == '@') {
+        const path = source[1..];
+        bytes = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(16 * 1024 * 1024)) catch |err| {
+            const msg = try std.fmt.allocPrint(alloc, "awr post: --json @{s}: {s}\n", .{ path, @errorName(err) });
+            defer alloc.free(msg);
+            try stdoutWrite(io, msg);
+            std.process.exit(1);
+        };
+    } else {
+        bytes = try alloc.dupe(u8, source);
+    }
+    errdefer alloc.free(bytes);
+
+    // Validate. Parse into a Value tree, then immediately discard — we send
+    // the original bytes verbatim (preserves key order, number precision,
+    // whitespace intent). Catches typos locally instead of letting the server
+    // surface them as 400s.
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, bytes, .{}) catch |err| {
+        const msg = try std.fmt.allocPrint(alloc, "awr post: --json body is not valid JSON: {s}\n", .{@errorName(err)});
+        defer alloc.free(msg);
+        try stdoutWrite(io, msg);
+        std.process.exit(1);
+    };
+    parsed.deinit();
+
+    return bytes;
+}
+
 fn writeJsonStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
     try list.append(alloc, '"');
     for (s) |c| {
@@ -833,6 +884,10 @@ const USAGE =
     \\                                 the page pipeline in-process (warmer connection pool).
     \\  awr post <url> [k=v ...]     POST URL-encoded form fields, follow redirects, absorb cookies
     \\                                 Set $AWR_COOKIE_JAR to persist cookies across invocations
+    \\  awr post <url> --json <body>|@file|-
+    \\                               POST with Content-Type: application/json. <body> is inline JSON,
+    \\                                 @path reads a file, `-` reads stdin. Body is validated locally
+    \\                                 before send. Mutually exclusive with k=v form fields.
     \\  awr submit <url> [--form=SEL] [k=v ...]
     \\                               Load page, find <form>, merge user fields with hidden inputs (CSRF),
     \\                                 POST to the form's action. --form selects by #id (default: first form)
@@ -1323,25 +1378,66 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     // status / url / body_text reflect the post-redirect final response.
     if (std.mem.eql(u8, args[1], "post")) {
         if (args.len < 3) {
-            try stdoutWrite(io, "usage: awr post <url> [field=value ...]\n");
+            try stdoutWrite(io, "usage: awr post <url> [--json <body>|@file|-] [field=value ...]\n");
             std.process.exit(1);
         }
         const url = args[2];
 
-        // Build the URL-encoded body from arg pairs.
+        // Pre-scan args[3..] for --json. Supports both `--json X` and
+        // `--json=X` forms; X is `-` (stdin), `@path` (file), or inline JSON.
+        // Mutually exclusive with positional k=v pairs.
+        var json_source: ?[]const u8 = null;
+        var has_positional = false;
+        {
+            var i: usize = 3;
+            while (i < args.len) : (i += 1) {
+                const a = args[i];
+                if (std.mem.eql(u8, a, "--json")) {
+                    if (i + 1 >= args.len) {
+                        try stdoutWrite(io, "awr post: --json requires a value (inline JSON, @file, or -)\n");
+                        std.process.exit(1);
+                    }
+                    json_source = args[i + 1];
+                    i += 1;
+                } else if (std.mem.startsWith(u8, a, "--json=")) {
+                    json_source = a["--json=".len..];
+                } else {
+                    has_positional = true;
+                }
+            }
+        }
+        if (json_source != null and has_positional) {
+            try stdoutWrite(io, "awr post: --json is mutually exclusive with `name=value` fields\n");
+            std.process.exit(1);
+        }
+
+        // Build the body: JSON path loads/validates via loadJsonBody; form
+        // path URL-encodes each `name=value` arg.
         var body: std.ArrayList(u8) = .empty;
         defer body.deinit(alloc);
-        var first = true;
-        for (args[3..]) |pair| {
-            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse {
-                try stdoutWrite(io, "awr post: each field arg must be `name=value`\n");
-                std.process.exit(1);
-            };
-            if (!first) try body.append(alloc, '&');
-            first = false;
-            try appendUrlEncoded(alloc, &body, pair[0..eq]);
-            try body.append(alloc, '=');
-            try appendUrlEncoded(alloc, &body, pair[eq + 1 ..]);
+        var owned_json: ?[]u8 = null;
+        defer if (owned_json) |b| alloc.free(b);
+        var body_bytes: []const u8 = "";
+        var content_type: ?[]const u8 = null;
+
+        if (json_source) |src| {
+            owned_json = try loadJsonBody(alloc, io, src);
+            body_bytes = owned_json.?;
+            content_type = "application/json";
+        } else {
+            var first = true;
+            for (args[3..]) |pair| {
+                const eq = std.mem.indexOfScalar(u8, pair, '=') orelse {
+                    try stdoutWrite(io, "awr post: each field arg must be `name=value`\n");
+                    std.process.exit(1);
+                };
+                if (!first) try body.append(alloc, '&');
+                first = false;
+                try appendUrlEncoded(alloc, &body, pair[0..eq]);
+                try body.append(alloc, '=');
+                try appendUrlEncoded(alloc, &body, pair[eq + 1 ..]);
+            }
+            body_bytes = body.items;
         }
 
         var metrics = telemetry.SessionMetrics.init();
@@ -1352,7 +1448,10 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         defer p.deinit();
         p.metrics_sink = &metrics;
 
-        var result = p.navigatePost(url, body.items) catch |err| {
+        var result = (if (content_type) |ct|
+            p.navigatePostWithContentType(url, body_bytes, ct)
+        else
+            p.navigatePost(url, body_bytes)) catch |err| {
             fatalLoadErrorWithMetrics(&metrics, alloc, io, "posting", url, err);
         };
         defer result.deinit();

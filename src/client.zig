@@ -159,12 +159,14 @@ pub const Method = enum { GET, POST };
 
 /// Request descriptor used by `Client.fetchRequest`. `body` must be null for
 /// GET; for POST the bytes are sent verbatim with `Content-Type:
-/// application/x-www-form-urlencoded` (the only POST content type in MVP per
-/// `spec/subspecs/agent-browser.md §2`).
+/// application/x-www-form-urlencoded` by default. `content_type` overrides
+/// that for non-form payloads (e.g. `application/json` from `awr post --json`
+/// per `spec/subspecs/agent-browser.md §2`).
 pub const Request = struct {
     url: []const u8,
     method: Method = .GET,
     body: ?[]const u8 = null,
+    content_type: ?[]const u8 = null,
 };
 
 // ── Options ───────────────────────────────────────────────────────────────
@@ -515,10 +517,11 @@ pub const Client = struct {
         // we drop the reference. We never free the caller's slice.
         var current_method = req.method;
         var current_body = req.body;
+        var current_content_type = req.content_type;
 
         var redirects: u8 = 0;
         while (true) {
-            var resp = try self.fetchOnce(current_url, current_method, current_body);
+            var resp = try self.fetchOnce(current_url, current_method, current_body, current_content_type);
 
             // Absorb any Set-Cookie headers into the jar BEFORE deciding
             // about redirects. Auth flows commonly issue
@@ -544,6 +547,7 @@ pub const Client = struct {
                 301, 302, 303 => if (current_method == .POST) {
                     current_method = .GET;
                     current_body = null;
+                    current_content_type = null;
                 },
                 else => {},
             }
@@ -554,7 +558,7 @@ pub const Client = struct {
         }
     }
 
-    fn fetchOnce(self: *Client, url_str: []const u8, method: Method, body: ?[]const u8) anyerror!Response {
+    fn fetchOnce(self: *Client, url_str: []const u8, method: Method, body: ?[]const u8, content_type: ?[]const u8) anyerror!Response {
         // Skip the std attempt for hosts where its TLS stack has already
         // failed once, or when force_boringssl is set (prefetch workers use
         // this to ensure TLS reads go through awr_tls_conn_read which
@@ -562,14 +566,14 @@ pub const Client = struct {
         // no deadline mechanism).
         if (self.options.force_boringssl or self.shouldSkipStdForUrl(url_str)) {
             if (boringsslFallbackAllowed(url_str)) {
-                return self.fetchOnceBoringSslHttp1(url_str, method, body) catch |e| return mapFetchError(e);
+                return self.fetchOnceBoringSslHttp1(url_str, method, body, content_type) catch |e| return mapFetchError(e);
             }
         }
 
         const timing_on = std.c.getenv("AWR_TIMING") != null;
         const std_start_ms = if (timing_on) nowMsForTiming() else 0;
 
-        return self.fetchOnceStd(url_str, method, body) catch |err| switch (err) {
+        return self.fetchOnceStd(url_str, method, body, content_type) catch |err| switch (err) {
             FetchError.TlsNotAvailable => {
                 if (timing_on) {
                     const elapsed = nowMsForTiming() - std_start_ms;
@@ -577,7 +581,7 @@ pub const Client = struct {
                 }
                 self.rememberStdTlsFailure(url_str);
                 return if (boringsslFallbackAllowed(url_str))
-                    self.fetchOnceBoringSslHttp1(url_str, method, body) catch |fallback_err| return mapFetchError(fallback_err)
+                    self.fetchOnceBoringSslHttp1(url_str, method, body, content_type) catch |fallback_err| return mapFetchError(fallback_err)
                 else
                     err;
             },
@@ -614,7 +618,7 @@ pub const Client = struct {
         };
     }
 
-    fn fetchOnceStd(self: *Client, url_str: []const u8, method: Method, body: ?[]const u8) anyerror!Response {
+    fn fetchOnceStd(self: *Client, url_str: []const u8, method: Method, body: ?[]const u8, content_type: ?[]const u8) anyerror!Response {
         // Validate via our own URL parser so bad inputs surface as InvalidUrl
         // before std.http.Client parses and returns its own error.
         const uri = std.Uri.parse(url_str) catch return FetchError.InvalidUrl;
@@ -680,8 +684,12 @@ pub const Client = struct {
 
         // For POST, Content-Type is required by most servers and Content-Length
         // is set automatically by std.http.Client when we use sendBodyComplete.
+        // Default is `application/x-www-form-urlencoded` (forms / URLSearchParams);
+        // `awr post --json` overrides via `req.content_type` per
+        // `spec/subspecs/agent-browser.md §2`.
         if (method == .POST) {
-            extra_headers[extra_header_count] = .{ .name = "content-type", .value = "application/x-www-form-urlencoded" };
+            const ct_value = content_type orelse "application/x-www-form-urlencoded";
+            extra_headers[extra_header_count] = .{ .name = "content-type", .value = ct_value };
             extra_header_count += 1;
         }
 
@@ -856,7 +864,7 @@ pub const Client = struct {
         };
     }
 
-    fn fetchOnceBoringSslHttp1(self: *Client, url_str: []const u8, method: Method, body: ?[]const u8) anyerror!Response {
+    fn fetchOnceBoringSslHttp1(self: *Client, url_str: []const u8, method: Method, body: ?[]const u8, content_type: ?[]const u8) anyerror!Response {
         if (!boringssl_fallback) return FetchError.TlsNotAvailable;
 
         const u = url_mod.Url.parse(url_str) catch return FetchError.InvalidUrl;
@@ -875,7 +883,7 @@ pub const Client = struct {
             if (method != .GET and entry.protocol == .http_2) {
                 self.boringssl_pool.discard(self.allocator, entry);
             } else {
-                if (self.sendOnBoringSslEntryDispatch(entry, &u, url_str, method, body)) |resp| {
+                if (self.sendOnBoringSslEntryDispatch(entry, &u, url_str, method, body, content_type)) |resp| {
                     self.maybeReleaseBoringSsl(entry, &resp);
                     return resp;
                 } else |_| {
@@ -890,7 +898,7 @@ pub const Client = struct {
         const entry = try self.createBoringSslEntry(&u, method);
         errdefer self.boringssl_pool.discard(self.allocator, entry);
 
-        const resp = try self.sendOnBoringSslEntryDispatch(entry, &u, url_str, method, body);
+        const resp = try self.sendOnBoringSslEntryDispatch(entry, &u, url_str, method, body, content_type);
         self.maybeReleaseBoringSsl(entry, &resp);
         return resp;
     }
@@ -907,9 +915,10 @@ pub const Client = struct {
         url_str: []const u8,
         method: Method,
         body: ?[]const u8,
+        content_type: ?[]const u8,
     ) anyerror!Response {
         return switch (entry.protocol) {
-            .http_1_1 => self.sendOnBoringSslEntry(entry, u, url_str, method, body),
+            .http_1_1 => self.sendOnBoringSslEntry(entry, u, url_str, method, body, content_type),
             .http_2 => self.sendOnBoringSslEntryH2(entry, u, url_str),
             // `.std_lib` belongs to the std.http path and never reaches
             // a BoringSSL pool entry. Entries are always tagged
@@ -1035,6 +1044,7 @@ pub const Client = struct {
         url_str: []const u8,
         method: Method,
         body: ?[]const u8,
+        content_type: ?[]const u8,
     ) anyerror!Response {
         if (!boringssl_fallback) return FetchError.TlsNotAvailable;
 
@@ -1062,6 +1072,7 @@ pub const Client = struct {
             path,
             cookie_header,
             if (method == .POST) body orelse "" else null,
+            content_type,
         );
         try writeAllTls(&entry.tls, req_buf.written());
 
@@ -1216,6 +1227,7 @@ fn writeChrome132Http1Request(
     path: []const u8,
     cookie_header: []const u8,
     post_body: ?[]const u8,
+    content_type: ?[]const u8,
 ) !void {
     var req = http1.Request{ .method = method, .path = path, .host = host_header };
     defer req.headers.deinit(self.allocator);
@@ -1237,7 +1249,8 @@ fn writeChrome132Http1Request(
     if (post_body) |body_bytes| {
         var cl_buf: [32]u8 = undefined;
         const cl = try std.fmt.bufPrint(&cl_buf, "{d}", .{body_bytes.len});
-        try req.headers.append(self.allocator, "content-type", "application/x-www-form-urlencoded");
+        const ct_value = content_type orelse "application/x-www-form-urlencoded";
+        try req.headers.append(self.allocator, "content-type", ct_value);
         try req.headers.append(self.allocator, "content-length", cl);
     }
 

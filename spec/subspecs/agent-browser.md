@@ -33,6 +33,13 @@ The agent-browser surface ships:
   `application/x-www-form-urlencoded` body.
 - `XMLHttpRequest` accepting `xhr.open("POST", url)` and `xhr.send(body)`
   where `body` is a string or `URLSearchParams`. Async-only.
+- `awr post <url> --json <body>|@file|-` CLI surface for non-form payloads:
+  inline JSON, `@path` file, or `-` stdin. Body validated locally with
+  `std.json.parseFromSlice` then sent verbatim with
+  `Content-Type: application/json`. Mutually exclusive with positional
+  `name=value` form fields. Backed by `Client.Request.content_type` override
+  threaded through `fetchOnce` / `fetchOnceStd` /
+  `fetchOnceBoringSslHttp1` / `writeChrome132Http1Request`.
 - `<form method="post" action="...">` submitted through `awr browse`:
   - method extracted from the parent `<form>` element on render;
   - action resolved against the current page URL;
@@ -69,7 +76,11 @@ deferred or rejected:
 - `multipart/form-data` POST bodies.
 - Streamed request bodies (`ReadableStream`, chunked uploads).
 - `xhr.setRequestHeader()` and arbitrary custom request headers from JS;
-  the polyfill continues to throw on these.
+  the polyfill continues to throw on these. Note: JS-side
+  `fetch(url, {body: '{"x":1}'})` still tags the request as
+  `application/x-www-form-urlencoded` because exposing `init.headers` is
+  rejected per this rule. The `application/json` content-type is reachable
+  only via the CLI `awr post --json` surface, not from page JS.
 - `IntersectionObserver` / `ResizeObserver` (per `spec/MVP.md §5.6`).
 - Full browser-history traversal beyond `pushState` / `replaceState`
   (per `spec/MVP.md §5.5`).
@@ -99,6 +110,7 @@ Required cases:
 | XHR POST with string body | `tests/wpt/xhr_post_basic.js` | Replaces the prior `xhr_rejects_unsupported.js` |
 | XHR POST with `URLSearchParams` body | `tests/wpt/xhr_post_form_encoded.js` | New |
 | `<form method="post">` parse + submit | `tests/wpt/form_method_post.js` | DOM-level: parsed `form.method === "POST"` |
+| `awr post --json` end-to-end wire test | inline test in `src/page.zig` (`Page.navigatePostWithContentType — sends JSON body with application/json`) | In-process `std.http.Server` captures method, target, content-type, and exact body bytes. Verbatim transport asserted with deliberate non-canonical whitespace and key order. |
 | Cookie jar serialize/deserialize | inline tests in `src/net/cookie.zig` | Zig-side round-trip + expiry-drop + RFC 6265 §5.1.1 Expires-date parser + malformed-row tolerance + HttpOnly_ prefix tests. |
 | `document.cookie` getter/setter | `tests/wpt/document_cookie.js` | Wired to the page's cookie jar via `engine.CookieHost`. Setter parses a single cookie-pair (with optional attributes) into the jar against the page's current origin; getter returns the request-side `Cookie:` header value. |
 

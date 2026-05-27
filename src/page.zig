@@ -922,6 +922,26 @@ pub const Page = struct {
         return self.processHtml(resp.url, resp.status, resp.body);
     }
 
+    /// POST `body` to `url` with a caller-supplied `Content-Type` (e.g.
+    /// `application/json` for `awr post --json`), then run the response
+    /// through the same parse/render pipeline as `navigate`. Caller must
+    /// call result.deinit(). See `spec/subspecs/agent-browser.md §2`.
+    pub fn navigatePostWithContentType(
+        self: *Page,
+        url: []const u8,
+        body: []const u8,
+        content_type: []const u8,
+    ) !PageResult {
+        var resp = try self.client.fetchRequest(.{
+            .url = url,
+            .method = .POST,
+            .body = body,
+            .content_type = content_type,
+        });
+        defer resp.deinit();
+        return self.processHtml(resp.url, resp.status, resp.body);
+    }
+
     /// Form metadata captured by walking the DOM ancestry of an input field.
     /// `action` is borrowed from the DOM and lives only as long as the page's
     /// current document; copy if you need a longer lifetime.
@@ -2909,6 +2929,39 @@ test "<form method=post> end-to-end submits hidden + edited fields to wire" {
     const got_body = capture.bodySlice();
     // Order is fields[] order: csrf first, user second.
     try std.testing.expectEqualStrings("csrf=tok123&user=alice", got_body);
+}
+
+// JSON-body POST integration test. Backs `awr post --json`. Proves the
+// content_type override threads from Request → fetchOnceStd → wire, so the
+// server sees `Content-Type: application/json` and the exact bytes we sent
+// (whitespace, key order, number form all preserved verbatim).
+test "Page.navigatePostWithContentType — sends JSON body with application/json" {
+    const port: u16 = 18490;
+    const allocator = std.testing.allocator;
+
+    var capture = FormPostCapture{};
+    var server: FormPostServer = undefined;
+    try server.start(&capture, port);
+    defer server.shutdown();
+
+    var page = try Page.init(allocator, std.testing.io);
+    defer page.deinit();
+
+    const target_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/api/users", .{port});
+    defer allocator.free(target_url);
+
+    // Deliberate non-canonical whitespace + key order; verbatim transport
+    // means the wire bytes match exactly.
+    const json_body = "{ \"name\":\"alice\",  \"role\": \"admin\" }";
+
+    var post_result = try page.navigatePostWithContentType(target_url, json_body, "application/json");
+    defer post_result.deinit();
+    try std.testing.expectEqual(@as(u16, 200), post_result.status);
+
+    try std.testing.expectEqualStrings("POST", capture.methodSlice());
+    try std.testing.expectEqualStrings("/api/users", capture.targetSlice());
+    try std.testing.expectEqualStrings("application/json", capture.contentTypeSlice());
+    try std.testing.expectEqualStrings(json_body, capture.bodySlice());
 }
 
 /// URL-encode `s` per `application/x-www-form-urlencoded` and append into
