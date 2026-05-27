@@ -2155,25 +2155,28 @@ fn extractBodyTextCssAware(
     body: *const dom.Element,
     css_sheets: []const []const u8,
 ) ![]u8 {
+    _ = css_sheets; // Author stylesheet matching is O(elements × rules) and too slow
+    // for real pages (Wikipedia has 14 sheets with thousands of rules each).
+    // Inline `style="display:none"` is the primary SPA hide mechanism and
+    // sufficient for the agent-surface body_text extraction goal.
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
-    extractTextRecursive(allocator, body, css_sheets, &buf);
+    extractTextRecursive(body, &buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
 
 fn extractTextRecursive(
-    allocator: std.mem.Allocator,
     elem: *const dom.Element,
-    css_sheets: []const []const u8,
     buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
 ) void {
     for (elem.children.items) |child| {
         switch (child) {
             .text => |t| buf.appendSlice(allocator, t.data) catch {},
             .element => |e| {
                 if (isOpaqueExtractTag(e.tag)) continue;
-                if (isElementCssHiddenForExtract(allocator, e, css_sheets)) continue;
-                extractTextRecursive(allocator, e, css_sheets, buf);
+                if (inlineStyleIsHidden(e.getAttribute("style") orelse "")) continue;
+                extractTextRecursive(e, buf, allocator);
             },
             else => {},
         }
@@ -2187,35 +2190,18 @@ fn isOpaqueExtractTag(tag: []const u8) bool {
         std.ascii.eqlIgnoreCase(tag, "template");
 }
 
-fn isElementCssHiddenForExtract(
-    allocator: std.mem.Allocator,
-    elem: *const dom.Element,
-    css_sheets: []const []const u8,
-) bool {
-    // Inline style first — wins per cascade.
-    if (elem.getAttribute("style")) |style_attr| {
-        var style = css_style.StyleDeclaration.parse(allocator, style_attr) catch return false;
-        defer style.deinit();
-        if (isHiddenValue(style.getPropertyValue("display"), "none")) return true;
-        if (isHiddenValue(style.getPropertyValue("visibility"), "hidden")) return true;
-    }
-    // Author stylesheets.
-    for (css_sheets) |css| {
-        var sheet = css_parser.parseStylesheet(allocator, css) catch continue;
-        defer sheet.deinit();
-        for (sheet.rules.items) |rule| {
-            var selectors = std.mem.splitScalar(u8, rule.selector_text, ',');
-            var matched = false;
-            while (selectors.next()) |sel| {
-                if (elem.matches(sel)) {
-                    matched = true;
-                    break;
-                }
-            }
-            if (!matched) continue;
-            if (isHiddenValue(rule.declarations.getPropertyValue("display"), "none")) return true;
-            if (isHiddenValue(rule.declarations.getPropertyValue("visibility"), "hidden")) return true;
-        }
+/// Zero-alloc inline-style visibility check: splits on ';' and ':' in-place.
+fn inlineStyleIsHidden(style_attr: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, style_attr, ';');
+    while (parts.next()) |raw| {
+        const part = std.mem.trim(u8, raw, " \t\r\n");
+        const colon = std.mem.indexOfScalar(u8, part, ':') orelse continue;
+        const name = std.mem.trim(u8, part[0..colon], " \t\r\n");
+        const value = std.mem.trim(u8, part[colon + 1 ..], " \t\r\n");
+        if (std.ascii.eqlIgnoreCase(name, "display") and
+            std.ascii.eqlIgnoreCase(value, "none")) return true;
+        if (std.ascii.eqlIgnoreCase(name, "visibility") and
+            std.ascii.eqlIgnoreCase(value, "hidden")) return true;
     }
     return false;
 }
@@ -2297,7 +2283,11 @@ test "Page.processHtml — body_text excludes <style> and <script> source" {
     );
 }
 
-test "Page.processHtml — body_text drops CSS-hidden elements (CSSOM §4.6)" {
+test "Page.processHtml — body_text drops inline CSS-hidden elements (CSSOM §4.6)" {
+    // Extraction applies inline style hiding only. Author stylesheet selector
+    // matching (class/ID-based hiding) is skipped for performance: real pages
+    // have thousands of CSS rules and O(elements × rules) selector matches
+    // would make extraction take seconds on sites like Wikipedia.
     var page = try Page.init(std.testing.allocator, std.testing.io);
     defer page.deinit();
     var result = try page.processHtml(
@@ -2305,19 +2295,14 @@ test "Page.processHtml — body_text drops CSS-hidden elements (CSSOM §4.6)" {
         200,
         "<html><head><style>" ++
             ".hide-by-class { display: none; }" ++
-            "#hide-by-id { visibility: hidden; }" ++
             "</style></head><body>" ++
             "<p>visible-prose</p>" ++
-            "<p class=\"hide-by-class\">CLASS-HIDDEN-LEAK</p>" ++
-            "<p id=\"hide-by-id\">ID-HIDDEN-LEAK</p>" ++
             "<p style=\"display: none\">INLINE-HIDDEN-LEAK</p>" ++
             "<p style=\"visibility: hidden\">INLINE-VISIBILITY-LEAK</p>" ++
             "</body></html>",
     );
     defer result.deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.body_text, "visible-prose") != null);
-    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, result.body_text, "CLASS-HIDDEN-LEAK"));
-    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, result.body_text, "ID-HIDDEN-LEAK"));
     try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, result.body_text, "INLINE-HIDDEN-LEAK"));
     try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, result.body_text, "INLINE-VISIBILITY-LEAK"));
 }

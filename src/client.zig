@@ -559,17 +559,36 @@ pub const Client = struct {
     }
 
     fn fetchOnce(self: *Client, url_str: []const u8, method: Method, body: ?[]const u8, content_type: ?[]const u8) anyerror!Response {
-        // Skip the std attempt for hosts where its TLS stack has already
-        // failed once, or when force_boringssl is set (prefetch workers use
-        // this to ensure TLS reads go through awr_tls_conn_read which
-        // supports total-fetch deadlines — the stdlib TLS body reader has
-        // no deadline mechanism).
-        if (self.options.force_boringssl or self.shouldSkipStdForUrl(url_str)) {
-            if (boringsslFallbackAllowed(url_str)) {
-                return self.fetchOnceBoringSslHttp1(url_str, method, body, content_type) catch |e| return mapFetchError(e);
-            }
+        // Path selection: BoringSSL is the primary path when available.
+        // Reasons it wins by default:
+        //   1. It enforces the Chrome 132 JA4 fingerprint, which is the
+        //      product's core differentiator vs curl/wget.
+        //   2. It honors `awr_tls_conn_read`'s total-fetch deadline —
+        //      `std.http.Client` has no per-request timeout and can hang
+        //      indefinitely on edge negotiation (Cloudflare H2 with
+        //      audiofile.app is the documented case).
+        //   3. It's the path the H2 shim and connection pool feed; the
+        //      std.http path duplicates a lot of work AWR also does.
+        //
+        // std.http is the fallback for non-HTTPS URLs (where BoringSSL
+        // isn't applicable) and for platforms where boringssl_fallback
+        // was compiled out (non-macOS-arm64 today).
+        //
+        // `AWR_USE_STDLIB_TLS=1` reverses this for diagnosis — useful when
+        // a BoringSSL change is suspected to break a specific site.
+        const prefer_std = std.c.getenv("AWR_USE_STDLIB_TLS") != null;
+        if (!prefer_std and boringsslFallbackAllowed(url_str)) {
+            return self.fetchOnceBoringSslHttp1(url_str, method, body, content_type) catch |bssl_err| switch (bssl_err) {
+                // BoringSSL refused this URL outright (non-https, etc.) —
+                // fall through to std.http.
+                FetchError.TlsNotAvailable, FetchError.InvalidUrl => return self.fetchOnceStd(url_str, method, body, content_type) catch |std_err| return mapFetchError(std_err),
+                else => return mapFetchError(bssl_err),
+            };
         }
 
+        // BoringSSL unavailable for this URL (non-https) or user forced
+        // stdlib. Honor the legacy std-tls-fail-cache + retry-on-BoringSSL
+        // path so existing behavior is preserved for those cases.
         const timing_on = std.c.getenv("AWR_TIMING") != null;
         const std_start_ms = if (timing_on) nowMsForTiming() else 0;
 
@@ -1167,8 +1186,25 @@ pub const Client = struct {
         const effective_url = try self.allocator.dupe(u8, url_str);
         errdefer self.allocator.free(effective_url);
 
+        // Detect Content-Encoding so we can decode gzip/deflate/zstd before
+        // returning the body. Without this, Cloudflare/nginx HTTPS responses
+        // (almost the entire H2-shaped web) come back as raw compressed
+        // bytes — HN, audiofile.app, etc. Mirrors fetchOnceStd's
+        // result.head.content_encoding handling.
+        var content_encoding: std.http.ContentEncoding = .identity;
+        {
+            var enc_it = h2_resp.headerIterator();
+            while (enc_it.next()) |pair| {
+                if (std.ascii.eqlIgnoreCase(pair.name, "content-encoding")) {
+                    const trimmed = std.mem.trim(u8, pair.value, " \t");
+                    if (std.http.ContentEncoding.fromString(trimmed)) |enc| content_encoding = enc;
+                    break;
+                }
+            }
+        }
+
         const body_dup = if (h2_resp.body.len > 0)
-            try self.allocator.dupe(u8, h2_resp.body)
+            try decompressBody(self.allocator, content_encoding, h2_resp.body)
         else
             try self.allocator.alloc(u8, 0);
         errdefer self.allocator.free(body_dup);
@@ -1216,6 +1252,57 @@ pub const Client = struct {
         }
     }
 };
+
+/// Decompress an HTTP response body in memory per `Content-Encoding`. Used by
+/// the H2 BoringSSL path (`sendOnBoringSslEntryH2`), which receives the full
+/// body buffer from the nghttp2 shim rather than a streaming reader. Mirrors
+/// the encoding set the std.http path supports (gzip, deflate, zstd) and
+/// matches Chrome 132's `accept-encoding` header — brotli is deliberately
+/// rejected per the comment at `fetchOnceStd` line ~735.
+///
+/// Returns an owned slice the caller must free with `allocator`. For
+/// `.identity` (or empty input), this is a simple dupe of the input bytes.
+fn decompressBody(
+    allocator: std.mem.Allocator,
+    encoding: std.http.ContentEncoding,
+    compressed: []const u8,
+) ![]u8 {
+    if (compressed.len == 0) return try allocator.alloc(u8, 0);
+    return switch (encoding) {
+        .identity => try allocator.dupe(u8, compressed),
+        .gzip => try inflateFlateBody(allocator, compressed, .gzip),
+        .deflate => try inflateFlateBody(allocator, compressed, .zlib),
+        .zstd => try inflateZstdBody(allocator, compressed),
+        .compress => return error.UnsupportedCompressionMethod,
+    };
+}
+
+fn inflateFlateBody(
+    allocator: std.mem.Allocator,
+    compressed: []const u8,
+    container: std.compress.flate.Container,
+) ![]u8 {
+    var input_reader = std.Io.Reader.fixed(compressed);
+    const window_buf = try allocator.alloc(u8, std.compress.flate.max_window_len);
+    defer allocator.free(window_buf);
+    var decompress = std.compress.flate.Decompress.init(&input_reader, container, window_buf);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    _ = try decompress.reader.streamRemaining(&out.writer);
+    return try out.toOwnedSlice();
+}
+
+fn inflateZstdBody(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
+    var input_reader = std.Io.Reader.fixed(compressed);
+    const window_len: u32 = std.compress.zstd.default_window_len;
+    const window_buf = try allocator.alloc(u8, window_len + std.compress.zstd.block_size_max);
+    defer allocator.free(window_buf);
+    var decompress = std.compress.zstd.Decompress.init(&input_reader, window_buf, .{ .window_len = window_len });
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    _ = try decompress.reader.streamRemaining(&out.writer);
+    return try out.toOwnedSlice();
+}
 
 /// Serialize an HTTP/1.1 request on the BoringSSL path using the same
 /// Chrome 132 header set as `http1.Request.setChrome132Defaults`.
