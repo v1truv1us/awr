@@ -2220,17 +2220,9 @@ test "integration: production BoringSSL fetch path sends awr_ja4_h2 fingerprint"
 test "decompressBody: gzip round-trip" {
     const alloc = std.testing.allocator;
     const plain = "Hello, AWR! This is a gzip-encoded HTTP response body.";
-
-    // Compress with gzip.
-    var compressed: std.Io.Writer.Allocating = .init(alloc);
-    defer compressed.deinit();
-    var compressor = try std.compress.flate.compress(&compressed.writer, .gzip, .{});
-    _ = try compressor.writer.writeAll(plain);
-    try compressor.flush(.finish);
-    const compressed_bytes = compressed.written();
-
-    // Decompress via decompressBody and verify round-trip.
-    const got = try decompressBody(alloc, .gzip, compressed_bytes);
+    // Pre-compressed with: echo -n "Hello..." | gzip -c | xxd -p
+    const compressed = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\xf3\x48\xcd\xc9\xc9\xd7\x51\x70\x0c\x0f\x52\x54\x08\xc9\xc8\x2c\x56\x00\xa2\x44\x85\xf4\xaa\xcc\x02\xdd\xd4\xbc\xe4\xfc\x94\xd4\x14\x05\x8f\x90\x90\x00\x85\xa2\xd4\xe2\x82\xfc\xbc\xe2\x54\x85\xa4\xfc\x94\x4a\x3d\x00\x1d\x7e\x77\x93\x36\x00\x00\x00";
+    const got = try decompressBody(alloc, .gzip, compressed);
     defer alloc.free(got);
     try std.testing.expectEqualStrings(plain, got);
 }
@@ -2238,15 +2230,9 @@ test "decompressBody: gzip round-trip" {
 test "decompressBody: deflate round-trip" {
     const alloc = std.testing.allocator;
     const plain = "Hello, AWR! This is a deflate-encoded HTTP response body.";
-
-    var compressed: std.Io.Writer.Allocating = .init(alloc);
-    defer compressed.deinit();
-    var compressor = try std.compress.flate.compress(&compressed.writer, .zlib, .{});
-    _ = try compressor.writer.writeAll(plain);
-    try compressor.flush(.finish);
-    const compressed_bytes = compressed.written();
-
-    const got = try decompressBody(alloc, .deflate, compressed_bytes);
+    // Pre-compressed with: echo -n "Hello..." | python3 -c "import zlib,sys; sys.stdout.buffer.write(zlib.compress(sys.stdin.buffer.read()))" | xxd -p
+    const compressed = "\x78\x9c\xf3\x48\xcd\xc9\xc9\xd7\x51\x70\x0c\x0f\x52\x54\x08\xc9\xc8\x2c\x56\x00\xa2\x44\x85\x94\xd4\xb4\x9c\xc4\x92\x54\xdd\xd4\xbc\xe4\xfc\x94\xd4\x14\x05\x8f\x90\x90\x00\x85\xa2\xd4\xe2\x82\xfc\xbc\xe2\x54\x85\xa4\xfc\x94\x4a\x3d\x00\x1e\xf7\x13\x60";
+    const got = try decompressBody(alloc, .deflate, compressed);
     defer alloc.free(got);
     try std.testing.expectEqualStrings(plain, got);
 }
@@ -2254,15 +2240,9 @@ test "decompressBody: deflate round-trip" {
 test "decompressBody: zstd round-trip" {
     const alloc = std.testing.allocator;
     const plain = "Hello, AWR! This is a zstd-encoded HTTP response body.";
-
-    var compressed: std.Io.Writer.Allocating = .init(alloc);
-    defer compressed.deinit();
-    var enc = try std.compress.zstd.compressStream(&compressed.writer, .{});
-    _ = try enc.writer.writeAll(plain);
-    try enc.finish();
-    const compressed_bytes = compressed.written();
-
-    const got = try decompressBody(alloc, .zstd, compressed_bytes);
+    // Pre-compressed with: echo -n "Hello..." | zstd -q -c | xxd -p
+    const compressed = "\x28\xb5\x2f\xfd\x04\x58\xb1\x01\x00\x48\x65\x6c\x6c\x6f\x2c\x20\x41\x57\x52\x21\x20\x54\x68\x69\x73\x20\x69\x73\x20\x61\x20\x7a\x73\x74\x64\x2d\x65\x6e\x63\x6f\x64\x65\x64\x20\x48\x54\x54\x50\x20\x72\x65\x73\x70\x6f\x6e\x73\x65\x20\x62\x6f\x64\x79\x2e\xb1\xc2\xbe\xa7";
+    const got = try decompressBody(alloc, .zstd, compressed);
     defer alloc.free(got);
     try std.testing.expectEqualStrings(plain, got);
 }
