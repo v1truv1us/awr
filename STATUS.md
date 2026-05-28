@@ -100,8 +100,18 @@
 
 ### Decompression regression tests — LANDED 2026-05-28
 - 5 unit tests in `src/client.zig` cover gzip, deflate, zstd, identity, and empty-body
-- Tests use in-process compress→decompress round-trips (no network required)
-- Run via `zig build test-net`
+- Tests use pre-compressed byte literals (no compress-side dependency on Zig stdlib)
+- Run via `zig build test-client`
+
+### BoringSSL H1 decompression — LANDED 2026-05-28
+- `sendOnBoringSslEntry` (BoringSSL HTTP/1.1 path) now decodes `Content-Encoding: gzip/deflate/zstd`
+- Previously only the H2 and stdlib paths decompressed; BoringSSL H1 POST responses were raw
+- Fixes `awr post --json` against Supabase and other gzip-default HTTPS APIs
+
+### audiofile.app e2e — VERIFIED 2026-05-28
+- Full flow verified: homepage → sign-in (Supabase JWT) → search → add to wishlist → re-fetch and verify
+- `docs/audiofile-e2e.sh` requires `AUDIOFILE_EMAIL` + `AUDIOFILE_PASSWORD` for a confirmed account
+- `$AWR_COOKIE_JAR` persists regular cookies; JWT auth uses `--header "Authorization: Bearer <token>"`
 
 ---
 
