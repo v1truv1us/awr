@@ -9,9 +9,24 @@ The current MVP is **not Chrome in a terminal**. It is a WPT-gated browser/runti
 Shipped surfaces:
 
 - Human TUI: `awr tui` / `awr browse` for reading pages, following links, filling forms, history, URL bar, cookie inspection, and browser-cookie import.
-- Agent CLI: `awr <url>`, `awr render`, `awr extract`, `awr submit`, `awr tools`, and `awr call`.
+- Agent CLI: `awr <url>`, `awr render`, `awr extract`, `awr submit`, `awr tools`, and `awr call`. All fetch commands accept `--header "Name: Value"` for custom request headers (Bearer tokens, API keys, etc.).
 - Shared session/runtime: real HTTP(S), cookies, HTML parsing, DOM, JavaScript execution, forms, history, storage, events, SSE, WebSocket, terminal rendering, images, and a long-lived daemon mode.
 - Starter CSSOM: loads `<style>` and `<link rel="stylesheet">`, exposes inline `element.style`, and supports simple non-layout `getComputedStyle()` values such as `display` and `visibility`.
+
+## Real-site verification (as of 2026-05-27)
+
+AWR handles the following publicly accessible sites under 30 seconds:
+
+| Site | Time | Notes |
+|------|------|-------|
+| Hacker News | ~1.2s | Full front page, all 30 stories |
+| Wikipedia | ~0.9s | Full article text |
+| GitHub | ~2.3s | Repo page with all metadata |
+| Stack Overflow | ~4s | Questions listing |
+| old.reddit.com | ~1.8s | Reddit via the non-JS path |
+| audiofile.app | ~0.9s | SPA shell; authenticated API flow via `docs/audiofile-e2e.sh` |
+
+Reddit's www.reddit.com is blocked by Cloudflare's JS challenge; `old.reddit.com` returns real content. Chrome 132 JA4 fingerprint (`awr_ja4_h2`) is unchanged.
 
 ## What the MVP deliberately is not
 

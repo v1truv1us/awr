@@ -46,14 +46,27 @@ zig build -Doptimize=ReleaseSafe \
 ./zig-out/bin/awr --version            # prints 0.0.<git-hash>
 
 # Real-site examples (Chrome 132 TLS fingerprint, H2+gzip/zstd, inline CSS):
-./zig-out/bin/awr https://news.ycombinator.com          # HN front page   ~0.3s
-./zig-out/bin/awr https://en.wikipedia.org/wiki/Octopus # Wikipedia        ~0.4s
-./zig-out/bin/awr https://stackoverflow.com/questions   # Stack Overflow   ~4s
+./zig-out/bin/awr https://news.ycombinator.com             # HN front page        ~1.2s
+./zig-out/bin/awr https://en.wikipedia.org/wiki/Octopus    # Wikipedia            ~0.9s
+./zig-out/bin/awr https://github.com/ziglang/zig           # GitHub               ~2.3s
+./zig-out/bin/awr https://stackoverflow.com/questions      # Stack Overflow       ~4s
+./zig-out/bin/awr https://old.reddit.com/r/programming/    # Reddit (old.reddit)  ~1.8s
+./zig-out/bin/awr https://audiofile.app                    # SPA shell            ~0.9s
+
 ./zig-out/bin/awr render https://en.wikipedia.org/wiki/Octopus  # TUI text output
 ./zig-out/bin/awr extract https://news.ycombinator.com          # Markdown for LLMs
 
 # POST: JSON body
 ./zig-out/bin/awr post https://httpbin.org/post --json '{"key":"value"}'
+
+# Custom request headers (e.g. for API Bearer auth):
+TOKEN=$(./zig-out/bin/awr post "$SUPABASE_URL/auth/v1/token?grant_type=password" \
+  --json '{"email":"user@example.com","password":"pass"}' \
+  --header "apikey: $ANON_KEY" | python3 -c "import sys,json; print(json.loads(json.load(sys.stdin)['body_text'])['access_token'])")
+./zig-out/bin/awr "https://audiofile.app/api/wishlist" --header "Authorization: Bearer $TOKEN"
+
+# Full audiofile.app authenticated e2e (sign-in → search → add to wishlist → verify):
+# AUDIOFILE_EMAIL=you@example.com AUDIOFILE_PASSWORD=pass ./docs/audiofile-e2e.sh
 
 # WebMCP tools (local mock):
 ./zig-out/bin/awr tools experiments/webmcp_mock.html
@@ -89,7 +102,8 @@ Build + test + MVP-readiness runbook: [`docs/BUILD_MVP_READINESS.md`](docs/BUILD
 | `awr <url>` | Load page, run scripts, print full envelope `{url,status,title,body_text,window_data,tools}` |
 | `awr render <url> [--width N]` | Load page, print the rendered terminal text (human-readable, ANSI-friendly) |
 | `awr extract <url>` | Load page, print Markdown for LLM agents (chrome-filtered, headings + inline `[text](url)` preserved) |
-| `awr post <url> [k=v ...]` | POST URL-encoded form fields, follow redirects, absorb cookies |
+| `awr post <url> [k=v ...] [--header "N: V"]` | POST URL-encoded form fields, follow redirects, absorb cookies |
+| `awr post <url> --json BODY [--header "N: V"]` | POST JSON body; `--header` injects custom request headers (repeatable, works on all fetch paths) |
 | `awr submit <url> [--form=SEL] [k=v ...]` | Load page, find `<form>`, merge user fields with hidden inputs (CSRF), POST to the form's action |
 | `awr tools <url>` | Print the WebMCP tool array registered by the page |
 | `awr call <url> <tool> <json-args>` | Invoke `<tool>`; print `{ok:true,value:...}` or `{ok:false,error:...,message:...}` |
@@ -98,9 +112,10 @@ Build + test + MVP-readiness runbook: [`docs/BUILD_MVP_READINESS.md`](docs/BUILD
 
 `<url>` accepts `file://…`, bare filesystem paths, and `http(s)://…`.
 
-#### Sign-in flow
+#### Sign-in flows
 
-Set `AWR_COOKIE_JAR` to persist cookies across invocations (Netscape
+**Cookie-based auth** (traditional server-side sessions): Set
+`AWR_COOKIE_JAR` to persist cookies across invocations (Netscape
 `cookies.txt` format, curl/wget compatible). Then chain `submit` →
 `extract`:
 
@@ -113,6 +128,24 @@ awr submit https://site/login user=alice password=hunter2
 
 # Subsequent fetches carry the session cookie.
 awr extract https://site/dashboard > dashboard.md
+```
+
+**Bearer token auth** (modern REST APIs — Supabase, Firebase, custom JWTs):
+Use `--header "Authorization: Bearer TOKEN"` to inject the token into any
+request. Chain `awr post --json` to sign in, extract the token with `jq`,
+then use `--header` for authenticated calls:
+
+```bash
+# Sign in → extract token
+TOKEN=$(awr post "$SUPABASE_URL/auth/v1/token?grant_type=password" \
+  --json '{"email":"user@example.com","password":"secret"}' \
+  --header "apikey: $SUPABASE_ANON_KEY" \
+  | python3 -c "import sys,json; print(json.loads(json.load(sys.stdin)['body_text'])['access_token'])")
+
+# Use token for authenticated API calls
+awr 'https://your-api.example.com/api/wishlist' --header "Authorization: Bearer $TOKEN"
+
+# Full audiofile.app example: docs/audiofile-e2e.sh
 ```
 
 Per `spec/subspecs/agent-browser.md §2`, supported cookie attributes

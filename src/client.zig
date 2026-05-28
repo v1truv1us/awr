@@ -212,6 +212,11 @@ pub const ClientOptions = struct {
     /// total-fetch deadline). Without this, `fetchOnceStd` can hang on body
     /// reads indefinitely because the stdlib TLS layer has no deadline.
     force_boringssl: bool = false,
+    /// Extra request headers appended to every outgoing request, after the
+    /// standard Chrome 132 headers and cookie. Used by `awr --header` to
+    /// pass e.g. `Authorization: Bearer <token>` or `apikey: <key>`.
+    /// Caller owns the slice and the name/value strings within it.
+    extra_request_headers: []const std.http.Header = &.{},
 };
 
 // ── Response ──────────────────────────────────────────────────────────────
@@ -667,13 +672,14 @@ pub const Client = struct {
             else
                 "awr";
 
-        // Capacity 16: chrome132 regular headers + content-type + cookie.
+        // Capacity 24: chrome132 headers (11) + content-type (1) + cookie (1)
+        // + up to 11 caller extra_request_headers (e.g. Authorization).
         // user-agent and accept-encoding go through std.http's
         // Headers.override knobs (below) to avoid std.http's
         // auto-injected `zig/0.16.0 (std.http)` user-agent
         // showing up alongside ours — that double-UA was the
         // single biggest anti-bot tell (T-74).
-        var extra_headers: [16]std.http.Header = undefined;
+        var extra_headers: [24]std.http.Header = undefined;
         var extra_header_count: usize = 0;
 
         if (self.options.use_chrome_headers) {
@@ -721,6 +727,13 @@ pub const Client = struct {
         if (cookie_value.len > 0) {
             extra_headers[extra_header_count] = .{ .name = "cookie", .value = cookie_value };
             extra_header_count += 1;
+        }
+
+        for (self.options.extra_request_headers) |h| {
+            if (extra_header_count < extra_headers.len) {
+                extra_headers[extra_header_count] = h;
+                extra_header_count += 1;
+            }
         }
 
         const std_method: std.http.Method = switch (method) {
@@ -1150,7 +1163,7 @@ pub const Client = struct {
         const cookie_value = try buildCookieHeaderValue(self.cookieJar(), self.allocator, u.host, path, u.is_https);
         defer self.allocator.free(cookie_value);
 
-        var headers_buf: [16]h2session.H2Session.HeaderField = undefined;
+        var headers_buf: [24]h2session.H2Session.HeaderField = undefined;
         const header_count = try fillChrome132H2Headers(
             self,
             &headers_buf,
@@ -1333,6 +1346,10 @@ fn writeChrome132Http1Request(
         try req.headers.append(self.allocator, "cookie", cookie_header);
     }
 
+    for (self.options.extra_request_headers) |h| {
+        try req.headers.append(self.allocator, h.name, h.value);
+    }
+
     if (post_body) |body_bytes| {
         var cl_buf: [32]u8 = undefined;
         const cl = try std.fmt.bufPrint(&cl_buf, "{d}", .{body_bytes.len});
@@ -1375,6 +1392,16 @@ fn fillChrome132H2Headers(
     for (req.headers.items.items) |h| {
         if (h.name.len > 0 and h.name[0] == ':') continue;
         if (std.ascii.eqlIgnoreCase(h.name, "host")) continue;
+        if (count >= out.len) return FetchError.ConnectionFailed;
+        out[count] = .{
+            .name = h.name.ptr,
+            .name_len = @intCast(h.name.len),
+            .value = h.value.ptr,
+            .value_len = @intCast(h.value.len),
+        };
+        count += 1;
+    }
+    for (self.options.extra_request_headers) |h| {
         if (count >= out.len) return FetchError.ConnectionFailed;
         out[count] = .{
             .name = h.name.ptr,
@@ -2180,4 +2207,77 @@ test "integration: production BoringSSL fetch path sends awr_ja4_h2 fingerprint"
     const ja4 = resp.body[value_start..end];
 
     try std.testing.expectEqualStrings(fingerprint.awr_ja4_h2, ja4);
+}
+
+// ── H2 body decompression regression tests ──────────────────────────────────
+//
+// These tests cover the `decompressBody` function used by the BoringSSL H2
+// path. Each test compresses a known plaintext, feeds it to `decompressBody`,
+// and verifies the round-trip. This guards the H2+gzip/deflate/zstd path
+// that landed in commit f9baa84 (real-site support) against future
+// accidental regressions.
+
+test "decompressBody: gzip round-trip" {
+    const alloc = std.testing.allocator;
+    const plain = "Hello, AWR! This is a gzip-encoded HTTP response body.";
+
+    // Compress with gzip.
+    var compressed: std.Io.Writer.Allocating = .init(alloc);
+    defer compressed.deinit();
+    var compressor = try std.compress.flate.compress(&compressed.writer, .gzip, .{});
+    _ = try compressor.writer.writeAll(plain);
+    try compressor.flush(.finish);
+    const compressed_bytes = compressed.written();
+
+    // Decompress via decompressBody and verify round-trip.
+    const got = try decompressBody(alloc, .gzip, compressed_bytes);
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings(plain, got);
+}
+
+test "decompressBody: deflate round-trip" {
+    const alloc = std.testing.allocator;
+    const plain = "Hello, AWR! This is a deflate-encoded HTTP response body.";
+
+    var compressed: std.Io.Writer.Allocating = .init(alloc);
+    defer compressed.deinit();
+    var compressor = try std.compress.flate.compress(&compressed.writer, .zlib, .{});
+    _ = try compressor.writer.writeAll(plain);
+    try compressor.flush(.finish);
+    const compressed_bytes = compressed.written();
+
+    const got = try decompressBody(alloc, .deflate, compressed_bytes);
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings(plain, got);
+}
+
+test "decompressBody: zstd round-trip" {
+    const alloc = std.testing.allocator;
+    const plain = "Hello, AWR! This is a zstd-encoded HTTP response body.";
+
+    var compressed: std.Io.Writer.Allocating = .init(alloc);
+    defer compressed.deinit();
+    var enc = try std.compress.zstd.compressStream(&compressed.writer, .{});
+    _ = try enc.writer.writeAll(plain);
+    try enc.finish();
+    const compressed_bytes = compressed.written();
+
+    const got = try decompressBody(alloc, .zstd, compressed_bytes);
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings(plain, got);
+}
+
+test "decompressBody: identity passthrough" {
+    const alloc = std.testing.allocator;
+    const plain = "uncompressed body";
+    const got = try decompressBody(alloc, .identity, plain);
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings(plain, got);
+}
+
+test "decompressBody: empty body returns empty slice" {
+    const alloc = std.testing.allocator;
+    const got = try decompressBody(alloc, .gzip, "");
+    defer alloc.free(got);
+    try std.testing.expectEqual(@as(usize, 0), got.len);
 }

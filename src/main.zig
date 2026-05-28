@@ -877,14 +877,17 @@ const USAGE =
     \\  awr render <url> [--width N] [--images=MODE] [--no-js]
     \\                               Load URL, print the rendered terminal text non-interactively
     \\                               --images=auto|kitty|iterm|sixel|braille|none (default: auto)
-    \\  awr <url> [--format=md]      Load URL/path, print JSON envelope. Default body_text is plain text;
+    \\  awr <url> [--format=md] [--header "Name: Value"] ...
+    \\                               Load URL/path, print JSON envelope. Default body_text is plain text;
     \\                                 `--format=markdown` (or `=md`) swaps it for the Markdown extraction
     \\                                 (chrome-filtered, headings + inline links preserved) under `body_md`.
+    \\                                 `--header "Name: Value"` injects a custom request header (repeatable).
     \\                                 Set `AWR_DAEMON=1` to route through `awrd` instead of running
     \\                                 the page pipeline in-process (warmer connection pool).
-    \\  awr post <url> [k=v ...]     POST URL-encoded form fields, follow redirects, absorb cookies
-    \\                                 Set $AWR_COOKIE_JAR to persist cookies across invocations
-    \\  awr post <url> --json <body>|@file|-
+    \\  awr post <url> [k=v ...] [--header "Name: Value"] ...
+    \\                               POST URL-encoded form fields, follow redirects, absorb cookies.
+    \\                                 Set $AWR_COOKIE_JAR to persist cookies across invocations.
+    \\  awr post <url> --json <body>|@file|- [--header "Name: Value"] ...
     \\                               POST with Content-Type: application/json. <body> is inline JSON,
     \\                                 @path reads a file, `-` reads stdin. Body is validated locally
     \\                                 before send. Mutually exclusive with k=v form fields.
@@ -973,6 +976,17 @@ fn isFailedCallEnvelope(out: []const u8) bool {
     const spaced = std.mem.indexOf(u8, s, "\"ok\": false");
     if (spaced) |i| return i < 24;
     return false;
+}
+
+/// Parse a `--header` value into a name/value pair.
+/// Accepts `"Name: Value"` or `"Name:Value"` (first `:` is the separator).
+/// Returns null when the string has no `:`.
+fn parseHeaderArg(s: []const u8) ?std.http.Header {
+    const colon = std.mem.indexOfScalar(u8, s, ':') orelse return null;
+    const name = s[0..colon];
+    const value_raw = s[colon + 1 ..];
+    const value = std.mem.trimStart(u8, value_raw, " ");
+    return .{ .name = name, .value = value };
 }
 
 /// Load a page from either an http(s):// URL or a local file path.
@@ -1383,11 +1397,14 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         }
         const url = args[2];
 
-        // Pre-scan args[3..] for --json. Supports both `--json X` and
-        // `--json=X` forms; X is `-` (stdin), `@path` (file), or inline JSON.
-        // Mutually exclusive with positional k=v pairs.
+        // Pre-scan args[3..] for --json and --header. Supports both
+        // `--json X` / `--json=X` and `--header "Name: Value"` /
+        // `--header=Name:Value` forms. --json and k=v form fields are
+        // mutually exclusive; --header can accompany either.
         var json_source: ?[]const u8 = null;
         var has_positional = false;
+        var post_extra_headers: std.ArrayList(std.http.Header) = .empty;
+        defer post_extra_headers.deinit(alloc);
         {
             var i: usize = 3;
             while (i < args.len) : (i += 1) {
@@ -1401,6 +1418,23 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
                     i += 1;
                 } else if (std.mem.startsWith(u8, a, "--json=")) {
                     json_source = a["--json=".len..];
+                } else if (std.mem.eql(u8, a, "--header")) {
+                    if (i + 1 >= args.len) {
+                        try stdoutWrite(io, "awr post: --header requires a value (e.g. \"Authorization: Bearer tok\")\n");
+                        std.process.exit(1);
+                    }
+                    i += 1;
+                    const hdr = parseHeaderArg(args[i]) orelse {
+                        try stdoutWrite(io, "awr post: --header value must contain ':' separating name and value\n");
+                        std.process.exit(1);
+                    };
+                    try post_extra_headers.append(alloc, hdr);
+                } else if (std.mem.startsWith(u8, a, "--header=")) {
+                    const hdr = parseHeaderArg(a["--header=".len..]) orelse {
+                        try stdoutWrite(io, "awr post: --header value must contain ':' separating name and value\n");
+                        std.process.exit(1);
+                    };
+                    try post_extra_headers.append(alloc, hdr);
                 } else {
                     has_positional = true;
                 }
@@ -1426,7 +1460,15 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
             content_type = "application/json";
         } else {
             var first = true;
-            for (args[3..]) |pair| {
+            var fi: usize = 3;
+            while (fi < args.len) : (fi += 1) {
+                const pair = args[fi];
+                // Skip --json, --json=X, --header, --header=X and their values.
+                if (std.mem.eql(u8, pair, "--json") or std.mem.eql(u8, pair, "--header")) {
+                    fi += 1;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, pair, "--json=") or std.mem.startsWith(u8, pair, "--header=")) continue;
                 const eq = std.mem.indexOfScalar(u8, pair, '=') orelse {
                     try stdoutWrite(io, "awr post: each field arg must be `name=value`\n");
                     std.process.exit(1);
@@ -1447,6 +1489,9 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         var p = try page_mod.Page.init(alloc, io);
         defer p.deinit();
         p.metrics_sink = &metrics;
+        if (post_extra_headers.items.len > 0) {
+            p.client.options.extra_request_headers = post_extra_headers.items;
+        }
 
         var result = (if (content_type) |ct|
             p.navigatePostWithContentType(url, body_bytes, ct)
@@ -1706,31 +1751,48 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     var format_md = false;
     var disable_scripts = false;
     var url_arg: ?[]const u8 = null;
-    for (args[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "--format=markdown") or std.mem.eql(u8, arg, "--format=md")) {
-            format_md = true;
-        } else if (std.mem.eql(u8, arg, "--format=json")) {
-            format_md = false;
-        } else if (std.mem.eql(u8, arg, "--no-js") or std.mem.eql(u8, arg, "--no-script")) {
-            // Per-site escape hatch (T-72). Use sparingly — most
-            // modern pages legitimately depend on JS for display
-            // (lazy-loaded articles, hydrated forms, dropdowns).
-            // Useful when a page's JS detects a non-Chromium
-            // environment and strips its own UI: Google's
-            // homepage textarea is the motivating case.
-            disable_scripts = true;
-        } else if (std.mem.startsWith(u8, arg, "--")) {
-            try stdoutWrite(io, "awr: unknown flag: ");
-            try stdoutWrite(io, arg);
-            try stdoutWrite(io, "\n");
-            std.process.exit(1);
-        } else if (url_arg == null) {
-            url_arg = arg;
-        } else {
-            try stdoutWrite(io, "awr: unexpected positional arg: ");
-            try stdoutWrite(io, arg);
-            try stdoutWrite(io, "\n");
-            std.process.exit(1);
+    var fetch_extra_headers: std.ArrayList(std.http.Header) = .empty;
+    defer fetch_extra_headers.deinit(alloc);
+    {
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "--format=markdown") or std.mem.eql(u8, arg, "--format=md")) {
+                format_md = true;
+            } else if (std.mem.eql(u8, arg, "--format=json")) {
+                format_md = false;
+            } else if (std.mem.eql(u8, arg, "--no-js") or std.mem.eql(u8, arg, "--no-script")) {
+                disable_scripts = true;
+            } else if (std.mem.eql(u8, arg, "--header")) {
+                if (i + 1 >= args.len) {
+                    try stdoutWrite(io, "awr: --header requires a value (e.g. \"Authorization: Bearer tok\")\n");
+                    std.process.exit(1);
+                }
+                i += 1;
+                const hdr = parseHeaderArg(args[i]) orelse {
+                    try stdoutWrite(io, "awr: --header value must contain ':' separating name and value\n");
+                    std.process.exit(1);
+                };
+                try fetch_extra_headers.append(alloc, hdr);
+            } else if (std.mem.startsWith(u8, arg, "--header=")) {
+                const hdr = parseHeaderArg(arg["--header=".len..]) orelse {
+                    try stdoutWrite(io, "awr: --header value must contain ':' separating name and value\n");
+                    std.process.exit(1);
+                };
+                try fetch_extra_headers.append(alloc, hdr);
+            } else if (std.mem.startsWith(u8, arg, "--")) {
+                try stdoutWrite(io, "awr: unknown flag: ");
+                try stdoutWrite(io, arg);
+                try stdoutWrite(io, "\n");
+                std.process.exit(1);
+            } else if (url_arg == null) {
+                url_arg = arg;
+            } else {
+                try stdoutWrite(io, "awr: unexpected positional arg: ");
+                try stdoutWrite(io, arg);
+                try stdoutWrite(io, "\n");
+                std.process.exit(1);
+            }
         }
     }
     const url = url_arg orelse {
@@ -1768,6 +1830,9 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     defer p.deinit();
     p.metrics_sink = &metrics;
     p.disable_scripts = disable_scripts;
+    if (fetch_extra_headers.items.len > 0) {
+        p.client.options.extra_request_headers = fetch_extra_headers.items;
+    }
     if (t_startup_done != 0) {
         const elapsed = nowMs() - t_startup_done;
         if (timing_on) std.debug.print("[timing] page_init={d}ms\n", .{elapsed});

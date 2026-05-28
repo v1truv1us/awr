@@ -1,6 +1,6 @@
 # AWR — Project Status
 
-> Last updated: 2026-05-27  
+> Last updated: 2026-05-28  
 > Canonical spec: `spec/MVP.md` | Tier ladder: `spec/subspecs/browser-roadmap.md`
 
 ---
@@ -88,7 +88,20 @@
 - BoringSSL H2 path now decompresses gzip/deflate/zstd response bodies
 - BoringSSL-first path inversion: Chrome fingerprint used by default, std.http fallback only for non-HTTPS
 - body_text extraction uses zero-alloc inline style check (fast on large pages)
-- Verified: HN (~0.3s), Wikipedia (~0.4s), GitHub (~1s), Stack Overflow (~4s), audiofile.app (~0.4s)
+- Verified: HN (~1.2s), Wikipedia (~0.9s), GitHub (~2.1s), Stack Overflow (~4s), old.reddit.com (~1.5s), audiofile.app (~0.9s)
+- Note: www.reddit.com blocked by Cloudflare JS challenge; old.reddit.com returns full content
+
+### `--header` flag — LANDED 2026-05-28
+- `awr <url> --header "Name: Value"` — injects custom headers on GET path
+- `awr post <url> --json ... --header "Name: Value"` — same for POST path
+- Flows through all three fetch paths: stdlib H1, BoringSSL H1, BoringSSL H2
+- Enables Bearer token auth for REST APIs (Supabase, Firebase, custom JWTs)
+- See `docs/audiofile-e2e.sh` for full authenticated audiofile.app flow
+
+### Decompression regression tests — LANDED 2026-05-28
+- 5 unit tests in `src/client.zig` cover gzip, deflate, zstd, identity, and empty-body
+- Tests use in-process compress→decompress round-trips (no network required)
+- Run via `zig build test-net`
 
 ---
 
