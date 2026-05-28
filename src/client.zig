@@ -1118,6 +1118,19 @@ pub const Client = struct {
         var parsed = try http1.readResponse(&entry.reader, self.allocator, http1_method);
         errdefer parsed.deinit();
 
+        // Decompress body if server sent gzip/deflate/zstd (common on Supabase,
+        // Cloudflare, nginx). Mirrors the H2 path in sendOnBoringSslEntryH2.
+        var content_encoding: std.http.ContentEncoding = .identity;
+        if (parsed.headers.get("content-encoding")) |enc_str| {
+            const trimmed = std.mem.trim(u8, enc_str, " \t");
+            if (std.http.ContentEncoding.fromString(trimmed)) |enc| content_encoding = enc;
+        }
+        if (content_encoding != .identity and parsed.body.len > 0) {
+            const decompressed = try decompressBody(self.allocator, content_encoding, parsed.body);
+            self.allocator.free(parsed.body);
+            parsed.body = decompressed;
+        }
+
         const effective_url = try self.allocator.dupe(u8, url_str);
         errdefer self.allocator.free(effective_url);
 

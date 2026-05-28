@@ -36,9 +36,9 @@ STATUS=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin
 # ── Step 2: Sign in (Supabase password flow) ──────────────────────────────────
 step "2. Sign in as $EMAIL"
 AUTH_BODY="{\"email\":\"$EMAIL\",\"password\":\"$PASS\"}"
-AUTH_RESP=$("$AWR" post --json \
+AUTH_RESP=$("$AWR" post \
   "$SUPABASE_URL/auth/v1/token?grant_type=password" \
-  "$AUTH_BODY" \
+  --json "$AUTH_BODY" \
   --header "apikey: $SUPABASE_ANON_KEY" 2>/dev/null)
 
 TOKEN=$(echo "$AUTH_RESP" | python3 -c "
@@ -80,9 +80,9 @@ print(r[0].get('mbid', '') if r else '')
 # ── Step 4: Add to wishlist ───────────────────────────────────────────────────
 step "4. Add 'OK Computer' to wishlist"
 WISHLIST_BODY="{\"title\":\"OK Computer\",\"artist\":\"Radiohead\",\"priority\":1,\"year\":1997,\"label\":\"Parlophone\"}"
-ADD_RESP=$("$AWR" post --json \
+ADD_RESP=$("$AWR" post \
   "$API/wishlist" \
-  "$WISHLIST_BODY" \
+  --json "$WISHLIST_BODY" \
   --header "$BEARER" 2>/dev/null)
 ADD_STATUS=$(echo "$ADD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
 
