@@ -335,6 +335,20 @@ const RenderState = struct {
     boxes: std.ArrayListUnmanaged(BoxRef) = .empty,
     active_boxes: std.ArrayListUnmanaged(usize) = .empty,
     sticky_hdrs: std.ArrayListUnmanaged(StickyHeader) = .empty,
+    /// Author stylesheets parsed ONCE up front. `isCssHidden` and
+    /// `isCssWhiteSpacePreserved` run per element, so re-parsing the
+    /// sheets inside them was O(elements × sheets) and hung the renderer
+    /// on pages with many sheets (Wikipedia ships 14). Mirrors the
+    /// body_text fast-path fix in page.zig (commit f9baa84), which only
+    /// covered the agent surface — this covers the render/TUI surface.
+    parsed_sheets: std.ArrayListUnmanaged(css_parser.Stylesheet) = .empty,
+    /// Pre-filtered rule indexes: only rules that can actually flip the
+    /// per-element checks. Scanning every rule for every element is still
+    /// O(elements × rules); these slices cut the inner loop to the handful
+    /// of rules that declare the relevant property. Pointers index into
+    /// `parsed_sheets[*].rules.items`, which is heap-stable after parsing.
+    hide_rules: std.ArrayListUnmanaged(*const css_parser.Rule) = .empty,
+    ws_rules: std.ArrayListUnmanaged(*const css_parser.Rule) = .empty,
 
     fn deinit(self: *RenderState) void {
         for (self.links.items) |link| {
@@ -351,6 +365,10 @@ const RenderState = struct {
         self.boxes.deinit(self.allocator);
         self.active_boxes.deinit(self.allocator);
         self.sticky_hdrs.deinit(self.allocator);
+        self.hide_rules.deinit(self.allocator);
+        self.ws_rules.deinit(self.allocator);
+        for (self.parsed_sheets.items) |*sheet| sheet.deinit();
+        self.parsed_sheets.deinit(self.allocator);
     }
 
     fn beginElementBox(self: *RenderState, elem: *const dom.Element) !void {
@@ -563,6 +581,31 @@ fn renderModelFromRoot(
         .opts = opts,
     };
     defer state.deinit();
+
+    // Parse author stylesheets once; the per-element visibility/white-space
+    // checks below iterate pre-filtered rule indexes instead of re-parsing
+    // and re-scanning every sheet for every element.
+    for (opts.css_stylesheets) |css| {
+        var sheet = css_parser.parseStylesheet(allocator, css) catch continue;
+        state.parsed_sheets.append(allocator, sheet) catch {
+            sheet.deinit();
+            continue;
+        };
+    }
+    // Build filtered indexes only after all sheets are parsed (rule heap
+    // storage is stable; the outer list may have reallocated during append).
+    for (state.parsed_sheets.items) |*sheet| {
+        for (sheet.rules.items) |*rule| {
+            const disp = rule.declarations.getPropertyValue("display");
+            const vis = rule.declarations.getPropertyValue("visibility");
+            if (disp.len > 0 or vis.len > 0) {
+                state.hide_rules.append(allocator, rule) catch {};
+            }
+            if (rule.declarations.getPropertyValue("white-space").len > 0) {
+                state.ws_rules.append(allocator, rule) catch {};
+            }
+        }
+    }
 
     if (root) |elem| {
         if (eql(elem.tag, "body")) {
@@ -2264,22 +2307,18 @@ fn isHiddenTag(tag: []const u8) bool {
 }
 
 fn isCssHidden(state: *RenderState, elem: *const dom.Element) bool {
-    for (state.opts.css_stylesheets) |css| {
-        var sheet = css_parser.parseStylesheet(state.allocator, css) catch continue;
-        defer sheet.deinit();
-        for (sheet.rules.items) |rule| {
-            var selectors = std.mem.splitScalar(u8, rule.selector_text, ',');
-            var matched = false;
-            while (selectors.next()) |sel| {
-                if (elem.matches(sel)) {
-                    matched = true;
-                    break;
-                }
+    for (state.hide_rules.items) |rule| {
+        var selectors = std.mem.splitScalar(u8, rule.selector_text, ',');
+        var matched = false;
+        while (selectors.next()) |sel| {
+            if (elem.matches(sel)) {
+                matched = true;
+                break;
             }
-            if (!matched) continue;
-            if (isHiddenCssValue(rule.declarations.getPropertyValue("display"), "none")) return true;
-            if (isHiddenCssValue(rule.declarations.getPropertyValue("visibility"), "hidden")) return true;
         }
+        if (!matched) continue;
+        if (isHiddenCssValue(rule.declarations.getPropertyValue("display"), "none")) return true;
+        if (isHiddenCssValue(rule.declarations.getPropertyValue("visibility"), "hidden")) return true;
     }
 
     if (elem.getAttribute("style")) |style_attr| {
@@ -2309,22 +2348,18 @@ fn isCssWhiteSpacePreserved(state: *RenderState, elem: *const dom.Element) bool 
         if (inline_val.len > 0) return whiteSpacePreservesWhitespace(inline_val);
     }
 
-    for (state.opts.css_stylesheets) |css| {
-        var sheet = css_parser.parseStylesheet(state.allocator, css) catch continue;
-        defer sheet.deinit();
-        for (sheet.rules.items) |rule| {
-            var selectors = std.mem.splitScalar(u8, rule.selector_text, ',');
-            var matched = false;
-            while (selectors.next()) |sel| {
-                if (elem.matches(sel)) {
-                    matched = true;
-                    break;
-                }
+    for (state.ws_rules.items) |rule| {
+        var selectors = std.mem.splitScalar(u8, rule.selector_text, ',');
+        var matched = false;
+        while (selectors.next()) |sel| {
+            if (elem.matches(sel)) {
+                matched = true;
+                break;
             }
-            if (!matched) continue;
-            const val = rule.declarations.getPropertyValue("white-space");
-            if (val.len > 0) return whiteSpacePreservesWhitespace(val);
         }
+        if (!matched) continue;
+        const val = rule.declarations.getPropertyValue("white-space");
+        if (val.len > 0) return whiteSpacePreservesWhitespace(val);
     }
 
     return false;

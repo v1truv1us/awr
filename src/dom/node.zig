@@ -576,7 +576,13 @@ pub const Document = struct {
     }
 
     fn isIdentChar(ch: u8) bool {
-        return std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-';
+        // Per CSS Syntax §4.2, code points >= U+0080 are identifier code
+        // points. Treat any UTF-8 continuation/lead byte (>= 0x80) as part
+        // of an identifier so non-ASCII class/id names (e.g. Arabic
+        // `.إعلام`, CJK) parse to the actual name rather than an empty
+        // token — an empty token yields a constraint-less selector that
+        // matches every element and (with display:none) blanks the page.
+        return std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-' or ch >= 0x80;
     }
 
     fn classListContains(class_attr: []const u8, needle: []const u8) bool {
