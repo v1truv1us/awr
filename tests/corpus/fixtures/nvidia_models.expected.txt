@@ -1,9 +1,7 @@
 
 
 
-[Open Menu][NVIDIA][2][Navigation omitted]
-
-[____________________]⌘KCtrl+K[Search][Search][?][Login]Models
+[Open Menu][NVIDIA][2][____________________]Ctrl+K[Search][Search][?][Login]Models
 ======
 
 Deploy and scale models on your GPU infrastructure of choice with NVIDIA NIM

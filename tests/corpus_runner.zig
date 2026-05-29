@@ -146,10 +146,11 @@ const fixtures = [_]Fixture{
         .html = @embedFile("corpus/fixtures/wiki_zh_octopus.html"),
         .expected = @embedFile("corpus/fixtures/wiki_zh_octopus.expected.txt"),
         .min_text_bytes = 5000,
-        // Avoid asserting on specific Han chars — they appear via UTF-8
-        // bytes in the snapshot; the must_contain matches against the
-        // raw byte sequence which is fine. "维基百科" = "Wikipedia".
-        .must_contain = &.{"维基百科"},
+        // Assert on article-body Han text ("章鱼" = octopus) to verify UTF-8
+        // multi-byte survival. The old sentinel "维基百科" (Wikipedia) was
+        // site-header branding, which CSSOM now correctly hides via the
+        // header's display:none — it lives in body_text but not the render.
+        .must_contain = &.{"章鱼"},
         .must_not_contain = &.{ "[object Object]", "\x1b[" },
     },
     .{
@@ -218,8 +219,11 @@ const fixtures = [_]Fixture{
         .html = @embedFile("corpus/fixtures/wiki_ar_octopus.html"),
         .expected = @embedFile("corpus/fixtures/wiki_ar_octopus.expected.txt"),
         .min_text_bytes = 5000,
-        // "ويكيبيديا" = "Wikipedia" in Arabic — bytes survive the pipeline.
-        .must_contain = &.{"ويكيبيديا"},
+        // Assert on article-subject Arabic text ("أخطبوطيات" = Octopodiformes)
+        // to verify UTF-8 multi-byte survival. The old sentinel "ويكيبيديا"
+        // (Wikipedia) was site-header branding, which CSSOM now correctly
+        // hides — it lives in body_text but not the render.
+        .must_contain = &.{"أخطبوطيات"},
         .must_not_contain = &.{ "[object Object]", "\x1b[" },
     },
 };

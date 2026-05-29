@@ -586,9 +586,4 @@ touch.
 
 [Footer omitted]
 
-[Close]Journalism That Holds Power to Account
---------------------------------------
-
-Sign up for ProPublica’s Big Story newsletter and get our latest stories
-delivered straight to your inbox.
-Please enter your email address:[____________________][Get the Newsletter Subscribe][Close]
+[Close]
