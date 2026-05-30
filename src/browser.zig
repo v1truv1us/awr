@@ -1774,170 +1774,170 @@ pub fn processKey(
 
     switch (session.prompt_mode) {
         .none => if (session.field_editing) switch (key) {
-                .escape => {
-                    session.exitFieldEditing();
-                    session.rerenderCurrent() catch {};
-                },
-                .tab => {
-                    session.nextFocusable(false, viewport_height);
-                    session.rerenderCurrent() catch {};
-                },
-                .shift_tab => {
-                    session.nextFocusable(true, viewport_height);
-                    session.rerenderCurrent() catch {};
-                },
-                .enter => {
-                    // T-64 / Tier 1 slice T1.5: implicit form
-                    // submission. Per HTML5 forms, pressing Enter
-                    // in a focused text input submits the parent
-                    // <form>. We commit the field's value (exit
-                    // edit mode) then call submitForm — which
-                    // handles GET vs POST, hidden CSRF inputs,
-                    // and target URL resolution.
-                    if (session.activeField()) |field| {
-                        if (isTextLikeField(field)) {
-                            session.exitFieldEditing();
-                            session.submitForm() catch |err| {
-                                const msg = std.fmt.allocPrint(
-                                    session.allocator,
-                                    "submit failed: {t}",
-                                    .{err},
-                                ) catch null;
-                                if (msg) |m| {
-                                    defer session.allocator.free(m);
-                                    session.setStatusMessage(m) catch {};
-                                }
-                            };
-                        } else {
-                            session.exitFieldEditing();
-                        }
+            .escape => {
+                session.exitFieldEditing();
+                session.rerenderCurrent() catch {};
+            },
+            .tab => {
+                session.nextFocusable(false, viewport_height);
+                session.rerenderCurrent() catch {};
+            },
+            .shift_tab => {
+                session.nextFocusable(true, viewport_height);
+                session.rerenderCurrent() catch {};
+            },
+            .enter => {
+                // T-64 / Tier 1 slice T1.5: implicit form
+                // submission. Per HTML5 forms, pressing Enter
+                // in a focused text input submits the parent
+                // <form>. We commit the field's value (exit
+                // edit mode) then call submitForm — which
+                // handles GET vs POST, hidden CSRF inputs,
+                // and target URL resolution.
+                if (session.activeField()) |field| {
+                    if (isTextLikeField(field)) {
+                        session.exitFieldEditing();
+                        session.submitForm() catch |err| {
+                            const msg = std.fmt.allocPrint(
+                                session.allocator,
+                                "submit failed: {t}",
+                                .{err},
+                            ) catch null;
+                            if (msg) |m| {
+                                defer session.allocator.free(m);
+                                session.setStatusMessage(m) catch {};
+                            }
+                        };
                     } else {
                         session.exitFieldEditing();
                     }
-                },
-                .backspace => {
-                    session.deleteFieldByte();
-                    // Rerender so the box reflects the deleted byte
-                    // immediately. T-73.
-                    session.rerenderCurrent() catch {};
-                },
-                .char => |ch| {
-                    try session.appendFieldByte(ch);
-                    // Rerender so the typed byte appears inside the
-                    // [____] box. T-73.
-                    session.rerenderCurrent() catch {};
-                },
-                else => {},
-            } else switch (key) {
-                .arrow_down => session.scrollBy(1, viewport_height),
-                .arrow_up => session.scrollBy(-1, viewport_height),
-                .tab => {
-                    session.nextFocusable(false, viewport_height);
-                    // Rerender so the focus highlight moves with the
-                    // cursor. T-73.
-                    session.rerenderCurrent() catch {};
-                },
-                .shift_tab => {
-                    session.nextFocusable(true, viewport_height);
-                    session.rerenderCurrent() catch {};
-                },
-                .enter => {
-                    if (session.focus_target == .field and session.selected_field != null) {
-                        const field = session.activeField();
-                        if (field != null and field.?.is_submit) {
-                            session.submitForm() catch |err| session.reportError("submit failed", err);
-                        } else if (field != null and (std.mem.eql(u8, field.?.field_type, "checkbox") or std.mem.eql(u8, field.?.field_type, "radio"))) {
-                            // T-81: Enter also activates checkbox/radio (some
-                            // browsers do, vim users expect both Space + Enter).
-                            session.toggleCheckedField() catch |err| session.reportError("toggle failed", err);
-                            session.rerenderCurrent() catch {};
-                        } else if (field != null and std.mem.eql(u8, field.?.field_type, "select")) {
-                            // T-83: Enter on a select opens the inline picker
-                            // (same as Space; matches Chrome/Firefox).
-                            session.openSelectPicker() catch |err| session.reportError("picker failed", err);
-                        } else {
-                            session.openSelectedLink() catch |err| session.reportError("open failed", err);
-                        }
+                } else {
+                    session.exitFieldEditing();
+                }
+            },
+            .backspace => {
+                session.deleteFieldByte();
+                // Rerender so the box reflects the deleted byte
+                // immediately. T-73.
+                session.rerenderCurrent() catch {};
+            },
+            .char => |ch| {
+                try session.appendFieldByte(ch);
+                // Rerender so the typed byte appears inside the
+                // [____] box. T-73.
+                session.rerenderCurrent() catch {};
+            },
+            else => {},
+        } else switch (key) {
+            .arrow_down => session.scrollBy(1, viewport_height),
+            .arrow_up => session.scrollBy(-1, viewport_height),
+            .tab => {
+                session.nextFocusable(false, viewport_height);
+                // Rerender so the focus highlight moves with the
+                // cursor. T-73.
+                session.rerenderCurrent() catch {};
+            },
+            .shift_tab => {
+                session.nextFocusable(true, viewport_height);
+                session.rerenderCurrent() catch {};
+            },
+            .enter => {
+                if (session.focus_target == .field and session.selected_field != null) {
+                    const field = session.activeField();
+                    if (field != null and field.?.is_submit) {
+                        session.submitForm() catch |err| session.reportError("submit failed", err);
+                    } else if (field != null and (std.mem.eql(u8, field.?.field_type, "checkbox") or std.mem.eql(u8, field.?.field_type, "radio"))) {
+                        // T-81: Enter also activates checkbox/radio (some
+                        // browsers do, vim users expect both Space + Enter).
+                        session.toggleCheckedField() catch |err| session.reportError("toggle failed", err);
+                        session.rerenderCurrent() catch {};
+                    } else if (field != null and std.mem.eql(u8, field.?.field_type, "select")) {
+                        // T-83: Enter on a select opens the inline picker
+                        // (same as Space; matches Chrome/Firefox).
+                        session.openSelectPicker() catch |err| session.reportError("picker failed", err);
                     } else {
                         session.openSelectedLink() catch |err| session.reportError("open failed", err);
                     }
-                },
-                .char => |ch| switch (ch) {
-                    ' ' => {
-                        // T-81/T-83: Space activates the focused control.
-                        // Checkbox → toggle. Radio → select. Select → open picker.
-                        // Otherwise no-op (Space is not a scroll key — that's j/k).
-                        if (session.focus_target == .field and session.selected_field != null) {
-                            if (session.activeField()) |f| {
-                                if (std.mem.eql(u8, f.field_type, "select")) {
-                                    session.openSelectPicker() catch |err| session.reportError("picker failed", err);
-                                } else {
-                                    session.toggleCheckedField() catch |err| session.reportError("toggle failed", err);
-                                    session.rerenderCurrent() catch {};
-                                }
+                } else {
+                    session.openSelectedLink() catch |err| session.reportError("open failed", err);
+                }
+            },
+            .char => |ch| switch (ch) {
+                ' ' => {
+                    // T-81/T-83: Space activates the focused control.
+                    // Checkbox → toggle. Radio → select. Select → open picker.
+                    // Otherwise no-op (Space is not a scroll key — that's j/k).
+                    if (session.focus_target == .field and session.selected_field != null) {
+                        if (session.activeField()) |f| {
+                            if (std.mem.eql(u8, f.field_type, "select")) {
+                                session.openSelectPicker() catch |err| session.reportError("picker failed", err);
+                            } else {
+                                session.toggleCheckedField() catch |err| session.reportError("toggle failed", err);
+                                session.rerenderCurrent() catch {};
                             }
                         }
-                    },
-                    'j' => session.scrollBy(1, viewport_height),
-                    'k' => session.scrollBy(-1, viewport_height),
-                    'b' => session.goBack() catch |err| session.reportError("back failed", err),
-                    'f' => session.goForward() catch |err| session.reportError("forward failed", err),
-                    'r' => session.reload() catch |err| session.reportError("reload failed", err),
-                    // T-66 / Tier 1: URL bar opens via vim-style ':'
-                    // (preferred per spec/subspecs/browser-tui.md §2.6)
-                    // OR legacy 'g' (existing binding kept for muscle
-                    // memory compatibility).
-                    'g', ':' => session.startPrompt(.url) catch |err| session.reportError("prompt failed", err),
-                    '/' => session.startPrompt(.search) catch |err| session.reportError("prompt failed", err),
-                    // T-84: cookie inspector for the current origin.
-                    // `c` (lowercase) opens; uppercase `C` is reserved
-                    // *inside* the inspector for the destructive
-                    // "clear all" action.
-                    'c' => session.openCookieInspector() catch |err| session.reportError("cookies failed", err),
-                    // T-89 / Tier 2 T2.1: uppercase B adds the current
-                    // page to the persistent bookmarks store. Lowercase
-                    // `b` is already history-back (Tier 1).
-                    'B' => session.bookmarkCurrentPage() catch |err| session.reportError("bookmark failed", err),
-                    'n' => session.advanceSearch(viewport_height),
-                    'e' => {
-                        const model2 = session.screenModel();
-                        if (model2 != null) {
-                            for (model2.?.fields) |f| {
-                                if (!f.is_submit) {
-                                    session.selectNextField(false, viewport_height);
-                                    break;
-                                }
+                    }
+                },
+                'j' => session.scrollBy(1, viewport_height),
+                'k' => session.scrollBy(-1, viewport_height),
+                'b' => session.goBack() catch |err| session.reportError("back failed", err),
+                'f' => session.goForward() catch |err| session.reportError("forward failed", err),
+                'r' => session.reload() catch |err| session.reportError("reload failed", err),
+                // T-66 / Tier 1: URL bar opens via vim-style ':'
+                // (preferred per spec/subspecs/browser-tui.md §2.6)
+                // OR legacy 'g' (existing binding kept for muscle
+                // memory compatibility).
+                'g', ':' => session.startPrompt(.url) catch |err| session.reportError("prompt failed", err),
+                '/' => session.startPrompt(.search) catch |err| session.reportError("prompt failed", err),
+                // T-84: cookie inspector for the current origin.
+                // `c` (lowercase) opens; uppercase `C` is reserved
+                // *inside* the inspector for the destructive
+                // "clear all" action.
+                'c' => session.openCookieInspector() catch |err| session.reportError("cookies failed", err),
+                // T-89 / Tier 2 T2.1: uppercase B adds the current
+                // page to the persistent bookmarks store. Lowercase
+                // `b` is already history-back (Tier 1).
+                'B' => session.bookmarkCurrentPage() catch |err| session.reportError("bookmark failed", err),
+                'n' => session.advanceSearch(viewport_height),
+                'e' => {
+                    const model2 = session.screenModel();
+                    if (model2 != null) {
+                        for (model2.?.fields) |f| {
+                            if (!f.is_submit) {
+                                session.selectNextField(false, viewport_height);
+                                break;
                             }
                         }
-                    },
-                    'h' => session.show_help = true, // §2.3: open keybinding help overlay
-                    'q' => return .exit,
-                    else => {},
-                },
-                else => {},
-            },
-            .url, .search => switch (key) {
-                .enter => session.submitPrompt() catch |err| session.reportError("navigate failed", err),
-                .backspace => session.popPromptByte(),
-                .escape => session.cancelPrompt(),
-                // T-90: arrow up/down cycle through URL history matches
-                // when the URL prompt is active. In search mode, arrows
-                // are currently a no-op (search history is a possible
-                // future slice but not Tier 2 scope).
-                .arrow_up => {
-                    if (session.prompt_mode == .url) {
-                        session.urlAutocompleteUp() catch |err| session.reportError("autocomplete failed", err);
                     }
                 },
-                .arrow_down => {
-                    if (session.prompt_mode == .url) {
-                        session.urlAutocompleteDown() catch |err| session.reportError("autocomplete failed", err);
-                    }
-                },
-                .char => |ch| session.appendPromptByte(ch) catch |err| session.reportError("input failed", err),
+                'h' => session.show_help = true, // §2.3: open keybinding help overlay
+                'q' => return .exit,
                 else => {},
             },
-        }
+            else => {},
+        },
+        .url, .search => switch (key) {
+            .enter => session.submitPrompt() catch |err| session.reportError("navigate failed", err),
+            .backspace => session.popPromptByte(),
+            .escape => session.cancelPrompt(),
+            // T-90: arrow up/down cycle through URL history matches
+            // when the URL prompt is active. In search mode, arrows
+            // are currently a no-op (search history is a possible
+            // future slice but not Tier 2 scope).
+            .arrow_up => {
+                if (session.prompt_mode == .url) {
+                    session.urlAutocompleteUp() catch |err| session.reportError("autocomplete failed", err);
+                }
+            },
+            .arrow_down => {
+                if (session.prompt_mode == .url) {
+                    session.urlAutocompleteDown() catch |err| session.reportError("autocomplete failed", err);
+                }
+            },
+            .char => |ch| session.appendPromptByte(ch) catch |err| session.reportError("input failed", err),
+            else => {},
+        },
+    }
     return .continue_;
 }
 
@@ -3643,4 +3643,3 @@ test "T2.3: cookieExpiryStr human-readable relative time" {
     try std.testing.expectEqualStrings("2d left", cookieExpiryStr(&buf, now + 2 * 86400, now));
     try std.testing.expectEqualStrings("4w left", cookieExpiryStr(&buf, now + 4 * 7 * 86400, now));
 }
-

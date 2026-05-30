@@ -269,7 +269,7 @@ fn spawnDaemon(allocator: std.mem.Allocator, awrd_path: []const u8) !void {
     var status: i32 = 0;
     _ = std.posix.system.waitpid(@intCast(pid1), &status, 0);
     _ = allocator; // unused; kept for API symmetry with future
-                   // variants that may want to allocate buffers.
+    // variants that may want to allocate buffers.
 }
 
 fn isDaemonListening(sock_path: []const u8) bool {
@@ -823,8 +823,14 @@ fn extractJsonRpcResult(resp: []const u8) ?[]const u8 {
     while (i < resp.len) : (i += 1) {
         const c = resp[i];
         if (in_string) {
-            if (escape) { escape = false; continue; }
-            if (c == '\\') { escape = true; continue; }
+            if (escape) {
+                escape = false;
+                continue;
+            }
+            if (c == '\\') {
+                escape = true;
+                continue;
+            }
             if (c == '"') in_string = false;
             continue;
         }
@@ -1908,10 +1914,7 @@ fn runSessionSubcommand(alloc: std.mem.Allocator, io: std.Io, args: []const [:0]
 
     const browser_arg = args[3];
     const browser: session_import.Browser =
-        if (std.mem.eql(u8, browser_arg, "chrome")) .chrome
-        else if (std.mem.eql(u8, browser_arg, "chromium")) .chromium
-        else if (std.mem.eql(u8, browser_arg, "firefox")) .firefox
-        else {
+        if (std.mem.eql(u8, browser_arg, "chrome")) .chrome else if (std.mem.eql(u8, browser_arg, "chromium")) .chromium else if (std.mem.eql(u8, browser_arg, "firefox")) .firefox else {
             try stdoutWrite(io, "session import: unknown browser '");
             try stdoutWrite(io, browser_arg);
             try stdoutWrite(io, "' (want chrome|chromium|firefox)\n");

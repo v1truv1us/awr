@@ -530,9 +530,9 @@ const DIM = "\x1b[2m";
 const UNDERLINE = "\x1b[4m";
 const ITALIC = "\x1b[3m";
 const CYAN = "\x1b[36m";
-const GREEN = "\x1b[32m";   // T2.5: string literals / diff additions
-const YELLOW = "\x1b[33m";  // T2.5: numeric literals
-const RED = "\x1b[31m";     // T2.6: diff deletions
+const GREEN = "\x1b[32m"; // T2.5: string literals / diff additions
+const YELLOW = "\x1b[33m"; // T2.5: numeric literals
+const RED = "\x1b[31m"; // T2.6: diff deletions
 
 // ── Public API ────────────────────────────────────────────────────────────
 
@@ -1257,40 +1257,39 @@ fn renderDiffBlock(state: *RenderState, w: anytype, text: []const u8) !void {
 fn isKeyword(word: []const u8, lang: Language) bool {
     return switch (lang) {
         .zig => isIn(word, &.{
-            "const", "var", "fn", "pub", "return", "if", "else", "while", "for",
-            "switch", "break", "continue", "defer", "errdefer", "try", "catch",
-            "error", "union", "struct", "enum", "packed", "extern", "export",
-            "inline", "noreturn", "void", "bool", "anytype", "comptime",
-            "usingnamespace", "test", "orelse", "and", "or", "not",
-            "true", "false", "null", "undefined", "unreachable",
+            "const",   "var",      "fn",             "pub",         "return",   "if",     "else",     "while", "for",
+            "switch",  "break",    "continue",       "defer",       "errdefer", "try",    "catch",    "error", "union",
+            "struct",  "enum",     "packed",         "extern",      "export",   "inline", "noreturn", "void",  "bool",
+            "anytype", "comptime", "usingnamespace", "test",        "orelse",   "and",    "or",       "not",   "true",
+            "false",   "null",     "undefined",      "unreachable",
         }),
         .rust => isIn(word, &.{
-            "fn", "let", "mut", "const", "pub", "use", "mod", "struct", "enum",
-            "impl", "trait", "for", "if", "else", "while", "loop", "match",
-            "return", "break", "continue", "where", "self", "Self", "super",
-            "async", "await", "move", "ref", "type", "dyn", "unsafe", "extern",
-            "true", "false", "None", "Some", "Ok", "Err",
+            "fn",    "let",      "mut",   "const",  "pub",    "use",   "mod",   "struct", "enum",
+            "impl",  "trait",    "for",   "if",     "else",   "while", "loop",  "match",  "return",
+            "break", "continue", "where", "self",   "Self",   "super", "async", "await",  "move",
+            "ref",   "type",     "dyn",   "unsafe", "extern", "true",  "false", "None",   "Some",
+            "Ok",    "Err",
         }),
         .js, .ts => isIn(word, &.{
-            "const", "let", "var", "function", "return", "if", "else", "for",
-            "while", "do", "switch", "case", "break", "continue", "class",
-            "extends", "import", "export", "default", "from", "async", "await",
-            "try", "catch", "finally", "throw", "new", "this", "typeof",
-            "instanceof", "true", "false", "null", "undefined", "void", "delete",
-            "in", "of", "type", "interface", "enum", "implements",
+            "const",   "let",        "var",     "function", "return", "if",         "else",  "for",
+            "while",   "do",         "switch",  "case",     "break",  "continue",   "class", "extends",
+            "import",  "export",     "default", "from",     "async",  "await",      "try",   "catch",
+            "finally", "throw",      "new",     "this",     "typeof", "instanceof", "true",  "false",
+            "null",    "undefined",  "void",    "delete",   "in",     "of",         "type",  "interface",
+            "enum",    "implements",
         }),
         .python => isIn(word, &.{
-            "def", "class", "return", "if", "elif", "else", "for", "while",
-            "import", "from", "as", "with", "try", "except", "finally", "raise",
-            "pass", "break", "continue", "lambda", "yield", "global", "nonlocal",
-            "and", "or", "not", "in", "is", "True", "False", "None",
+            "def",    "class", "return",   "if",     "elif",  "else",   "for",      "while",
+            "import", "from",  "as",       "with",   "try",   "except", "finally",  "raise",
+            "pass",   "break", "continue", "lambda", "yield", "global", "nonlocal", "and",
+            "or",     "not",   "in",       "is",     "True",  "False",  "None",
         }),
         .sh => isIn(word, &.{
-            "if", "then", "else", "elif", "fi", "for", "while", "do", "done",
-            "case", "esac", "in", "function", "return", "local", "export",
-            "echo", "exit", "true", "false",
+            "if",   "then",  "else", "elif",     "fi",     "for",   "while",  "do",   "done",
+            "case", "esac",  "in",   "function", "return", "local", "export", "echo", "exit",
+            "true", "false",
         }),
-        .json => isIn(word, &.{"true", "false", "null"}),
+        .json => isIn(word, &.{ "true", "false", "null" }),
         .html, .unknown => false,
     };
 }
@@ -3028,8 +3027,7 @@ test "render browse profile applies starter CSSOM display and visibility" {
 test "render preserves whitespace under CSS white-space: pre / pre-wrap / pre-line" {
     // Three lines, each with multiple spaces and newlines that the default
     // wrap-and-collapse path would flatten. CSSOM §4.6.3 keeps them intact.
-    var doc = try dom.parseDocument(std.testing.allocator,
-        "<html><head><style>.pre-class { white-space: pre-wrap; }</style></head>" ++
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><head><style>.pre-class { white-space: pre-wrap; }</style></head>" ++
         "<body><main>" ++
         "<div class=\"pre-class\">stylesheet  preserves\nnewline</div>" ++
         "<div style=\"white-space: pre\">inline  preserves\nnewline</div>" ++
@@ -3268,7 +3266,8 @@ test "T2.5: detectLanguage parses language-XYZ class tokens" {
     for (cases) |c| {
         // Build HTML with 6+ lines so the line-number gutter fires.
         var buf: [512]u8 = undefined;
-        const html = try std.fmt.bufPrint(&buf,
+        const html = try std.fmt.bufPrint(
+            &buf,
             "<html><body><pre><code class=\"{s}\">{s}\na\nb\nc\nd\ne\n</code></pre></body></html>",
             .{ c.lang_cls, c.code },
         );
@@ -3490,4 +3489,3 @@ test "T2.8: focused link shows REVERSE when focused" {
     defer focused_model.deinit();
     try std.testing.expect(std.mem.indexOf(u8, focused_model.text, REVERSE) != null);
 }
-
