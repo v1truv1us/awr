@@ -349,9 +349,9 @@ fn headingLevel(tag: []const u8) ?u8 {
 
 fn isBlockTag(tag: []const u8) bool {
     inline for ([_][]const u8{
-        "div",  "section", "article", "aside",   "header", "footer",
-        "nav",  "main",    "figure",  "figcaption", "table",  "tr",
-        "td",   "th",      "dl",      "dt",      "dd",     "address",
+        "div",  "section",  "article", "aside",      "header", "footer",
+        "nav",  "main",     "figure",  "figcaption", "table",  "tr",
+        "td",   "th",       "dl",      "dt",         "dd",     "address",
         "form", "fieldset",
     }) |t| {
         if (eq(tag, t)) return true;

@@ -1161,14 +1161,14 @@ fn jsThrowQuotaExceeded(c: *qjs.Context) qjs.Value {
 }
 
 fn lsGetItemFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
-    const c = ctx orelse return qjs.Value.@"null";
-    const bridge = getBridge(ctx) orelse return qjs.Value.@"null";
-    if (args.len == 0) return qjs.Value.@"null";
+    const c = ctx orelse return qjs.Value.null;
+    const bridge = getBridge(ctx) orelse return qjs.Value.null;
+    if (args.len == 0) return qjs.Value.null;
     const v: qjs.Value = @bitCast(args[0]);
-    const cstr = v.toCString(c) orelse return qjs.Value.@"null";
+    const cstr = v.toCString(c) orelse return qjs.Value.null;
     defer c.freeCString(cstr);
     const key = std.mem.span(cstr);
-    const value = lsGetItem(bridge, key) orelse return qjs.Value.@"null";
+    const value = lsGetItem(bridge, key) orelse return qjs.Value.null;
     return qjs.Value.initStringLen(c, value);
 }
 
@@ -1207,13 +1207,13 @@ fn lsClearFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.J
 }
 
 fn lsKeyFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
-    const c = ctx orelse return qjs.Value.@"null";
-    const bridge = getBridge(ctx) orelse return qjs.Value.@"null";
-    if (args.len == 0) return qjs.Value.@"null";
+    const c = ctx orelse return qjs.Value.null;
+    const bridge = getBridge(ctx) orelse return qjs.Value.null;
+    if (args.len == 0) return qjs.Value.null;
     const v: qjs.Value = @bitCast(args[0]);
-    const idx_i32 = v.toInt32(c) catch return qjs.Value.@"null";
-    if (idx_i32 < 0) return qjs.Value.@"null";
-    const key = bridge.local_storage.keyAt(@intCast(idx_i32)) orelse return qjs.Value.@"null";
+    const idx_i32 = v.toInt32(c) catch return qjs.Value.null;
+    if (idx_i32 < 0) return qjs.Value.null;
+    const key = bridge.local_storage.keyAt(@intCast(idx_i32)) orelse return qjs.Value.null;
     return qjs.Value.initStringLen(c, key);
 }
 
@@ -1224,13 +1224,13 @@ fn lsLengthFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.
 }
 
 fn ssGetItemFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
-    const c = ctx orelse return qjs.Value.@"null";
-    const bridge = getBridge(ctx) orelse return qjs.Value.@"null";
-    if (args.len == 0) return qjs.Value.@"null";
+    const c = ctx orelse return qjs.Value.null;
+    const bridge = getBridge(ctx) orelse return qjs.Value.null;
+    if (args.len == 0) return qjs.Value.null;
     const v: qjs.Value = @bitCast(args[0]);
-    const cstr = v.toCString(c) orelse return qjs.Value.@"null";
+    const cstr = v.toCString(c) orelse return qjs.Value.null;
     defer c.freeCString(cstr);
-    const value = ssGetItem(bridge, std.mem.span(cstr)) orelse return qjs.Value.@"null";
+    const value = ssGetItem(bridge, std.mem.span(cstr)) orelse return qjs.Value.null;
     return qjs.Value.initStringLen(c, value);
 }
 
@@ -1269,13 +1269,13 @@ fn ssClearFn(ctx: ?*qjs.Context, _: qjs.Value, _: []const @import("quickjs").c.J
 }
 
 fn ssKeyFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @import("quickjs").c.JSValue) qjs.Value {
-    const c = ctx orelse return qjs.Value.@"null";
-    const bridge = getBridge(ctx) orelse return qjs.Value.@"null";
-    if (args.len == 0) return qjs.Value.@"null";
+    const c = ctx orelse return qjs.Value.null;
+    const bridge = getBridge(ctx) orelse return qjs.Value.null;
+    if (args.len == 0) return qjs.Value.null;
     const v: qjs.Value = @bitCast(args[0]);
-    const idx_i32 = v.toInt32(c) catch return qjs.Value.@"null";
-    if (idx_i32 < 0) return qjs.Value.@"null";
-    const key = bridge.session_storage.keyAt(@intCast(idx_i32)) orelse return qjs.Value.@"null";
+    const idx_i32 = v.toInt32(c) catch return qjs.Value.null;
+    if (idx_i32 < 0) return qjs.Value.null;
+    const key = bridge.session_storage.keyAt(@intCast(idx_i32)) orelse return qjs.Value.null;
     return qjs.Value.initStringLen(c, key);
 }
 

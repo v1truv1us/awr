@@ -116,7 +116,8 @@ pub fn sendUpgradeRequest(
     key_b64: []const u8,
 ) !void {
     var buf: [2048]u8 = undefined;
-    const req = try std.fmt.bufPrint(&buf,
+    const req = try std.fmt.bufPrint(
+        &buf,
         "GET {s} HTTP/1.1\r\n" ++
             "Host: {s}\r\n" ++
             "Upgrade: websocket\r\n" ++

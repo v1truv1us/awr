@@ -38,9 +38,9 @@ pub const Url = struct {
 
         const is_https = blk: {
             if (std.ascii.eqlIgnoreCase(scheme, "https")) break :blk true;
-            if (std.ascii.eqlIgnoreCase(scheme, "http"))  break :blk false;
-            if (std.ascii.eqlIgnoreCase(scheme, "wss"))   break :blk true;
-            if (std.ascii.eqlIgnoreCase(scheme, "ws"))    break :blk false;
+            if (std.ascii.eqlIgnoreCase(scheme, "http")) break :blk false;
+            if (std.ascii.eqlIgnoreCase(scheme, "wss")) break :blk true;
+            if (std.ascii.eqlIgnoreCase(scheme, "ws")) break :blk false;
             return ParseError.UnsupportedScheme;
         };
         const is_websocket = std.ascii.eqlIgnoreCase(scheme, "ws") or
