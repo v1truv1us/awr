@@ -26,6 +26,10 @@ pool, one rendered DOM.
   loading, declaration APIs, cascade with specificity + !important,
   non-layout `getComputedStyle()`, and renderer integration for `display`,
   `visibility`, and `white-space`). Remains explicitly non-layout.
+- **TUI Quality Track** is CLOSED (2026-05-30): inline link word-wrap,
+  loading indicator (`⟳ Loading…` header), help modal (`h` key),
+  table linearization (HN/YC jobs render in reading order), navigation
+  feedback. AWR is usable as a daily browser replacement.
 - **Tiers 4–5** (real CSS/layout engine and full SPA parity) are documented in
   `spec/subspecs/browser-roadmap.md §3` and deferred.
 

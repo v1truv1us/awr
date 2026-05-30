@@ -168,11 +168,10 @@ HN, YC jobs, and layout-table pages are now fully readable. Data tables
 - Full streaming + reconnect deferred until daemon-mode session lifetime creates a home for background connections
 
 ### `structuredClone`
-- Current implementation is a stub that returns `undefined` — documented in `src/js/engine.zig`
-- Sufficient for Phase 2 surface but not spec-correct
+- Implemented as a JS polyfill: primitives, Date, RegExp, Map, Set, Array, and plain objects are deep-cloned. Does not handle ArrayBuffer, TypedArray, or circular references (Tier 4+ territory).
 
 ### `setTimeout` / `setInterval`
-- Degrade to stub behaviour when the libxev loop is not threaded through (`src/js/engine.zig`)
+- Fully implemented via libxev timer queue in the Page/TUI path. In the isolated `test-js` target (no EventLoop), timers are no-ops — intentional for the standalone test binary.
 
 ---
 
@@ -192,15 +191,11 @@ WebGL/WebGPU, `<video>`/`<audio>` playback, WebRTC, canvas pixel-level access, C
 ## Known Issues / Bugs
 
 - **WebSocket/SSE not streaming**: both are one-shot collect-then-dispatch; sites that rely on live push without page reload will not update incrementally (documented limitation in `spec/subspecs/browser-realtime.md §8`).
-- **TCP per-thread event loop**: each connection runs its own libxev loop on a dedicated thread rather than sharing a loop; limits concurrency under high-connection daemon workloads (`TODO(libxev-phase2)` in `src/net/tcp.zig`).
-- **`structuredClone` stub**: returns `undefined` instead of a deep clone; affects scripts that deep-clone objects during page init.
-- **`setTimeout`/`setInterval` degrade to stubs** when the event loop is not threaded through the JS engine.
+- **WebSocket/SSE one-shot collect**: both collect the full stream before dispatching; live-push sites won't update incrementally without a page reload (documented, `spec/subspecs/browser-realtime.md §8`).
+- **TCP per-thread event loop**: each connection runs its own libxev loop on a dedicated thread; limits concurrency under high-connection daemon workloads (`TODO(libxev-phase2)` in `src/net/tcp.zig`).
+- **`setTimeout`/`setInterval` in standalone JS tests**: in the `test-js` target there is no EventLoop, so timers are no-ops. In the Page/TUI path the EventLoop is always attached and timers fire correctly.
 - **Pool/cookie `Io` threading**: `src/net/pool.zig` and `src/net/cookie.zig` use POSIX wall-clock reads directly rather than the `Io` abstraction — flagged for cleanup once `Io` APIs stabilize in Zig.
-- **Tier 3 smoke gate not fully verified**: `spec/subspecs/browser-realtime.md §8` notes §4.5 manual smoke (SSE live-update in TUI) was marked deferred at closure time.
-- **Inline link word-wrap**: spaces stripped around `<a>` tags cause words to run together; link text crossing a line boundary places continuation at the right edge instead of column 0. Tracked in `spec/subspecs/tui-quality.md §2.1`.
-- **Table-as-layout pages unreadable**: HN, YC jobs, and Wikipedia infoboxes render scrambled because layout tables emit cells positionally. Tracked in `spec/subspecs/tui-quality.md §2.4`.
-- **No loading indicator**: TUI appears frozen while fetching slow pages. Tracked in `spec/subspecs/tui-quality.md §2.2`.
-- **`test-render` build step does not exist**: `STATUS.md` historically listed it under verification commands but no such step is registered in `build.zig`. Render tests run under `zig build test` (co-located tests in `src/render.zig`).
+- **`test-render` build step does not exist**: render unit tests are co-located in `src/render.zig` and run under `zig build test`; there is no standalone `zig build test-render` step.
 
 ---
 

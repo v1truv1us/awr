@@ -27,6 +27,7 @@ This is the entry point for AWR product and engineering scope. If a document con
    - `spec/subspecs/browser-realtime.md` — SSE and WebSocket.
    - `spec/subspecs/browser-events.md` — events, timers, `matchMedia`.
    - `spec/subspecs/cssom.md` — starter non-layout CSSOM track.
+   - `spec/subspecs/tui-quality.md` — TUI UX quality track (inline link word-wrap, loading indicator, help modal, table linearization). CLOSED 2026-05-30.
 
 5. **Deferred strategy docs**
    - `spec/subspecs/mcp-stdio.md` — native MCP stdio server track.

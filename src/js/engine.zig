@@ -1,23 +1,21 @@
-/// engine.zig — QuickJS-NG JS engine wrapper for AWR Phase 2.
+/// engine.zig — QuickJS-NG JS engine wrapper for AWR.
 ///
-/// Provides JsEngine (a Runtime + Context pair) with a minimal Web API
-/// surface pre-installed:
+/// Provides JsEngine (a Runtime + Context pair) with a real Web API surface:
 ///
 ///   console.log / console.warn / console.error
-///   setTimeout / clearTimeout / setInterval / clearInterval (stubs)
-///   structuredClone (stub — returns undefined, sufficient for Phase 2)
+///   setTimeout / clearTimeout / setInterval / clearInterval
+///     — libxev-backed when an EventLoop is attached (Page path);
+///       degrade gracefully to no-op in the standalone JS test target
+///       where no event loop is present.
+///   structuredClone
+///     — JS polyfill: handles primitives, Date, RegExp, Map, Set,
+///       Array, and plain objects recursively.
 ///
 /// The JS↔DOM bridge (document.querySelector, addEventListener, …) is
 /// installed separately by dom/bridge.zig after the DOM tree is ready.
-///
-/// Phase 2 limitations:
-///   - setTimeout/setInterval are synchronous no-ops: callbacks are never
-///     called.  Phase 3 will wire them into the libxev timer queue.
-///   - fetch() is not yet installed; scripts that call fetch() will throw
-///     ReferenceError.  Phase 2 installs a minimal stub that throws a
-///     descriptive error.
-///   - console output goes to stderr by default.  Tests that need to
-///     capture output can pass a custom ConsoleSink.
+/// fetch() is installed by Page after the DOM bridge; it is not available
+/// in the standalone js_test target. Console output goes to stderr by
+/// default; tests can pass a custom ConsoleSink to capture output.
 const std = @import("std");
 const qjs = @import("quickjs");
 const event_loop_mod = @import("event_loop.zig");
@@ -153,7 +151,7 @@ const HostData = struct {
     /// a circular import dependency.
     extension: ?*anyopaque = null,
     /// Optional libxev-backed timer queue installed by Page.
-    /// When null, setTimeout/setInterval degrade to the stub behaviour.
+    /// When null, setTimeout/setInterval are installed but no-op (standalone test target).
     event_loop: ?*EventLoop = null,
     /// Optional fetch implementation installed by Page. When null,
     /// `fetch()` returns a rejected Promise.
@@ -1017,7 +1015,6 @@ pub const JsEngine = struct {
         \\})();
     ;
 
-
     const STRUCTURED_CLONE_POLYFILL =
         \\(function () {
         \\  if (typeof globalThis.structuredClone === 'function') return;
@@ -1371,8 +1368,7 @@ test "JsEngine — matchMedia returns MediaQueryList shape" {
     try std.testing.expect(try engine.evalBool("matchMedia('(min-width: 600px)').media === '(min-width: 600px)'"));
     // addEventListener / addListener / dispatchEvent must be callable
     // without throwing — typical theme-detection pattern.
-    try std.testing.expect(try engine.evalBool(
-        "var q = matchMedia('(min-width: 1px)'); q.addEventListener('change', function(){}); q.removeEventListener('change', function(){}); q.addListener(function(){}); q.dispatchEvent(new Object()) === false"));
+    try std.testing.expect(try engine.evalBool("var q = matchMedia('(min-width: 1px)'); q.addEventListener('change', function(){}); q.removeEventListener('change', function(){}); q.addListener(function(){}); q.dispatchEvent(new Object()) === false"));
 }
 
 test "JsEngine — matchMedia evaluates prefers-color-scheme + width queries" {

@@ -68,7 +68,7 @@ TCP (libxev), TLS (BoringSSL), HTTP/1.1, HTTP/2 (nghttp2), URL parsing, cookies 
 **Test command**: `zig build test-js`
 
 ### What lives here
-QuickJS-NG wrapper providing `console.log`, `fetch()`, `setTimeout`, and Promise microtask draining.
+QuickJS-NG wrapper providing `console.log`, `fetch()`, `setTimeout`/`setInterval` (libxev-backed), `structuredClone` (JS polyfill), and Promise microtask draining.
 
 ### Constraints
 - **`use_llvm = true` is required.** Any build target linking QuickJS-NG must set this flag in `build.zig`.
