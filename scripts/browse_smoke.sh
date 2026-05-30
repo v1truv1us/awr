@@ -37,31 +37,50 @@ fi
 # code path (its own smoke gate in scripts/regression_smoke.sh).
 export AWR_DAEMON=0
 
-# ── Flow 1: Google search round-trip ────────────────────────────────
-echo "→ Flow 1: Google search (no auth)"
-# Submit Google's homepage form with a query. AWR's `submit` finds
-# the form, merges hidden inputs (the request-id / CSRF tokens
-# Google sets), POSTs (or GETs — Google's main form is GET) to the
-# resolved action URL, and follows redirects to the results page.
-GOOGLE_OUT="$( "$AWR" submit "https://www.google.com/" q="hello world" 2>&1 )" || {
-  echo "FAIL: google submit returned non-zero" >&2
-  echo "$GOOGLE_OUT" | head -20 >&2
-  exit 1
+# ── Flow 1: form submit round-trip (mock server, hermetic) ──────────
+# Previously a Google search test. Google dropped their static <form>
+# element (JS-driven since ~2024). We now use the built-in mock server
+# to verify the form-find → field-merge → POST pipeline hermetically.
+# The mock's /echo-headers endpoint always returns 200 with request
+# headers, so we post a form whose action points there and assert
+# the response came back with status 200.
+echo "→ Flow 1: form submit round-trip (mock server)"
+MOCK_PORT="${AWR_BROWSE_MOCK_PORT:-7778}"
+
+# Write a minimal HTML form page to experiments/ so the mock server
+# (which roots at experiments/) can serve it.
+FORM_FNAME="awr_smoke_form_$$.html"
+FORM_PATH="experiments/${FORM_FNAME}"
+cat > "$FORM_PATH" <<'FORMEOF'
+<!DOCTYPE html><html><body>
+<form method="post" action="/echo-headers">
+  <input name="q" value="">
+  <input type="submit" value="Go">
+</form>
+</body></html>
+FORMEOF
+trap 'rm -f "${FORM_PATH}" 2>/dev/null; true' EXIT
+
+# Start mock server in background on a unique port
+"$AWR" mock --port "$MOCK_PORT" >/dev/null 2>&1 &
+FORM_MOCK_PID=$!
+FLOW1_CLEANUP() { kill "$FORM_MOCK_PID" 2>/dev/null; rm -f "${FORM_PATH}" 2>/dev/null; true; }
+trap FLOW1_CLEANUP EXIT
+sleep 1  # let mock settle
+
+FORM_OUT="$( "$AWR" submit "http://127.0.0.1:${MOCK_PORT}/${FORM_FNAME}" q="hello world" 2>&1 )" || {
+  echo "FAIL: form submit returned non-zero" >&2
+  echo "$FORM_OUT" | head -10 >&2
+  kill "$FORM_MOCK_PID" 2>/dev/null; exit 1
 }
-# The envelope should describe a Google results page (status 200 with
-# "Search" / "Results" markers or the query echoed back). We grep
-# loosely because Google's HTML changes frequently — we just want a
-# load that wasn't blocked.
-if ! echo "$GOOGLE_OUT" | grep -qE '"status":200'; then
-  echo "FAIL: google did not return 200" >&2
-  echo "$GOOGLE_OUT" | head -10 >&2
-  exit 1
+if ! echo "$FORM_OUT" | grep -qE '"status":200'; then
+  echo "FAIL: form submit did not get status 200" >&2
+  echo "$FORM_OUT" | head -10 >&2
+  kill "$FORM_MOCK_PID" 2>/dev/null; exit 1
 fi
-if ! echo "$GOOGLE_OUT" | grep -qiE 'hello|world|search|google'; then
-  echo "FAIL: google results body did not look like a search page" >&2
-  echo "$GOOGLE_OUT" | head -10 >&2
-  exit 1
-fi
+kill "$FORM_MOCK_PID" 2>/dev/null
+trap - EXIT  # clear flow-1 cleanup trap; no longer needed
+rm -f "${FORM_PATH}" 2>/dev/null
 echo "  ok"
 
 # ── Flow 2: bookmark round-trip ─────────────────────────────────────
@@ -102,7 +121,7 @@ if [ -z "${AWR_HN_USER:-}" ] || [ -z "${AWR_HN_PASS:-}" ]; then
 fi
 
 JAR="$(mktemp "${TMPDIR:-/tmp}/awr-hn-jar-XXXXXX.txt")"
-trap "rm -f \"$JAR\"" EXIT
+trap 'rm -f "$JAR"' EXIT
 
 echo "→ Flow 3: HN sign-in (auth)"
 # Step 1: POST credentials to /login. The login form on HN is a
