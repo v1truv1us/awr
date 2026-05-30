@@ -3,13 +3,13 @@
 > **Canonical execution spec.** If any other planning doc disagrees, this file wins.
 >
 > **Current status:** Tiers 0–3 are **CLOSED**, plus the starter CSSOM track
-> (`spec/subspecs/cssom.md`) closed 2026-05-27. Tier 0 (agent runtime
-> baseline), Tier 1 (interactive TUI parity), Tier 2 (render + UX polish),
-> and Tier 3 (lightly dynamic site support — History, Storage, SSE, WebSocket,
-> events, starter CSSOM) are all closed under curated WPT/Test262 gates.
-> Tiers 4–5 (layout engine, full SPA parity) are documented and deferred per
-> `spec/subspecs/browser-roadmap.md`. Daemon mode is closed per
-> `spec/subspecs/daemon-mode.md`. This file remains the change-control
+> (`spec/subspecs/cssom.md`) closed 2026-05-27, and the TUI Quality Track
+> (`spec/subspecs/tui-quality.md`) closed 2026-05-30 (all 5 UX items: inline
+> link word-wrap, loading indicator, help modal, table linearization, nav
+> feedback). Tiers 4–5 (layout engine, full SPA parity) are documented and
+> deferred per `spec/subspecs/browser-roadmap.md`. Daemon mode is closed per
+> `spec/subspecs/daemon-mode.md`. AWR is now fully usable as a browser
+> replacement for both humans and agents. This file remains the change-control
 > point for any tier promotion or scope change.
 
 ---

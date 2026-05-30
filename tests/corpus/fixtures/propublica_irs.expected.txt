@@ -32,14 +32,14 @@ The confidential tax records obtained by ProPublica show that the ultrarich
 effectively sidestep this system.
 Read More
 
-You May Be Paying a Higher Tax Rate Than a Billionaire[1]America’s
+You May Be Paying a Higher Tax Rate Than a Billionaire[1] America’s
 billionaires avail themselves of tax-avoidance strategies beyond the reach of
 ordinary people. Their wealth derives from the skyrocketing value of their
 assets, like stock and property. Those gains are not defined by U.S. laws as
 taxable income unless and until the billionaires sell.
 To capture the financial reality of the richest Americans, ProPublica
 undertook an analysis that has never been done before. We compared how much in
-taxes the 25 richest Americans paid each year to how muchForbes[2]estimated
+taxes the 25 richest Americans paid each year to how much Forbes[2] estimated
 their wealth grew in that same time period.
 We’re going to call this their true tax rate.
 The results are stark. According to Forbes, those 25 people saw their worth
@@ -57,21 +57,22 @@ The Ultrawealthy by the Numbers
 
 Wealth, income and taxes for four of the richest people in the country from
 2014 to 2018.
-Read ourfull methodology[3].Agnes Chang/ProPublicaNo one among the 25
+Read our full methodology[3]. Agnes Chang/ProPublica No one among the 25
 wealthiest avoided as much tax as Buffett, the grandfatherly centibillionaire.
 That’s perhaps surprising, given his public stance as an advocate of higher
 taxes for the rich. According to Forbes, his riches rose $24.3 billion between
 2014 and 2018. Over those years, the data shows, Buffett reported paying $23.7
 million in taxes.
-[image]Warren BuffettBerkshire Hathaway Inc.2014-2018 Wealth Growth:$24.3BTotal
-Income Reported:$125M (0.51% of wealth)Total Taxes Paid:$23.7M (0.10% of
-wealth)Note: Values in the graphic are rounded.That works out to a true tax
-rate of 0.1%, or less than 10 cents for every $100 he added to his wealth.
+[image] Warren Buffett Berkshire Hathaway Inc. 2014-2018 Wealth Growth: $24.3B
+Total Income Reported: $125M (0.51% of wealth) Total Taxes Paid: $23.7M (0.10%
+of wealth) Note: Values in the graphic are rounded. That works out to a true
+tax rate of 0.1%, or less than 10 cents for every $100 he added to his wealth.
 In the coming months, ProPublica will use the IRS data we have obtained to
 explore in detail how the ultrawealthy avoid taxes, exploit loopholes and
 escape scrutiny from federal auditors.
-Experts have long understood the broad outlines of howlittle[5]the wealthy aretaxed[6]in
-the United States, and many lay people have long suspected the same thing.
+Experts have long understood the broad outlines of how little[5] the wealthy
+are taxed[6] in the United States, and many lay people have long suspected the
+same thing.
 But few specifics about individuals ever emerge in public. Tax information is
 among the most zealously guarded secrets in the federal government. ProPublica
 has decided to reveal individual tax information of some of the wealthiest
@@ -81,12 +82,12 @@ Consider Bezos’ 2007, one of the years he paid zero in federal income taxes.
 Amazon’s stock more than doubled. Bezos’ fortune leapt $3.8 billion,
 according to Forbes, whose wealth estimates are widely cited. How did a person
 enjoying that sort of wealth explosion end up paying no income tax?
-[image]Jeff BezosAmazon.com Inc.2014-2018 Wealth Growth:$99.0BTotal Income
-Reported:$4.22B (4.26% of wealth)Total Taxes Paid:$973M (0.98% of wealth)In
-that year, Bezos, who filed his taxes jointly with his then-wife, MacKenzie
-Scott, reported a paltry (for him) $46 million in income, largely from
-interest and dividend payments on outside investments. He was able to offset
-every penny he earned with losses from side investments and various
+[image] Jeff Bezos Amazon.com Inc. 2014-2018 Wealth Growth: $99.0B Total
+Income Reported: $4.22B (4.26% of wealth) Total Taxes Paid: $973M (0.98% of
+wealth) In that year, Bezos, who filed his taxes jointly with his then-wife,
+MacKenzie Scott, reported a paltry (for him) $46 million in income, largely
+from interest and dividend payments on outside investments. He was able to
+offset every penny he earned with losses from side investments and various
 deductions, like interest expenses on debts and the vague catchall category of
 “other expenses.”
 In 2011, a year in which his wealth held roughly steady at $18 billion, Bezos
@@ -106,26 +107,26 @@ paid a minuscule fraction of it in taxes, a typical American household paid
 more in taxes than it accumulated in wealth.
 Jeff Bezos
 Typical American Household
-Read ourfull methodology[8].Agnes Chang/ProPublicaThe revelations provided by
-the IRS data come at a crucial moment. Wealth inequality has become one of the
-defining issues of our age. The president and Congress are considering the
+Read our full methodology[8]. Agnes Chang/ProPublica The revelations provided
+by the IRS data come at a crucial moment. Wealth inequality has become one of
+the defining issues of our age. The president and Congress are considering the
 most ambitious tax increases in decades on those with high incomes. But the
 American tax conversation has been dominated by debate over incremental
 changes, such as whether the top tax rate should be 39.6% rather than 37%.
 ProPublica’s data shows that while some wealthy Americans, such as hedge
 fund managers, would pay more taxes under the current Biden administration
 proposals, the vast majority of the top 25 would see little change.
-The tax data was provided to ProPublica after we publisheda series of articles
-scrutinizing the IRS[9]. The articles exposed how years of budget cuts havehobbled
-the agency’s ability to enforce the law[10]and how the largest corporations
-andthe rich[11]have benefited from the IRS’ weakness. They also showed how
-people in poor regions are nowmore likely to be audited[12]than those in
-affluent areas.
+The tax data was provided to ProPublica after we published a series of
+articles scrutinizing the IRS[9]. The articles exposed how years of budget
+cuts have hobbled the agency’s ability to enforce the law[10] and how the
+largest corporations and the rich[11] have benefited from the IRS’ weakness.
+They also showed how people in poor regions are now more likely to be audited[12]
+than those in affluent areas.
 Read More
 
-Why We Are Publishing the Tax Secrets of the .001%[13]The Secret IRS Files
-Short Form: A Quick Guide to What We Uncovered[14]How We Calculated the True
-Tax Rates of the Wealthiest[15]ProPublica is not disclosing how it obtained
+Why We Are Publishing the Tax Secrets of the .001%[13] The Secret IRS Files
+Short Form: A Quick Guide to What We Uncovered[14] How We Calculated the True
+Tax Rates of the Wealthiest[15] ProPublica is not disclosing how it obtained
 the data, which was given to us in raw form, with no conditions or
 conclusions. ProPublica reporters spent months processing and analyzing the
 material to transform it into a usable database.
@@ -134,7 +135,7 @@ already public tax details (in court documents, politicians’ financial
 disclosures and news stories) as well as by vetting it with individuals whose
 tax information is contained in the trove. Every person whose tax information
 is described in this story was asked to comment. Those who responded,
-includingBuffett[16],Bloomberg[17]andIcahn[18], all said they had paid the
+including Buffett[16], Bloomberg[17] and Icahn[18], all said they had paid the
 taxes they owed.
 A spokesman for Soros said in a statement: “Between 2016 and 2018 George
 Soros lost money on his investments, therefore he did not owe federal income
@@ -146,8 +147,8 @@ members; she did not respond. Musk responded to an initial query with a lone
 punctuation mark: “?” After we sent detailed questions to him, he did not
 reply.
 One of the billionaires mentioned in this article objected, arguing that
-publishing personal tax information is a violation of privacy.We have
-concluded[19]that the public interest in knowing this information at this
+publishing personal tax information is a violation of privacy. We have
+concluded[19] that the public interest in knowing this information at this
 pivotal moment outweighs that legitimate concern.
 The consequences of allowing the most prosperous to game the tax system have
 been profound. Federal budgets, apart from military spending, have been
@@ -175,7 +176,7 @@ tobacco and alcohol.
 With the costs of the Civil War looming, Congress imposed a national income
 tax in 1861. The wealthy helped force its repeal soon after the war ended.
 (Their pique could only have been exacerbated by the fact that the law
-required public disclosure. Theannual income[20]of the moguls of the day —
+required public disclosure. The annual income[20] of the moguls of the day —
 $1.3 million for William Astor; $576,000 for Cornelius Vanderbilt — was
 listed in the pages of The New York Times in 1865.)
 By the late 19th and early 20th century, wealth inequality was acute and the
@@ -212,7 +213,7 @@ avoidance would become common. The ruling opened a gaping loophole, Hull
 warned, allowing industrialists to build a company and borrow against the
 stock to pay living expenses. Anyone could “live upon the value” of their
 company stock “without selling it, and of course, without ever paying”
-tax, hesaid[21].
+tax, he said[21].
 Hull’s prediction would reach full flower only decades later, spurred by a
 series of epochal economic, legal and cultural changes that began to gather
 momentum in the 1970s. Antitrust enforcers increasingly accepted mergers and
@@ -227,7 +228,7 @@ eclipse those of John D. Rockefeller, J.P. Morgan and Andrew Carnegie.
 ------------------------------------------------------------------------------
 In the here and now, the ultrawealthy use an array of techniques that aren’t
 available to those of lesser means to get around the tax system.
-Certainly, there areillegal tax evaders[22]among them, but it turns out
+Certainly, there are illegal tax evaders[22] among them, but it turns out
 billionaires don’t have to evade taxes exotically and illicitly — they can
 avoid them routinely and legally.
 Most Americans have to work to live. When they do, they get paid — and they
@@ -237,8 +238,8 @@ The Bezoses of the world have no need to be paid a salary. Bezos’ Amazon
 wages have long been set at the middle-class level of around $80,000 a year.
 For years, there’s been something of a competition among elite founder-CEOs
 to go even lower. Steve Jobs took $1 in salary when he returned to Apple in
-the 1990s.Facebook’s Zuckerberg[23], Oracle’s Larry Ellison and Google’s
-Larry Page have all done the same.
+the 1990s. Facebook’s Zuckerberg[23], Oracle’s Larry Ellison and
+Google’s Larry Page have all done the same.
 Yet this is not the self-effacing gesture it appears to be: Wages are taxed at
 a high rate. The top 25 wealthiest Americans reported $158 million in wages in
 2018, according to the IRS data. That’s a mere 1.1% of what they listed on
@@ -247,38 +248,38 @@ dividends and the sale of stock, bonds or other investments, which are taxed
 at lower rates than wages.
 
 Wealth and income work very differently for the ultrawealthy than they do for
-most people. This represents$100 of incomefor a typical wage-earning American
-household.
+most people. This represents $100 of income for a typical wage-earning
+American household.
 The federal government taxes income. A typical American household might pay
 something like 14%.
 For many households, the rest of their income goes toward expenses every year
 with maybe a small amount left over for savings.
 A typical household might also own a home, which often grows in value over
-time. Such asset gains make up much of that household’swealth growthfor any
-given year.
-This proportion ofwealth growthvs.taxeshas been typical for middle-aged
+time. Such asset gains make up much of that household’s wealth growth for
+any given year.
+This proportion of wealth growth vs. taxes has been typical for middle-aged
 Americans since the mid-2000s. However, it’s inverted for the ultrawealthy.
-This represents$100 of incomefor Bezos. From 2006 to 2018, histaxeswere about
-21% of his income.
+This represents $100 of income for Bezos. From 2006 to 2018, his taxes were
+about 21% of his income.
 But for people in this stratosphere, income doesn’t really matter. Bezos’
-Amazon shares have skyrocketed in value since 2006. In most years, hiswealth
-grewfar more than what he reported inincometo the IRS.
-Between 2006 and 2018, Bezos’ wealth shot up by over$120 billion, while he
-paid a minuscule proportion intaxes.
+Amazon shares have skyrocketed in value since 2006. In most years, his wealth
+grew far more than what he reported in income to the IRS.
+Between 2006 and 2018, Bezos’ wealth shot up by over $120 billion, while he
+paid a minuscule proportion in taxes.
 
-Meanwhile, typical Americans his age paid more intaxesthan they saw inwealth
-growthover that period.
-That is, forevery $100 of wealth growthover that period, typical Americans
-paid$160 in taxes.
+Meanwhile, typical Americans his age paid more in taxes than they saw in
+wealth growth over that period.
+That is, for every $100 of wealth growth over that period, typical Americans
+paid $160 in taxes.
 
-Bezos paid only$1.09.
+Bezos paid only $1.09.
 
-Read ourfull methodology[24].Agnes Chang/ProPublicaAs Congressman Hull
+Read our full methodology[24]. Agnes Chang/ProPublica As Congressman Hull
 envisioned long ago, the ultrawealthy typically hold fast to shares in the
 companies they’ve founded. Many titans of the 21st century sit on mountains
 of what are known as unrealized gains, the total size of which fluctuates each
 day as stock prices rise and fall. Of the $4.25 trillion in wealth held by
-U.S. billionaires, some $2.7 trillion is unrealized,according[25]to Emmanuel
+U.S. billionaires, some $2.7 trillion is unrealized, according[25] to Emmanuel
 Saez and Gabriel Zucman, economists at the University of California, Berkeley.
 Buffett has famously held onto his stock in the company he founded, Berkshire
 Hathaway, the conglomerate that owns Geico, Duracell and significant stakes in
@@ -302,7 +303,7 @@ eschewing stock dividends, at least for a time. In the 1980s and 1990s,
 companies like Microsoft and Oracle offered shareholders rocketing growth and
 profits but did not pay dividends. Google, Facebook, Amazon and Tesla do not
 pay dividends.
-In adetailed written response[26], Buffett defended his practices but did not
+In a detailed written response[26], Buffett defended his practices but did not
 directly address ProPublica’s true tax rate calculation. “I continue to
 believe that the tax code should be changed substantially,” he wrote, adding
 that he thought “huge dynastic wealth is not desirable for our society.”
@@ -317,10 +318,10 @@ be of more use to society if disbursed philanthropically than if it is used to
 slightly reduce an ever-increasing U.S. debt,” he wrote.
 Buy, Borrow, Die: How America’s Ultrawealthy Stay That Way
 
-Mauricio Rodríguez Pons, Nadia Sussman and Almudena Toral/ProPublicaSo how do
-megabillionaires pay their megabills while opting for $1 salaries and hanging
-onto their stock? According to public documents and experts, the answer for
-some is borrowing money — lots of it.
+Mauricio Rodríguez Pons, Nadia Sussman and Almudena Toral/ProPublica So how
+do megabillionaires pay their megabills while opting for $1 salaries and
+hanging onto their stock? According to public documents and experts, the
+answer for some is borrowing money — lots of it.
 For regular people, borrowing money is often something done out of necessity,
 say for a car or a home. But for the ultrawealthy, it can be a way to access
 billions without producing income, and thus, income tax.
@@ -336,14 +337,14 @@ records obtained by ProPublica since they are generally not disclosed to the
 IRS. But occasionally, the loans are disclosed in securities filings. In 2014,
 for example, Oracle revealed that its CEO, Ellison, had a credit line secured
 by about $10 billion of his shares.
-Last year Tesla reported that Musk hadpledged[27]some 92 million shares, which
-were worth about $57.7 billion as of May 29, 2021, as collateral for personal
-loans.
-[image]Elon MuskTesla Inc.2014–2018 Wealth Growth:$13.9BTotal Income
-Reported:$1.52B (10.94% of wealth)Total Taxes Paid:$455M (3.27% of wealth)With
-the exception of one year when he exercised more than a billion dollars in
-stock options, Musk’s tax bills in no way reflect the fortune he has at his
-disposal. In 2015, he paid $68,000 in federal income tax. In 2017, it was
+Last year Tesla reported that Musk had pledged[27] some 92 million shares,
+which were worth about $57.7 billion as of May 29, 2021, as collateral for
+personal loans.
+[image] Elon Musk Tesla Inc. 2014–2018 Wealth Growth: $13.9B Total Income
+Reported: $1.52B (10.94% of wealth) Total Taxes Paid: $455M (3.27% of wealth)
+With the exception of one year when he exercised more than a billion dollars
+in stock options, Musk’s tax bills in no way reflect the fortune he has at
+his disposal. In 2015, he paid $68,000 in federal income tax. In 2017, it was
 $65,000, and in 2018 he paid no federal income tax. Between 2014 and 2018, he
 had a true tax rate of 3.27%.
 The IRS records provide glimpses of other massive loans. In both 2016 and
@@ -387,10 +388,10 @@ Take corporate taxes. When companies pay them, economists say, these costs are
 passed on to the companies’ owners, workers or even consumers. Models
 differ, but they generally assume big stockholders shoulder the lion’s
 share.
-Corporate taxes, however, haveplummeted[29]in recent decades in what has
-become agolden age of corporate tax avoidance[30]. By sending profits abroad,
-companies likeGoogle[31],Facebook[32],Microsoft[33]andApple[34]have often paid
-little or no U.S. corporate tax.
+Corporate taxes, however, have plummeted[29] in recent decades in what has
+become a golden age of corporate tax avoidance[30]. By sending profits abroad,
+companies like Google[31], Facebook[32], Microsoft[33] and Apple[34] have
+often paid little or no U.S. corporate tax.
 For some of the nation’s wealthiest people, particularly Bezos and Musk,
 adding corporate taxes to the equation would hardly change anything at all.
 Other companies like Berkshire Hathaway and Walmart do pay more, which means
@@ -410,16 +411,16 @@ income.
 Michael Bloomberg, the 13th-richest American on the Forbes list, often reports
 high income because the profits of the private company he controls flow mainly
 to him.
-[image]Michael BloombergBloomberg LP2014-2018 Wealth Growth:$22.5BTotal Income
-Reported:$10.0B (44.53% of wealth)Total Taxes Paid:$292M (1.30% of wealth)In
-2018, he reported income of $1.9 billion. When it came to his taxes, Bloomberg
-managed to slash his bill by using deductions made possible by tax cuts passed
-during the Trump administration, charitable donations of $968.3 million and
-credits for having paid foreign taxes. The end result was that he paid $70.7
-million in income tax on that almost $2 billion in income. That amounts to
-just a 3.7% conventional income tax rate. Between 2014 and 2018, Bloomberg had
-a true tax rate of 1.30%.
-In astatement[36], a spokesman for Bloomberg noted that as a candidate,
+[image] Michael Bloomberg Bloomberg LP 2014-2018 Wealth Growth: $22.5B Total
+Income Reported: $10.0B (44.53% of wealth) Total Taxes Paid: $292M (1.30% of
+wealth) In 2018, he reported income of $1.9 billion. When it came to his
+taxes, Bloomberg managed to slash his bill by using deductions made possible
+by tax cuts passed during the Trump administration, charitable donations of
+$968.3 million and credits for having paid foreign taxes. The end result was
+that he paid $70.7 million in income tax on that almost $2 billion in income.
+That amounts to just a 3.7% conventional income tax rate. Between 2014 and
+2018, Bloomberg had a true tax rate of 1.30%.
+In a statement[36], a spokesman for Bloomberg noted that as a candidate,
 Bloomberg had advocated for a variety of tax hikes on the wealthy. “Mike
 Bloomberg pays the maximum tax rate on all federal, state, local and
 international taxable income as prescribed by law,” the spokesman wrote. And
@@ -456,9 +457,10 @@ Many of the richest create foundations for philanthropic giving, which provide
 large charitable tax deductions during their lifetimes and bypass the estate
 tax when they die.
 Wealth managers offer clients a range of opaque and complicated trusts that
-allow the wealthiest Americans to givelarge[38]sums to theirheirs[39]without
-paying estate taxes. The IRS data obtained by ProPublica gives some insight
-into the ultrawealthy’s estate planning, showing hundreds of these trusts.
+allow the wealthiest Americans to give large[38] sums to their heirs[39]
+without paying estate taxes. The IRS data obtained by ProPublica gives some
+insight into the ultrawealthy’s estate planning, showing hundreds of these
+trusts.
 The result is that large fortunes can pass largely intact from one generation
 to the next. Of the 25 richest people in America today, about a quarter are
 heirs: three are Waltons, two are scions of the Mars candy fortune and one is
@@ -467,7 +469,7 @@ the son of Estée Lauder.
 In the past year and a half, hundreds of thousands of Americans have died from
 COVID-19, while millions were thrown out of work. But one of the bleakest
 periods in American history turned out to be one of the most lucrative for
-billionaires. They added$1.2 trillion[40]to their fortunes from January 2020
+billionaires. They added $1.2 trillion[40] to their fortunes from January 2020
 to the end of April of this year, according to Forbes.
 That windfall is among the many factors that have led the country to an
 inflection point, one that traces back to a half-century of growing wealth
@@ -481,8 +483,8 @@ Barr, shocked the nation when he revealed that 155 Americans making over
 $200,000 (about $1.6 million today) had paid no taxes. That group, he told the
 Senate, included 21 millionaires.
 “We face now the possibility of a taxpayer revolt if we do not soon make
-major reforms in our income taxes,” Barrsaid[41]. Members of Congress
-receivedmore furious letters[42]about the tax scofflaws that year than they
+major reforms in our income taxes,” Barr said[41]. Members of Congress
+received more furious letters[42] about the tax scofflaws that year than they
 did about the Vietnam War.
 Congress did pass some reforms, but the long-term trend was a revolt in the
 opposite direction, which then accelerated with the election of Ronald Reagan
@@ -490,7 +492,7 @@ in 1980. Since then, through a combination of political donations, lobbying,
 charitable giving and even direct bids for political office, the ultrawealthy
 have helped shape the debate about taxation in their favor.
 One apparent exception: Buffett, who broke ranks with his billionaire cohort
-to call for higher taxes on the rich. In a famousNew York Times op-ed[43]in
+to call for higher taxes on the rich. In a famous New York Times op-ed[43] in
 2011, Buffett wrote, “My friends and I have been coddled long enough by a
 billionaire-friendly Congress. It’s time for our government to get serious
 about shared sacrifice.”
@@ -516,7 +518,7 @@ with a top rate for long-term capital gains to match that. The administration
 also wants to up the corporate tax rate and to increase the IRS’ budget.
 Some Democrats have gone further, floating ideas that challenge the tax
 structure as it’s existed for the last century. Oregon Sen. Ron Wyden, the
-chairman of the Senate Finance Committee, has proposedtaxing unrealized
+chairman of the Senate Finance Committee, has proposed taxing unrealized
 capital gains[44], a shot through the heart of Macomber. Sens. Elizabeth
 Warren and Bernie Sanders have proposed wealth taxes.
 Aggressive new laws would likely inspire new, sophisticated avoidance
@@ -537,14 +539,15 @@ Help Us Report on Taxes and the Ultrawealthy
 Do you have expertise in tax law, accounting or wealth management? Do you have
 tips to share? Here’s how to get in touch. We are looking for both specific
 tips and broader expertise.
-I may know something related to your investigation.Submit a Tip Through Our
-Form[45]We take privacy seriously.Any tips you submit via the above form are
+I may know something related to your investigation. Submit a Tip Through Our
+Form[45] We take privacy seriously. Any tips you submit via the above form are
 encrypted on our end. But if you wish for additional anonymity, please get in
-touch via one of these methods:Signal[46]SecureDrop[47]Postal Mail[48]Corrections
+touch via one of these methods: Signal[46] SecureDrop[47] Postal Mail[48]Corrections
 -----------
 
 
-Doris Burke[49],Carson Kessler[50]andEllis Simani[51]contributed reporting.
+Doris Burke[49], Carson Kessler[50] and Ellis Simani[51] contributed
+reporting.
 Additional image credits: Elon Musk (Britta Pedersen / POOL / AFP via Getty
 Images), Jeff Bezos (Leigh Vogel/Getty Images), Michael Bloomberg (Johannes
 Eisele/AFP via Getty Images), Warren Buffett (Jamie McCarthy/Getty Images)
@@ -559,9 +562,9 @@ What We’re Watching
 During Donald Trump’s second presidency, ProPublica will focus on the areas
 most in need of scrutiny. Here are some of the issues our reporters will be
 watching — and how to get in touch with them securely.
-[Photo of Donald Trump at a podium seen through a crowd in the foreground.][53]Learn
-more about our reporting team.[54]We will continue to share our areas of
-interest as the news develops.
+[Photo of Donald Trump at a podium seen through a crowd in the foreground.][53]
+Learn more about our reporting team.[54] We will continue to share our areas
+of interest as the news develops.
 [Photo of Sharon Lerner]Sharon Lerner
 
 I cover health and the environment and the agencies that govern them,
@@ -577,10 +580,10 @@ Contact me[60][Photo of Jesse Coburn]Jesse Coburn
 
 I cover housing and transportation, including the companies working in those
 fields and the regulators overseeing them.
-Contact me[62][Photo of an truck with a large screen advertisement that reads: Are (were) you a government worker? ProPublica journalists want to hear from you. Signal: 917-512-0201 propublica.org/tips][64]If
-you don’t have a specific tip or story in mind, we could still use your
-help. Sign up to be a member of ourfederal worker source network[65]to stay in
-touch.
+Contact me[62][Photo of an truck with a large screen advertisement that reads: Are (were) you a government worker? ProPublica journalists want to hear from you. Signal: 917-512-0201 propublica.org/tips][64]
+If you don’t have a specific tip or story in mind, we could still use your
+help. Sign up to be a member of our federal worker source network[65] to stay
+in touch.
 [Navigation omitted]
 
 

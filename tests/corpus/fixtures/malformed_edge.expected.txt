@@ -14,7 +14,7 @@ Nested without close
 
   •       One
   •       Two
-  •       Three (note:emphasis without close
+  •       Three (note: emphasis without close
   •       Four (after the bad em)
 
 
@@ -28,34 +28,33 @@ Mixed casing and weird whitespace
 ---------------------------------
 
 Paragraph with UPPERCASE tag.
-Tag with weird attribute spacing.Lots   of non-breaking spaces and
+Tag with weird attribute spacing. Lots   of non-breaking spaces and
 trailing.
 
 
 Tables without tbody
 --------------------
 
- Cell A   Cell B 
--------- --------
- Cell C   Cell D 
+Cell A Cell B
+Cell C Cell D
 
 
 Anchor edge cases
 -----------------
 
-Anchor with no href+Empty href+Fragment-only[1]+Javascript URL — must be
-quarantined or rendered as text[2].
+Anchor with no href + Empty href + Fragment-only[1] + Javascript URL — must
+be quarantined or rendered as text[2].
 
 
 Unknown elements
 ----------------
 
-Custom element content[icon]Should treat as inline-ish.
+Custom element content [icon] Should treat as inline-ish.
 
 Comments and CDATA
 ------------------
 
-Before comment.After comment.
+Before comment. After comment.
 After script and style.
 
 

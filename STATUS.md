@@ -1,6 +1,6 @@
 # AWR — Project Status
 
-> Last updated: 2026-05-28  
+> Last updated: 2026-05-29  
 > Canonical spec: `spec/MVP.md` | Tier ladder: `spec/subspecs/browser-roadmap.md`
 
 ---
@@ -15,6 +15,7 @@
 | 3 | Lightly dynamic site support | **CLOSED** 2026-05-22 |
 | — | Daemon mode (`awrd`) | **CLOSED** 2026-05-23 |
 | — | Starter CSSOM | **CLOSED** 2026-05-27 |
+| — | TUI Quality Track | **ACTIVE** 2026-05-29 |
 | 4 | Layout engine | **DEFERRED** (decision pending) |
 | 5 | Full SPA parity | **DEFERRED** |
 
@@ -115,6 +116,45 @@
 
 ---
 
+## TUI Quality Track — CLOSED 2026-05-30
+
+All five items resolved. Full spec: `spec/subspecs/tui-quality.md`.
+
+| Item | Priority | Status |
+|------|----------|--------|
+| §2.1 Inline link word-wrap | P1 | **DONE** 2026-05-30 |
+| §2.2 Loading indicator | P2 | **DONE** 2026-05-30 |
+| §2.3 Help modal (`h` key) | P3 | **DONE** 2026-05-30 |
+| §2.4 Table linearization (HN readable) | P4 | **DONE** 2026-05-30 |
+| §2.5 Navigation header feedback | P5 | **DONE** 2026-05-30 (satisfied by §2.2) |
+
+All closure gates from `tui-quality.md §4` verified:
+- `zig build test` green (1196 tests, including new T-Q2.2, T-Q2.3, §2.1, §2.4 tests)
+- `zig build test-corpus` green — 9 snapshots re-blessed to improved output
+- HN `must_contain` passes; `wikipedia_octopus` re-blessed
+- `h` listed in `awr tui --help` and welcome cheat sheet
+- §2.5 satisfied by §2.2 `loading_url` mechanism
+
+**§2.1 fix:** `pending_space` flag on `RenderState` carries inter-word spacing
+across inline-node boundaries (text nodes + `<a>` + other inline elements).
+`flowWord` helper replaces per-call `need_space`. 9 corpus fixtures re-blessed
+(all genuine readability improvements: `eight-limbedmollusc` → `eight-limbed
+mollusc`, etc.).
+
+**§2.2 + §2.5:** `loading_url` + live-terminal capture in `runWith` paint a
+`⟳ Loading…` header frame before the blocking `page.navigate()`.
+
+**§2.3:** `show_help` overlay (`h` → open, any key → dismiss). `drawHelpOverlay`
+follows select-picker/cookie-inspector overlay pattern.
+
+**§2.4:** `hasThCell` + `renderLayoutTable` — tables with no `<th>` render in
+DOM reading order (cells left-to-right, rows top-to-bottom, no column alignment).
+HN, YC jobs, and layout-table pages are now fully readable. Data tables
+(with `<th>`) are unchanged. `col > 0` row-separator condition works around
+`at_line_start` tracking invariant (only cleared when `hang_indent > 0`).
+
+---
+
 ## In Progress / Partially Done
 
 ### libxev Phase 2 — shared event loop (deferred with tagged TODOs)
@@ -157,6 +197,10 @@ WebGL/WebGPU, `<video>`/`<audio>` playback, WebRTC, canvas pixel-level access, C
 - **`setTimeout`/`setInterval` degrade to stubs** when the event loop is not threaded through the JS engine.
 - **Pool/cookie `Io` threading**: `src/net/pool.zig` and `src/net/cookie.zig` use POSIX wall-clock reads directly rather than the `Io` abstraction — flagged for cleanup once `Io` APIs stabilize in Zig.
 - **Tier 3 smoke gate not fully verified**: `spec/subspecs/browser-realtime.md §8` notes §4.5 manual smoke (SSE live-update in TUI) was marked deferred at closure time.
+- **Inline link word-wrap**: spaces stripped around `<a>` tags cause words to run together; link text crossing a line boundary places continuation at the right edge instead of column 0. Tracked in `spec/subspecs/tui-quality.md §2.1`.
+- **Table-as-layout pages unreadable**: HN, YC jobs, and Wikipedia infoboxes render scrambled because layout tables emit cells positionally. Tracked in `spec/subspecs/tui-quality.md §2.4`.
+- **No loading indicator**: TUI appears frozen while fetching slow pages. Tracked in `spec/subspecs/tui-quality.md §2.2`.
+- **`test-render` build step does not exist**: `STATUS.md` historically listed it under verification commands but no such step is registered in `build.zig`. Render tests run under `zig build test` (co-located tests in `src/render.zig`).
 
 ---
 
@@ -178,4 +222,6 @@ zig build test-e2e      # End-to-end integration
 zig build test-daemon   # Daemon mode integration
 zig build test-corpus   # Render corpus harness (12 fixtures)
 zig build test-image    # Image encoder + picker (113 tests)
+# Note: there is no standalone test-render step. Renderer unit
+# tests are co-located in src/render.zig and run under zig build test.
 ```

@@ -861,7 +861,7 @@ const USAGE =
     \\                                    sets the ring buffer size), / find, b/f back/forward,
     \\                                   r reload, c cookie inspector (in-inspector: arrows
     \\                                   move, d delete row, C clear all, q close),
-    \\                                   B bookmark current page, q quit.
+    \\                                   B bookmark current page, h help (all keys), q quit.
     \\                                 --no-js disables script execution (escape hatch
     \\                                 for sites whose JS strips their own UI in a
     \\                                 non-Chromium env, e.g. Google's homepage).
@@ -1125,7 +1125,13 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         var ai: usize = 2;
         while (ai < args.len) : (ai += 1) {
             const arg = args[ai];
-            if (std.mem.eql(u8, arg, "--no-js") or std.mem.eql(u8, arg, "--no-script")) {
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                // §2.3 closure gate: `awr tui --help` must surface the
+                // keybindings (including `h`). Print the shared USAGE block,
+                // which carries the full TUI key list, and exit 0.
+                try stdoutWrite(io, USAGE);
+                return;
+            } else if (std.mem.eql(u8, arg, "--no-js") or std.mem.eql(u8, arg, "--no-script")) {
                 disable_scripts = true;
             } else if (std.mem.startsWith(u8, arg, "--images=")) {
                 const value = arg["--images=".len..];

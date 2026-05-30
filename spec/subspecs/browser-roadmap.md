@@ -269,6 +269,32 @@ GitLab UI, common Rails/Django/Phoenix apps work end-to-end.
 
 ---
 
+### TUI Quality Track — post-Tier-3 UX debt (CLOSED 2026-05-30)
+
+**Scope sentence**: The TUI is usable as a daily reading browser —
+prose renders without word-wrap artifacts, pages show a loading
+indicator, keybindings are discoverable via `h`, and table-based
+sites (HN, YC jobs) are readable.
+
+**What it covers** (detail in `spec/subspecs/tui-quality.md`):
+
+- §2.1 Inline link rendering fix (spaces + word-wrap at line boundary)
+- §2.2 Loading indicator (immediate status feedback before fetch returns)
+- §2.3 Help modal (`h` key — static keybinding overlay)
+- §2.4 Table linearization (layout tables rendered in reading order)
+- §2.5 Navigation feedback (header shows target URL during load)
+
+**Sub-spec**: `spec/subspecs/tui-quality.md` (CLOSED 2026-05-30).
+
+**WPT corpus area**: no new WPT cases required — these are render
+and TUI UX fixes, not browser-API additions.
+
+**Closure gates**: `zig build test` green; corpus green with HN
+fixture + wikipedia_octopus re-blessed; two new TuiHarness tests;
+hand-driven smoke of HN and Wikipedia confirm readability.
+
+---
+
 ### Tier 4 — Layout engine (DEFERRED, gating constraint)
 
 **Scope sentence**: The DOM has real geometry. `getBoundingClientRect`

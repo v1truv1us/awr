@@ -141,6 +141,19 @@ pub const BrowserSession = struct {
     status_message: ?[]u8,
     render_width: usize,
     render_height: usize,
+    /// §2.2 (TUI Quality): target URL of an in-flight navigation. Non-null
+    /// only between the start of a blocking fetch and the new page being
+    /// installed. `drawFrame` shows it plus a "Loading…" marker in the header
+    /// so the TUI doesn't look frozen on slow pages. Owned.
+    loading_url: ?[]u8 = null,
+    /// §2.2: live terminal + io captured by `runWith` so the blocking nav
+    /// path can paint a single loading frame before `page.navigate()`. Null in
+    /// headless tests (`TuiHarness`), where `paintLoadingFrame` is a no-op.
+    active_terminal: ?*tui.Terminal = null,
+    active_io: ?std.Io = null,
+    /// §2.3 (TUI Quality): when true, `drawFrame` replaces the body area with
+    /// the keybinding help overlay. Any key dismisses it.
+    show_help: bool = false,
 
     const FieldValue = struct {
         name: []u8,
@@ -248,6 +261,7 @@ pub const BrowserSession = struct {
         self.search_matches.deinit(self.allocator);
         self.prompt_buffer.deinit(self.allocator);
         if (self.status_message) |msg| self.allocator.free(msg);
+        if (self.loading_url) |u| self.allocator.free(u);
         for (self.field_values.items) |*fv| {
             self.allocator.free(fv.name);
             fv.value.deinit(self.allocator);
@@ -1227,10 +1241,39 @@ pub const BrowserSession = struct {
         return buf.toOwnedSlice(allocator);
     }
 
+    /// §2.2: mark a navigation as in-flight and paint a single loading frame
+    /// so a slow fetch doesn't leave the TUI looking frozen. The frame shows
+    /// the target URL plus a "Loading…" marker in the header. Owns the URL
+    /// copy. The paint is a no-op when there's no live terminal (tests).
+    fn beginLoading(self: *BrowserSession, url: []const u8) !void {
+        if (self.loading_url) |old| self.allocator.free(old);
+        self.loading_url = try self.allocator.dupe(u8, url);
+        self.paintLoadingFrame();
+    }
+
+    /// §2.2: clear the in-flight navigation marker once the page is installed
+    /// (or the fetch failed). Idempotent.
+    fn endLoading(self: *BrowserSession) void {
+        if (self.loading_url) |old| self.allocator.free(old);
+        self.loading_url = null;
+    }
+
+    /// §2.2: paint one frame to the live terminal mid-fetch. The draw loop is
+    /// blocked on `page.navigate()` at this point, so we write directly using
+    /// the terminal+io captured by `runWith`. No-op (and error-swallowing) so
+    /// it never turns a cosmetic indicator into a navigation failure.
+    fn paintLoadingFrame(self: *BrowserSession) void {
+        const terminal = self.active_terminal orelse return;
+        const io = self.active_io orelse return;
+        draw(terminal, io, self) catch {};
+    }
+
     fn loadUrl(self: *BrowserSession, url: []const u8) !void {
         const previous_query = if (self.search_query) |query| try self.allocator.dupe(u8, query) else null;
         defer if (previous_query) |query| self.allocator.free(query);
 
+        try self.beginLoading(url);
+        defer self.endLoading();
         var result = try self.page.navigate(url);
         errdefer result.deinit();
         try self.installLoadedPage(result, previous_query);
@@ -1240,6 +1283,8 @@ pub const BrowserSession = struct {
         const previous_query = if (self.search_query) |query| try self.allocator.dupe(u8, query) else null;
         defer if (previous_query) |query| self.allocator.free(query);
 
+        try self.beginLoading(url);
+        defer self.endLoading();
         var result = try self.page.navigatePost(url, body);
         errdefer result.deinit();
         try self.installLoadedPage(result, previous_query);
@@ -1577,6 +1622,15 @@ pub fn runWith(
 
     var session = try BrowserSession.init(allocator, io);
     defer session.deinit();
+    // §2.2: capture the live terminal + io so the blocking nav path can paint
+    // a loading frame before `page.navigate()` returns. Cleared on exit so a
+    // dangling terminal pointer is never dereferenced after this call.
+    session.active_terminal = &terminal;
+    session.active_io = io;
+    defer {
+        session.active_terminal = null;
+        session.active_io = null;
+    }
     session.page.disable_scripts = opts.disable_scripts;
     session.image_protocol = opts.image_protocol;
     session.code_line_numbers = opts.code_line_numbers;
@@ -1646,6 +1700,14 @@ pub fn processKey(
     // mode the session is in (link nav, field editing, prompt). This is
     // the escape hatch when other key bindings don't work as expected.
     if (key == .interrupt) return .exit;
+
+    // §2.3: the help overlay owns all input while visible. Any key (other
+    // than the universal interrupt handled above) dismisses it and returns
+    // to the normal reading state.
+    if (session.show_help) {
+        session.show_help = false;
+        return .continue_;
+    }
 
     // T-83: when a `<select>` picker is open it owns all keys. Arrow
     // keys move the cursor, Enter commits, Esc / Space close. The
@@ -1848,6 +1910,7 @@ pub fn processKey(
                             }
                         }
                     },
+                    'h' => session.show_help = true, // §2.3: open keybinding help overlay
                     'q' => return .exit,
                     else => {},
                 },
@@ -1900,11 +1963,14 @@ pub fn drawFrame(
 ) !void {
     const viewport_height = viewportHeight(size);
     const model = session.screenModel();
-    const url = session.currentUrl() orelse "";
+    // §2.2: while a navigation is in flight, show the target URL (not the
+    // previous page's) so the header reflects where we're going immediately.
+    const url = if (session.loading_url) |lu| lu else (session.currentUrl() orelse "");
     const cols = size.cols;
 
-    // Header styling
-    const left_base = " AWR 🌐 ";
+    // Header styling. §2.2: a "Loading…" marker replaces the plain badge
+    // while a fetch is in flight so the TUI never looks frozen.
+    const left_base = if (session.loading_url != null) " AWR 🌐 ⟳ Loading… " else " AWR 🌐 ";
     var right_buf: [64]u8 = undefined;
     const right_str = if (session.history.items.len > 0)
         std.fmt.bufPrint(&right_buf, " [Hist: {d}/{d}] (q: quit) ", .{ session.history_index + 1, session.history.items.len }) catch " (q: quit) "
@@ -1960,7 +2026,11 @@ pub fn drawFrame(
     // area entirely so the user's attention is on the option list.
     // Page content stays unchanged underneath — closing the picker
     // restores it without a rerender.
-    if (session.select_picker) |picker| {
+    if (session.show_help) {
+        // §2.3: help overlay replaces the body, same pattern as the select
+        // picker and cookie inspector.
+        try drawHelpOverlay(writer, size.cols, viewport_height);
+    } else if (session.select_picker) |picker| {
         try drawSelectPicker(writer, size.cols, viewport_height, picker);
     } else if (session.cookie_inspector) |*ci| {
         // T-84: same modal pattern as the select picker but a
@@ -2012,6 +2082,61 @@ pub fn drawFrame(
         while (pad > 0) : (pad -= 1) try writer.writeByte(' ');
         try writer.writeAll("\x1b[0m\x1b[K");
     }
+}
+
+/// §2.3 (TUI Quality): full-body keybinding help overlay. The table is
+/// static — keybindings aren't configurable in this track, so hardcoding is
+/// correct. Mirrors the select-picker / cookie-inspector overlay pattern: a
+/// title row, the body, padding to fill the viewport, and a dismiss hint.
+/// Any key closes it (handled in `processKey`).
+fn drawHelpOverlay(writer: anytype, cols: usize, viewport_height: usize) !void {
+    const REVERSE = "\x1b[7m";
+    const BOLD = "\x1b[1m";
+    const RESET = "\x1b[0m";
+    const DIM = "\x1b[2m";
+
+    const rows = [_][2][]const u8{
+        .{ "j / k", "Scroll down / up" },
+        .{ "d / u", "Half-page down / up" },
+        .{ "g / G", "Top / Bottom" },
+        .{ "b / f", "Back / Forward" },
+        .{ "r / R", "Reload (soft / hard)" },
+        .{ "o or :", "Open URL bar" },
+        .{ "/", "Search" },
+        .{ "n / N", "Next / previous search match" },
+        .{ "Tab / Shift-Tab", "Next / previous focusable" },
+        .{ "Enter / Space", "Activate focused element" },
+        .{ "Esc", "Cancel prompt / drop focus" },
+        .{ "c", "Cookie inspector" },
+        .{ "B", "Bookmark current page" },
+        .{ "h", "This help screen" },
+        .{ "q", "Quit" },
+    };
+
+    var title_buf: [64]u8 = undefined;
+    const title = std.fmt.bufPrint(&title_buf, "{s}{s} AWR keybindings {s}", .{ REVERSE, BOLD, RESET }) catch " AWR keybindings ";
+    try writeClippedLine(writer, cols, title);
+    try writer.writeAll("\x1b[K\n");
+
+    const max_rows = if (viewport_height > 2) viewport_height - 2 else 1;
+    var shown: usize = 0;
+    var idx: usize = 0;
+    while (idx < rows.len and shown < max_rows) : (idx += 1) {
+        var row_buf: [160]u8 = undefined;
+        const line = std.fmt.bufPrint(&row_buf, "  {s}{s:<16}{s} {s}", .{ BOLD, rows[idx][0], RESET, rows[idx][1] }) catch rows[idx][1];
+        try writeClippedLine(writer, cols, line);
+        try writer.writeAll("\x1b[K\n");
+        shown += 1;
+    }
+
+    while (shown < max_rows) : (shown += 1) {
+        try writer.writeAll("\x1b[K\n");
+    }
+
+    var hint_buf: [64]u8 = undefined;
+    const hint = std.fmt.bufPrint(&hint_buf, "{s}press any key to close{s}", .{ DIM, RESET }) catch "";
+    try writeClippedLine(writer, cols, hint);
+    try writer.writeAll("\x1b[K");
 }
 
 /// Render the open `<select>` picker as a centered list inside the
@@ -2300,6 +2425,7 @@ fn drawWelcome(writer: anytype, cols: usize, viewport_height: usize) !void {
         "  " ++ BOLD ++ "b" ++ RESET ++ "  back                " ++ BOLD ++ "f" ++ RESET ++ "  forward",
         "  " ++ BOLD ++ "r" ++ RESET ++ "  reload              " ++ BOLD ++ "q" ++ RESET ++ "  quit",
         "  " ++ BOLD ++ "c" ++ RESET ++ "  cookies             " ++ BOLD ++ "B" ++ RESET ++ "  bookmark page",
+        "  " ++ BOLD ++ "h" ++ RESET ++ "  help (all keys)     " ++ BOLD ++ "q" ++ RESET ++ "  quit",
         "",
         DIM ++ "Tip: set $AWR_HOMEPAGE to skip this screen." ++ RESET,
     };
@@ -2943,6 +3069,40 @@ const TuiHarness = struct {
         return std.mem.indexOf(u8, stripped.items, needle) != null;
     }
 };
+
+test "harness: T-Q2.2 loading indicator shows target URL before page is ready" {
+    var h = try TuiHarness.init(std.testing.allocator, 80, 24);
+    defer h.deinit();
+
+    // Simulate the start of a blocking navigation. The harness has no live
+    // terminal, so `paintLoadingFrame` is a no-op — we inspect the frame
+    // `drawFrame` produces while `loading_url` is set.
+    try h.session.beginLoading("http://example.com/slow");
+    try std.testing.expect(try h.frameContains("Loading"));
+    try std.testing.expect(try h.frameContains("example.com/slow"));
+
+    // Once the page installs, the indicator clears and the real page shows.
+    h.session.endLoading();
+    try h.loadHtml("http://example.com/slow", "<html><body><p>arrived here</p></body></html>");
+    try std.testing.expect(!try h.frameContains("Loading"));
+    try std.testing.expect(try h.frameContains("arrived here"));
+}
+
+test "harness: T-Q2.3 help overlay renders and any key dismisses it" {
+    var h = try TuiHarness.init(std.testing.allocator, 80, 24);
+    defer h.deinit();
+    try h.loadHtml("http://example.com/", "<html><body><p>hello world</p></body></html>");
+
+    // 'h' opens the help overlay from the normal reading state.
+    try std.testing.expect(try h.pressKey(.{ .char = 'h' }));
+    try std.testing.expect(try h.frameContains("AWR keybindings"));
+    try std.testing.expect(try h.frameContains("This help screen"));
+
+    // Any key dismisses the overlay and the page body returns.
+    try std.testing.expect(try h.pressKey(.{ .char = 'j' }));
+    try std.testing.expect(!try h.frameContains("AWR keybindings"));
+    try std.testing.expect(try h.frameContains("hello world"));
+}
 
 test "harness: welcome screen paints on fresh session" {
     var h = try TuiHarness.init(std.testing.allocator, 80, 24);
