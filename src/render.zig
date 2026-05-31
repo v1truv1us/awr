@@ -298,6 +298,15 @@ const LinkRef = struct {
     line: usize,
 };
 
+/// A stylesheet rule that declares at least one renderer-mapped text property,
+/// tagged with its cascade position (sheet + rule index) so precedence is
+/// preserved when the per-element pass iterates the filtered subset.
+const TextRuleRef = struct {
+    rule: *const css_parser.Rule,
+    source_index: usize,
+    rule_index: usize,
+};
+
 const BoxRef = struct {
     element_ptr: usize,
     left: usize = 0,
@@ -367,6 +376,23 @@ const RenderState = struct {
     /// True when any author stylesheet declares `text-align`. Gates the
     /// single-line block alignment path (TUI only).
     has_align_css: bool = false,
+    /// Pre-compiled selectors for `complex` rules (compound/combinator/attr),
+    /// keyed by rule pointer. Built once at setup so the per-element render
+    /// hot path matches them exactly via the full DOM selector engine without
+    /// re-parsing per element (which timed out on large stylesheets).
+    compiled_selectors: std.AutoHashMapUnmanaged(*const css_parser.Rule, dom.SelectorList) = .empty,
+    /// Only the rules that declare a text property the renderer maps to ANSI,
+    /// in cascade (source) order. The per-element style pass matches just
+    /// these — large pages (Wikipedia) carry thousands of layout rules but few
+    /// text rules, so this is what keeps exact complex-selector matching cheap.
+    text_rules: std.ArrayListUnmanaged(TextRuleRef) = .empty,
+    /// Whether the render path matches complex (compound/combinator/attribute)
+    /// text rules *exactly* via the compiled selector engine. Exact matching
+    /// walks the ancestor chain per element, which is too slow when a page
+    /// carries many complex text rules (MediaWiki), so above a threshold the
+    /// renderer falls back to the fast flat OR approximation. The script-facing
+    /// getComputedStyle cascade is always exact regardless of this flag.
+    exact_complex_selectors: bool = false,
     /// Computed inline text style for the element currently being rendered.
     /// Inherited by descendants; emitted as ANSI when `opts.ansi_colors`.
     cur_style: TextStyle = .{},
@@ -388,6 +414,10 @@ const RenderState = struct {
         self.sticky_hdrs.deinit(self.allocator);
         self.hide_rules.deinit(self.allocator);
         self.ws_rules.deinit(self.allocator);
+        var cit = self.compiled_selectors.valueIterator();
+        while (cit.next()) |list| list.deinit(self.allocator);
+        self.compiled_selectors.deinit(self.allocator);
+        self.text_rules.deinit(self.allocator);
         for (self.parsed_sheets.items) |*sheet| sheet.deinit();
         self.parsed_sheets.deinit(self.allocator);
     }
@@ -827,7 +857,46 @@ fn applyCssTextStyle(
     inline_decl: ?*const css_style.StyleDeclaration,
     s: *TextStyle,
 ) void {
-    const fw = resolveCssProp(state, elem, "font-weight", inline_decl);
+    // Resolve all six text properties in a SINGLE pass over the rules: each
+    // rule is matched against `elem` once (the costly step for combinator
+    // selectors that walk the ancestor chain), and every property it declares
+    // updates that property's best cascade match. Resolving per-property
+    // instead re-matched every rule six times, which timed out on large
+    // stylesheets.
+    const props = [_][]const u8{ "font-weight", "font-style", "text-decoration", "text-decoration-line", "color", "text-transform" };
+    var best: [props.len]?css_cascade.MatchResult = .{ null, null, null, null, null, null };
+
+    for (state.text_rules.items) |tr| {
+        if (!cssRuleMatches(state, elem, tr.rule)) continue;
+        for (props, 0..) |p, pi| {
+            const val = tr.rule.declarations.getPropertyValue(p);
+            if (val.len == 0) continue;
+            const m = css_cascade.MatchResult{
+                .specificity = tr.rule.specificity,
+                .source_index = tr.source_index,
+                .rule_index = tr.rule_index,
+                .value = val,
+                .important = declImportant(&tr.rule.declarations, p),
+            };
+            if (best[pi] == null or m.isPrecedentOver(best[pi].?)) best[pi] = m;
+        }
+    }
+    if (inline_decl) |decl| {
+        for (props, 0..) |p, pi| {
+            const v = decl.getPropertyValue(p);
+            if (v.len == 0) continue;
+            const m = css_cascade.MatchResult{
+                .specificity = .{ .id = 9999, .class = 0, .element = 0 },
+                .source_index = std.math.maxInt(usize),
+                .rule_index = std.math.maxInt(usize),
+                .value = v,
+                .important = declImportant(decl, p),
+            };
+            if (best[pi] == null or m.isPrecedentOver(best[pi].?)) best[pi] = m;
+        }
+    }
+
+    const fw = if (best[0]) |m| m.value else "";
     if (fw.len > 0) {
         if (isBoldWeight(fw)) {
             s.bold = true;
@@ -836,7 +905,7 @@ fn applyCssTextStyle(
         }
     }
 
-    const fs = resolveCssProp(state, elem, "font-style", inline_decl);
+    const fs = if (best[1]) |m| m.value else "";
     if (fs.len > 0) {
         if (eql(fs, "italic") or eql(fs, "oblique")) {
             s.italic = true;
@@ -845,8 +914,8 @@ fn applyCssTextStyle(
         }
     }
 
-    const td = resolveCssProp(state, elem, "text-decoration", inline_decl);
-    const tdl = resolveCssProp(state, elem, "text-decoration-line", inline_decl);
+    const td = if (best[2]) |m| m.value else "";
+    const tdl = if (best[3]) |m| m.value else "";
     if (containsWord(td, "underline") or containsWord(tdl, "underline")) s.underline = true;
     if (containsWord(td, "line-through") or containsWord(tdl, "line-through")) s.strike = true;
     if (containsWord(td, "none") or containsWord(tdl, "none")) {
@@ -854,12 +923,12 @@ fn applyCssTextStyle(
         s.strike = false;
     }
 
-    const color = resolveCssProp(state, elem, "color", inline_decl);
+    const color = if (best[4]) |m| m.value else "";
     if (color.len > 0) {
         if (cssColorToAnsi(color)) |code| s.fg = code;
     }
 
-    const tt = resolveCssProp(state, elem, "text-transform", inline_decl);
+    const tt = if (best[5]) |m| m.value else "";
     if (tt.len > 0) {
         if (eql(tt, "uppercase")) {
             s.transform = .upper;
@@ -884,7 +953,7 @@ fn resolveCssProp(
     var best: ?css_cascade.MatchResult = null;
     for (state.parsed_sheets.items, 0..) |*sheet, si| {
         for (sheet.rules.items, 0..) |*rule, ri| {
-            if (!cssRuleMatches(elem, rule)) continue;
+            if (!cssRuleMatches(state, elem, rule)) continue;
             const val = rule.declarations.getPropertyValue(prop);
             if (val.len == 0) continue;
             const m = css_cascade.MatchResult{
@@ -914,15 +983,17 @@ fn resolveCssProp(
     return if (best) |m| m.value else "";
 }
 
-/// Match `elem` against a rule's pre-parsed simple selectors (tag / id /
-/// class / universal), OR-combined. This is the renderer's hot path —
-/// resolved per element × per property during a full-page render — so it
-/// deliberately uses only the allocation-free flat matcher and treats a
-/// compound/combinator rule (`rule.complex`) as its loose OR approximation
-/// rather than re-parsing the selector per call (which timed out on large
-/// stylesheets). The script-facing `getComputedStyle` cascade in
-/// `dom/bridge.zig` uses the full selector engine for exact semantics.
-fn cssRuleMatches(elem: *const dom.Element, rule: *const css_parser.Rule) bool {
+/// Match `elem` against a rule. Compound/combinator/attribute rules
+/// (`rule.complex`) match exactly via their pre-compiled selector (built once
+/// at setup — see `compiled_selectors`); if compilation was unavailable they
+/// fall back to the allocation-free flat OR approximation. Single simple
+/// selectors always use the fast flat path.
+fn cssRuleMatches(state: *const RenderState, elem: *const dom.Element, rule: *const css_parser.Rule) bool {
+    if (rule.complex and state.exact_complex_selectors) {
+        if (state.compiled_selectors.getPtr(rule)) |list| {
+            return dom.matchesCompiled(elem, list);
+        }
+    }
     if (rule.selectors.items.len == 0) return false;
     for (rule.selectors.items) |sel| {
         switch (sel.sel_type) {
@@ -1134,8 +1205,8 @@ fn renderModelFromRoot(
     }
     // Build filtered indexes only after all sheets are parsed (rule heap
     // storage is stable; the outer list may have reallocated during append).
-    for (state.parsed_sheets.items) |*sheet| {
-        for (sheet.rules.items) |*rule| {
+    for (state.parsed_sheets.items, 0..) |*sheet, si| {
+        for (sheet.rules.items, 0..) |*rule, ri| {
             const disp = rule.declarations.getPropertyValue("display");
             const vis = rule.declarations.getPropertyValue("visibility");
             if (disp.len > 0 or vis.len > 0) {
@@ -1144,16 +1215,30 @@ fn renderModelFromRoot(
             if (rule.declarations.getPropertyValue("white-space").len > 0) {
                 state.ws_rules.append(allocator, rule) catch {};
             }
-            // Flag whether any rule declares a text-affecting property, so the
-            // unstyled render path can skip author-CSS resolution entirely.
-            if (!state.has_text_css and ruleHasTextProp(rule)) {
+            // Collect text rules (in cascade order) so the per-element style
+            // pass matches only these — not the thousands of layout rules a
+            // large stylesheet carries. Complex text rules get their selector
+            // pre-compiled once for exact (combinator/attr) matching.
+            if (ruleHasTextProp(rule)) {
                 state.has_text_css = true;
+                state.text_rules.append(allocator, .{ .rule = rule, .source_index = si, .rule_index = ri }) catch {};
+                if (rule.complex) {
+                    if (dom.compileSelectorList(allocator, rule.selector_text)) |list| {
+                        state.compiled_selectors.put(allocator, rule, list) catch {
+                            var l = list;
+                            l.deinit(allocator);
+                        };
+                    } else |_| {}
+                }
             }
             if (!state.has_align_css and rule.declarations.getPropertyValue("text-align").len > 0) {
                 state.has_align_css = true;
             }
         }
     }
+    // Exact complex matching is affordable only when few complex text rules
+    // exist; above this the per-element ancestor walk is too slow (MediaWiki).
+    state.exact_complex_selectors = state.compiled_selectors.count() <= 48;
 
     if (root) |elem| {
         if (eql(elem.tag, "body")) {
@@ -3595,6 +3680,23 @@ test "render — author CSS emits ANSI color/weight and restores nested frame" {
     // The link layers underline (4) + blue (34) on top of the inherited bold.
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[0;1;4;34m") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "tail") != null);
+}
+
+test "render — exact descendant selector styles only the descendant (Slice 3)" {
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body><div class="box"><p>x</p></div><p>y</p></body></html>
+    );
+    defer doc.deinit();
+    var buf: [4096]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&buf);
+    try render(std.testing.allocator, &fbs, &doc, .{
+        .ansi_colors = true,
+        .css_stylesheets = &.{".box p { color: red; }"},
+    });
+    const out = fbs.buffered();
+    // Exactly one element is reddened — the <p> inside .box. The flat OR
+    // approximation would have matched both paragraphs (count == 2).
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "\x1b[0;31m"));
 }
 
 test "render — UA semantic tags and text-transform under ANSI" {

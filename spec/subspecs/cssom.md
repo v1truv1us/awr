@@ -108,6 +108,23 @@ independently, so the agent/corpus surfaces are unaffected. Coverage:
 `tests/wpt/css_computed_value_serialization.js` plus updated assertions across
 the existing CSS cases.
 
+### 2.3 Compiled-selector cache + exact renderer matching (2026-05-31)
+
+`src/dom/node.zig` exposes its selector engine (`compileSelectorList`,
+`matchesCompiled`, `pub SelectorList`) so cascades can compile each rule's
+selector once and match many elements without re-parsing. The renderer
+collects only the *text* rules (those mapping to ANSI) in cascade order,
+pre-compiles their complex selectors, and resolves all text properties in a
+single matching pass per element — so it now applies compound/combinator/
+attribute selectors **exactly** (e.g. `.box p { color }` styles only
+descendants) instead of the previous flat-OR approximation. Exact matching
+walks the ancestor chain, so it is gated: a page with more than 48 complex
+text rules (MediaWiki-scale) falls back to the flat approximation to stay
+within the render time budget. The script-facing `getComputedStyle` cascade is
+always exact. Covered by an inline `src/render.zig` test plus the unchanged
+`css_combinator_cascade.js` / `css_attribute_selectors.js` getComputedStyle
+cases.
+
 ## 3. Implementation shape
 
 Move CSS behavior out of the JS bridge over time:

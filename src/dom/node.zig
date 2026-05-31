@@ -87,14 +87,28 @@ const ComplexSelector = struct {
 /// match. AWR's public querySelector / querySelectorAll / matches /
 /// closest surface always parses through SelectorList so callers can
 /// pass a comma list (e.g. `'input,button,select,textarea'`).
-const SelectorList = struct {
+pub const SelectorList = struct {
     parts: std.ArrayListUnmanaged(ComplexSelector) = .empty,
 
-    fn deinit(self: *SelectorList, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *SelectorList, alloc: std.mem.Allocator) void {
         for (self.parts.items) |*p| p.deinit(alloc);
         self.parts.deinit(alloc);
     }
 };
+
+/// Compile a selector string into a reusable `SelectorList`. Callers own the
+/// result and must `deinit` it. Lets hot-path cascades (the renderer, the JS
+/// bridge) parse each CSS rule's selector once and match it against many
+/// elements without re-parsing — see `matchesCompiled`.
+pub fn compileSelectorList(alloc: std.mem.Allocator, sel: []const u8) !SelectorList {
+    return Document.parseSelectorList(alloc, std.mem.trim(u8, sel, " \t\n\r"));
+}
+
+/// Match `elem` against a pre-compiled `SelectorList` (full Selectors §5/§6
+/// semantics: compound AND, combinators, attribute operators, `:not`).
+pub fn matchesCompiled(elem: *const Element, list: *const SelectorList) bool {
+    return Document.matchesSelectorList(elem, list);
+}
 
 pub const Node = union(NodeKind) {
     document: *Document,
