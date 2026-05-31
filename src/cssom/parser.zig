@@ -82,9 +82,10 @@ pub fn parseStylesheet(allocator: std.mem.Allocator, css: []const u8) !Styleshee
             const trimmed = std.mem.trim(u8, part, " \t\r\n");
             if (trimmed.len == 0) continue;
 
-            // A combinator (descendant/child/adjacent/sibling) makes this part
-            // a complex selector the flat token list can't represent.
-            if (std.mem.indexOfAny(u8, trimmed, " \t>+~") != null) rule.complex = true;
+            // A combinator (descendant/child/adjacent/sibling) or an attribute
+            // selector (`[...]`) makes this part a complex selector the flat
+            // token list can't represent — defer it to the full DOM engine.
+            if (std.mem.indexOfAny(u8, trimmed, " \t>+~[") != null) rule.complex = true;
             const tokens_before = rule.selectors.items.len;
 
             // Split compound selectors (e.g. tag.class or tag#id) into matchable pieces

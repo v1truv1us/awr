@@ -632,6 +632,23 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/css_combinator_cascade.js"),
     },
     .{
+        .filename = "css_attribute_selectors.js",
+        .html =
+        \\<html><head><style>
+        \\  input[type=text] { color: red; }
+        \\  input[required] { font-weight: bold; }
+        \\  [data-tags~=urgent] { color: green; }
+        \\</style></head><body>
+        \\<input id="text" type="text">
+        \\<input id="pass" type="password">
+        \\<input id="req" type="text" required>
+        \\<span id="flag" data-tags="low urgent later">a</span>
+        \\<span id="noflag" data-tags="low later">b</span>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_attribute_selectors.js"),
+    },
+    .{
         .filename = "form_properties.js",
         .html =
         \\<html><body>

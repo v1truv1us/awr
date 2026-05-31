@@ -89,6 +89,12 @@ full DOM selector engine (`dom.Element.matches`) for them, keeping the fast
 pre-parsed path for single simple selectors. Coverage:
 `tests/wpt/css_combinator_cascade.js`.
 
+Attribute selectors are also honored in the cascade: the DOM selector engine
+(`src/dom/node.zig`) gained the standard operators — `[attr]`, `[attr=v]`,
+`[attr~=v]`, `[attr|=v]`, `[attr^=v]`, `[attr$=v]`, `[attr*=v]` — and the parser
+flags `[...]` rules complex so the cascade routes them through that engine.
+Coverage: `tests/wpt/css_attribute_selectors.js`.
+
 ## 3. Implementation shape
 
 Move CSS behavior out of the JS bridge over time:

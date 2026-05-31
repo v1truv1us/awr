@@ -36,9 +36,21 @@ pub const Attribute = struct {
     value: []const u8,
 };
 
+/// CSS attribute-selector operator (Selectors §6).
+const AttrOp = enum {
+    presence, //  [attr]
+    exact, //     [attr=val]
+    includes, //  [attr~=val]  whitespace-separated word match
+    dash, //      [attr|=val]  exact or `val-` prefix
+    prefix, //    [attr^=val]
+    suffix, //    [attr$=val]
+    substring, // [attr*=val]
+};
+
 const AttrSelector = struct {
     name: []const u8,
     value: ?[]const u8 = null,
+    op: AttrOp = .presence,
 };
 
 const SimpleSelector = struct {
@@ -419,14 +431,35 @@ pub const Document = struct {
         }
         for (sel.attrs.items) |a| {
             const v = elem.getAttribute(a.name) orelse return false;
-            if (a.value) |expected| {
-                if (!std.mem.eql(u8, v, expected)) return false;
-            }
+            if (!attrMatches(a, v)) return false;
         }
         if (sel.not_sel) |n| {
             if (matchesSimpleSelector(elem, n)) return false;
         }
         return true;
+    }
+
+    /// CSS Selectors §6: test an attribute value `v` against a parsed
+    /// attribute selector `a` per its operator.
+    fn attrMatches(a: AttrSelector, v: []const u8) bool {
+        const expected = a.value orelse return true; // [attr] — presence only
+        return switch (a.op) {
+            .presence => true,
+            .exact => std.mem.eql(u8, v, expected),
+            .includes => blk: {
+                if (expected.len == 0) break :blk false;
+                var it = std.mem.tokenizeAny(u8, v, " \t\r\n\x0c");
+                while (it.next()) |word| {
+                    if (std.mem.eql(u8, word, expected)) break :blk true;
+                }
+                break :blk false;
+            },
+            .dash => std.mem.eql(u8, v, expected) or
+                (v.len > expected.len and std.mem.startsWith(u8, v, expected) and v[expected.len] == '-'),
+            .prefix => expected.len > 0 and std.mem.startsWith(u8, v, expected),
+            .suffix => expected.len > 0 and std.mem.endsWith(u8, v, expected),
+            .substring => expected.len > 0 and std.mem.indexOf(u8, v, expected) != null,
+        };
     }
 
     /// Split `sel` on top-level commas (respecting `[...]` attribute
@@ -546,13 +579,42 @@ pub const Document = struct {
                     const inside = std.mem.trim(u8, token[start..@min(i, token.len)], " \t\n\r");
                     if (inside.len > 0) {
                         if (std.mem.indexOfScalar(u8, inside, '=')) |eq| {
-                            const name = std.mem.trim(u8, inside[0..eq], " \t\n\r");
+                            // An operator char (~ | ^ $ *) may immediately
+                            // precede the `=`; otherwise it's a plain `=`.
+                            var name_end = eq;
+                            var op: AttrOp = .exact;
+                            if (eq > 0) {
+                                switch (inside[eq - 1]) {
+                                    '~' => {
+                                        op = .includes;
+                                        name_end = eq - 1;
+                                    },
+                                    '|' => {
+                                        op = .dash;
+                                        name_end = eq - 1;
+                                    },
+                                    '^' => {
+                                        op = .prefix;
+                                        name_end = eq - 1;
+                                    },
+                                    '$' => {
+                                        op = .suffix;
+                                        name_end = eq - 1;
+                                    },
+                                    '*' => {
+                                        op = .substring;
+                                        name_end = eq - 1;
+                                    },
+                                    else => {},
+                                }
+                            }
+                            const name = std.mem.trim(u8, inside[0..name_end], " \t\n\r");
                             var value = std.mem.trim(u8, inside[eq + 1 ..], " \t\n\r");
                             if (value.len >= 2 and ((value[0] == '"' and value[value.len - 1] == '"') or (value[0] == '\'' and value[value.len - 1] == '\'')))
                                 value = value[1 .. value.len - 1];
-                            try out.attrs.append(alloc, .{ .name = name, .value = value });
+                            try out.attrs.append(alloc, .{ .name = name, .value = value, .op = op });
                         } else {
-                            try out.attrs.append(alloc, .{ .name = inside });
+                            try out.attrs.append(alloc, .{ .name = inside, .op = .presence });
                         }
                     }
                 }
