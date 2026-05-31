@@ -615,6 +615,23 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/css_ua_text_defaults.js"),
     },
     .{
+        .filename = "css_combinator_cascade.js",
+        .html =
+        \\<html><head><style>
+        \\  .box p { color: red; }
+        \\  div.special { color: green; }
+        \\  ul > li { font-weight: bold; }
+        \\</style></head><body>
+        \\<div class="box"><p id="desc">a</p></div>
+        \\<p id="outside">b</p>
+        \\<div id="special" class="special">c</div>
+        \\<div id="plain">d</div>
+        \\<ul><li id="kid">e</li></ul>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_combinator_cascade.js"),
+    },
+    .{
         .filename = "form_properties.js",
         .html =
         \\<html><body>

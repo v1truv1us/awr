@@ -1691,11 +1691,13 @@ fn isPropImportantInDecl(decl: *const css_style.StyleDeclaration, prop_name: []c
     return false;
 }
 
-/// Matches a parsed `Rule` against `elem` using the rule's pre-parsed selector
-/// list. Mirrors `cssom/computed.zig:matchesElement` but lives here so the
-/// cssom modules can stay dom-free (avoids a transitive lexbor link from
-/// every test target that touches cssom).
+/// Matches a parsed `Rule` against `elem`. Compound/combinator selectors
+/// (`rule.complex`) defer to the full DOM selector engine for correct AND /
+/// descendant / child / sibling semantics; the common single-simple-selector
+/// case uses the fast pre-parsed OR list. Lives here (not in the dom-free
+/// `cssom/` modules) so cssom stays free of a transitive lexbor link.
 fn ruleMatchesElement(elem: *const dom.Element, rule: *const css_parser.Rule) bool {
+    if (rule.complex) return elem.matches(rule.selector_text);
     if (rule.selectors.items.len == 0) return false;
     for (rule.selectors.items) |sel| {
         switch (sel.sel_type) {

@@ -81,6 +81,14 @@ browser's UA stylesheet, independent of AWR's terminal presentation choices in
 via its own in-module cascade resolver (`resolveCssProp` in `src/render.zig`),
 gated on `ansi_colors` so the agent surfaces stay byte-identical.
 
+Selector matching in the cascade was also corrected: compound (`div.foo`) and
+combinator (`section p`, `ul > li`, sibling) selectors now match with proper
+AND / ancestor semantics instead of the previous flat-OR approximation. The
+parser flags such rules (`Rule.complex`) and the cascade matchers defer to the
+full DOM selector engine (`dom.Element.matches`) for them, keeping the fast
+pre-parsed path for single simple selectors. Coverage:
+`tests/wpt/css_combinator_cascade.js`.
+
 ## 3. Implementation shape
 
 Move CSS behavior out of the JS bridge over time:

@@ -84,6 +84,7 @@ pub const StyleResolver = struct {
     }
 
     fn matchesElement(elem: *const dom.Element, rule: *const parser_mod.Rule) bool {
+        if (rule.complex) return elem.matches(rule.selector_text);
         if (rule.selectors.items.len == 0) return false;
 
         // An element matches a compound/list rule if it matches AT LEAST ONE individual component in the comma split.

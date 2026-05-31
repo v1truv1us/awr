@@ -915,7 +915,13 @@ fn resolveCssProp(
 }
 
 /// Match `elem` against a rule's pre-parsed simple selectors (tag / id /
-/// class / universal). No combinators — consistent with the starter CSSOM.
+/// class / universal), OR-combined. This is the renderer's hot path —
+/// resolved per element × per property during a full-page render — so it
+/// deliberately uses only the allocation-free flat matcher and treats a
+/// compound/combinator rule (`rule.complex`) as its loose OR approximation
+/// rather than re-parsing the selector per call (which timed out on large
+/// stylesheets). The script-facing `getComputedStyle` cascade in
+/// `dom/bridge.zig` uses the full selector engine for exact semantics.
 fn cssRuleMatches(elem: *const dom.Element, rule: *const css_parser.Rule) bool {
     if (rule.selectors.items.len == 0) return false;
     for (rule.selectors.items) |sel| {

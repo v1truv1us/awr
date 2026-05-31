@@ -16,8 +16,14 @@ pub const Selector = struct {
 
 pub const Rule = struct {
     selector_text: []u8,
-    // Pre-parsed individual selectors for fast matching
+    // Pre-parsed individual simple selectors for the fast OR-matching path.
+    // Only valid (i.e. sufficient for matching) when `complex` is false.
     selectors: std.ArrayListUnmanaged(Selector) = .empty,
+    // True when at least one comma-part is a compound selector (e.g. `div.foo`)
+    // or uses a combinator (descendant/child/sibling). The flat `selectors`
+    // list can't represent those, so matchers must fall back to the full DOM
+    // selector engine (`dom.Element.matches`) for correct semantics.
+    complex: bool = false,
     declarations: style_mod.StyleDeclaration,
     specificity: cascade_mod.Specificity,
 
@@ -76,6 +82,11 @@ pub fn parseStylesheet(allocator: std.mem.Allocator, css: []const u8) !Styleshee
             const trimmed = std.mem.trim(u8, part, " \t\r\n");
             if (trimmed.len == 0) continue;
 
+            // A combinator (descendant/child/adjacent/sibling) makes this part
+            // a complex selector the flat token list can't represent.
+            if (std.mem.indexOfAny(u8, trimmed, " \t>+~") != null) rule.complex = true;
+            const tokens_before = rule.selectors.items.len;
+
             // Split compound selectors (e.g. tag.class or tag#id) into matchable pieces
             var idx: usize = 0;
             while (idx < trimmed.len) {
@@ -119,6 +130,11 @@ pub fn parseStylesheet(allocator: std.mem.Allocator, css: []const u8) !Styleshee
                     idx += 1;
                 }
             }
+
+            // More than one simple selector in a single comma-part means a
+            // compound selector (e.g. `div.foo`), which requires AND semantics
+            // the flat OR list can't express.
+            if (rule.selectors.items.len - tokens_before > 1) rule.complex = true;
         }
 
         try sheet.rules.append(allocator, rule);
@@ -156,4 +172,22 @@ test "CSSOM parser parses simple stylesheet rules" {
     try std.testing.expectEqualStrings("a", rule1.selectors.items[0].value);
     try std.testing.expect(rule1.selectors.items[1].sel_type == .id);
     try std.testing.expectEqualStrings("b", rule1.selectors.items[1].value);
+}
+
+test "CSSOM parser flags compound and combinator selectors as complex" {
+    var sheet = try parseStylesheet(std.testing.allocator,
+        \\ p { color: red; }
+        \\ .a, #b { color: red; }
+        \\ div.foo { color: red; }
+        \\ section p { color: red; }
+        \\ ul > li { color: red; }
+    );
+    defer sheet.deinit();
+
+    try std.testing.expectEqual(@as(usize, 5), sheet.rules.items.len);
+    try std.testing.expect(!sheet.rules.items[0].complex); // `p` — simple
+    try std.testing.expect(!sheet.rules.items[1].complex); // `.a, #b` — comma list of simples
+    try std.testing.expect(sheet.rules.items[2].complex); // `div.foo` — compound
+    try std.testing.expect(sheet.rules.items[3].complex); // `section p` — descendant
+    try std.testing.expect(sheet.rules.items[4].complex); // `ul > li` — child
 }
