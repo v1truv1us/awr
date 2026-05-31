@@ -22,6 +22,7 @@ const dom = @import("dom/node.zig");
 const browse_heuristics = @import("browse_heuristics.zig");
 const css_parser = @import("cssom/parser.zig");
 const css_style = @import("cssom/style.zig");
+const css_cascade = @import("cssom/cascade.zig");
 const image_protocol = @import("image_protocol");
 
 // ── Public types ──────────────────────────────────────────────────────────
@@ -358,6 +359,17 @@ const RenderState = struct {
     /// `parsed_sheets[*].rules.items`, which is heap-stable after parsing.
     hide_rules: std.ArrayListUnmanaged(*const css_parser.Rule) = .empty,
     ws_rules: std.ArrayListUnmanaged(*const css_parser.Rule) = .empty,
+    /// True when any author stylesheet declares a text property
+    /// (color/font-weight/font-style/text-decoration/text-transform). When
+    /// false and the element has no inline `style=`, `computeTextStyle` skips
+    /// author-CSS resolution entirely — keeping the unstyled path cheap.
+    has_text_css: bool = false,
+    /// True when any author stylesheet declares `text-align`. Gates the
+    /// single-line block alignment path (TUI only).
+    has_align_css: bool = false,
+    /// Computed inline text style for the element currently being rendered.
+    /// Inherited by descendants; emitted as ANSI when `opts.ansi_colors`.
+    cur_style: TextStyle = .{},
 
     fn deinit(self: *RenderState) void {
         for (self.links.items) |link| {
@@ -479,6 +491,53 @@ const RenderState = struct {
         if (self.opts.ansi_colors) try w.writeAll(code);
     }
 
+    /// Re-establish the active inline style after an inner renderer emitted a
+    /// hard reset. Replaces blanket `ansi(w, RESET)` so nested styling
+    /// restores inherited color/emphasis instead of dropping it.
+    fn styleReset(self: *RenderState, w: anytype) !void {
+        if (!self.opts.ansi_colors) return;
+        try emitStyleSeq(w, self.cur_style);
+    }
+
+    /// Emit `pad` leading spaces as plain padding (no underline/reverse), then
+    /// restore the active style frame. Used for text-align so alignment
+    /// whitespace doesn't carry the element's decoration. No-op when pad == 0.
+    fn emitAlignPad(self: *RenderState, w: anytype, pad: usize) !void {
+        if (pad == 0) return;
+        const styled = self.opts.ansi_colors and !self.cur_style.isPlain();
+        if (styled) try w.writeAll(RESET);
+        var i: usize = 0;
+        while (i < pad) : (i += 1) try self.writeByte(w, ' ');
+        if (styled) try emitStyleSeq(w, self.cur_style);
+    }
+
+    /// Compute an element's inline text style: inherit the parent frame, layer
+    /// the UA defaults for its tag, then override with resolved author CSS.
+    /// The inline `style=` attribute is parsed at most once here.
+    fn computeTextStyle(self: *const RenderState, elem: *const dom.Element, base: TextStyle) TextStyle {
+        var s = base;
+        // Decoration does not cascade into a fresh decorating box in CSS, but
+        // for a terminal we let it inherit — it reads naturally and avoids
+        // gaps in underlined links spanning inline children.
+        uaTagStyle(elem.tag, &s);
+
+        const style_attr = elem.getAttribute("style");
+        const has_inline = style_attr != null;
+        // Skip author-CSS resolution when nothing could contribute: no
+        // text-affecting stylesheet rules and no inline style.
+        if (!self.has_text_css and !has_inline) return s;
+
+        var inline_decl: ?css_style.StyleDeclaration = if (style_attr) |attr|
+            css_style.StyleDeclaration.parse(self.allocator, attr) catch null
+        else
+            null;
+        defer if (inline_decl) |*d| d.deinit();
+        const inline_ptr: ?*const css_style.StyleDeclaration = if (inline_decl) |*d| d else null;
+
+        applyCssTextStyle(self, elem, inline_ptr, &s);
+        return s;
+    }
+
     fn inPre(self: *const RenderState) bool {
         return self.pre_depth > 0;
     }
@@ -533,6 +592,450 @@ const CYAN = "\x1b[36m";
 const GREEN = "\x1b[32m"; // T2.5: string literals / diff additions
 const YELLOW = "\x1b[33m"; // T2.5: numeric literals
 const RED = "\x1b[31m"; // T2.6: diff deletions
+
+// ── Inline text styling (CSS-driven) ──────────────────────────────────────
+//
+// A small computed-style model threaded through the render walk so author
+// CSS (font-weight/style, text-decoration, color, text-transform) and a
+// built-in user-agent stylesheet (semantic tags) reach the terminal as ANSI
+// SGR attributes. All emission is gated on `opts.ansi_colors`, so the agent
+// surfaces (`awr <url>` JSON, `--format=md`, and the `ansi_colors=false`
+// corpus snapshots) stay byte-identical — this is a TUI/visual concern only.
+//
+// Styles cascade by inheritance: each element starts from its parent's
+// computed style (so a colored/bold ancestor propagates to descendants the
+// way a browser's inherited text properties do), then layers UA defaults and
+// finally author CSS. A single style frame is emitted as one reset+SGR run on
+// entry and the parent frame is re-emitted on exit, which also fixes the
+// long-standing "nested ANSI not restored" limitation noted in the file header.
+
+const Transform = enum { none, upper, lower };
+
+const TextStyle = struct {
+    bold: bool = false,
+    italic: bool = false,
+    underline: bool = false,
+    strike: bool = false,
+    dim: bool = false,
+    reverse: bool = false,
+    /// ANSI SGR foreground code (30-37 / 90-97); 0 means "terminal default".
+    fg: u8 = 0,
+    /// text-transform is purely visual; it never alters extracted text.
+    transform: Transform = .none,
+
+    /// Two frames are visually equal when their emitted SGR run matches.
+    /// `transform` is excluded — it changes text, not escape bytes.
+    fn visualEql(a: TextStyle, b: TextStyle) bool {
+        return a.bold == b.bold and a.italic == b.italic and
+            a.underline == b.underline and a.strike == b.strike and
+            a.dim == b.dim and a.reverse == b.reverse and a.fg == b.fg;
+    }
+
+    fn isPlain(self: TextStyle) bool {
+        return self.visualEql(.{});
+    }
+};
+
+/// Emit a frame as one `ESC[0;…m` run. Caller guarantees `ansi_colors`.
+fn emitStyleSeq(w: anytype, style: TextStyle) !void {
+    if (style.isPlain()) {
+        try w.writeAll(RESET);
+        return;
+    }
+    try w.writeAll("\x1b[0");
+    if (style.bold) try w.writeAll(";1");
+    if (style.dim) try w.writeAll(";2");
+    if (style.italic) try w.writeAll(";3");
+    if (style.underline) try w.writeAll(";4");
+    if (style.reverse) try w.writeAll(";7");
+    if (style.strike) try w.writeAll(";9");
+    if (style.fg != 0) {
+        var buf: [4]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, ";{d}", .{style.fg}) catch "";
+        try w.writeAll(s);
+    }
+    try w.writeAll("m");
+}
+
+/// Map a CSS color value to the nearest ANSI-16 foreground SGR code, or null
+/// when unrecognised. Deterministic and allocation-free (Rule 5: routing/
+/// parsing is plain code, not a model call). Bright variants (90-97) are used
+/// for light colors so they read on dark terminals.
+fn cssColorToAnsi(raw: []const u8) ?u8 {
+    const v = std.mem.trim(u8, raw, " \t\n\r");
+    if (v.len == 0) return null;
+
+    // Named colors — the common web set, mapped to the closest ANSI slot.
+    const Named = struct { name: []const u8, code: u8 };
+    const names = [_]Named{
+        .{ .name = "black", .code = 30 },   .{ .name = "red", .code = 31 },
+        .{ .name = "green", .code = 32 },   .{ .name = "olive", .code = 33 },
+        .{ .name = "yellow", .code = 93 },  .{ .name = "navy", .code = 34 },
+        .{ .name = "blue", .code = 34 },    .{ .name = "purple", .code = 35 },
+        .{ .name = "magenta", .code = 35 }, .{ .name = "fuchsia", .code = 95 },
+        .{ .name = "teal", .code = 36 },    .{ .name = "cyan", .code = 36 },
+        .{ .name = "aqua", .code = 96 },    .{ .name = "silver", .code = 37 },
+        .{ .name = "gray", .code = 90 },    .{ .name = "grey", .code = 90 },
+        .{ .name = "white", .code = 97 },   .{ .name = "maroon", .code = 31 },
+        .{ .name = "lime", .code = 92 },    .{ .name = "orange", .code = 33 },
+        .{ .name = "pink", .code = 95 },    .{ .name = "brown", .code = 33 },
+    };
+    for (names) |n| {
+        if (std.ascii.eqlIgnoreCase(v, n.name)) return readableFg(n.code);
+    }
+
+    // Hex (#rgb / #rrggbb) and rgb()/rgba() → nearest ANSI-16 by RGB.
+    var r: u16 = undefined;
+    var g: u16 = undefined;
+    var b: u16 = undefined;
+    if (parseRgb(v, &r, &g, &b)) {
+        return readableFg(nearestAnsi16(r, g, b));
+    }
+    return null;
+}
+
+/// Drop ANSI black (30) foregrounds: browsers assume a light page background,
+/// but terminals are conventionally dark, where black text is invisible.
+/// Returning null falls back to the terminal's default foreground.
+fn readableFg(code: u8) ?u8 {
+    return if (code == 30) null else code;
+}
+
+fn parseRgb(v: []const u8, r: *u16, g: *u16, b: *u16) bool {
+    if (v[0] == '#') {
+        const hex = v[1..];
+        if (hex.len == 3) {
+            const rv = hexDigit(hex[0]) orelse return false;
+            const gv = hexDigit(hex[1]) orelse return false;
+            const bv = hexDigit(hex[2]) orelse return false;
+            r.* = rv * 17;
+            g.* = gv * 17;
+            b.* = bv * 17;
+            return true;
+        }
+        if (hex.len == 6) {
+            r.* = (hexDigit(hex[0]) orelse return false) * 16 + (hexDigit(hex[1]) orelse return false);
+            g.* = (hexDigit(hex[2]) orelse return false) * 16 + (hexDigit(hex[3]) orelse return false);
+            b.* = (hexDigit(hex[4]) orelse return false) * 16 + (hexDigit(hex[5]) orelse return false);
+            return true;
+        }
+        return false;
+    }
+    if (std.ascii.startsWithIgnoreCase(v, "rgb")) {
+        const open = std.mem.indexOfScalar(u8, v, '(') orelse return false;
+        const close = std.mem.indexOfScalar(u8, v, ')') orelse return false;
+        if (close <= open) return false;
+        var parts = std.mem.splitScalar(u8, v[open + 1 .. close], ',');
+        const rs = parts.next() orelse return false;
+        const gs = parts.next() orelse return false;
+        const bs = parts.next() orelse return false;
+        r.* = std.fmt.parseInt(u16, std.mem.trim(u8, rs, " \t"), 10) catch return false;
+        g.* = std.fmt.parseInt(u16, std.mem.trim(u8, gs, " \t"), 10) catch return false;
+        b.* = std.fmt.parseInt(u16, std.mem.trim(u8, bs, " \t"), 10) catch return false;
+        return true;
+    }
+    return false;
+}
+
+fn hexDigit(c: u8) ?u16 {
+    return switch (c) {
+        '0'...'9' => @as(u16, c - '0'),
+        'a'...'f' => @as(u16, c - 'a' + 10),
+        'A'...'F' => @as(u16, c - 'A' + 10),
+        else => null,
+    };
+}
+
+/// Pick the closest of the 8 normal + 8 bright ANSI colors by squared RGB
+/// distance against their conventional xterm values.
+fn nearestAnsi16(r: u16, g: u16, b: u16) u8 {
+    const Slot = struct { code: u8, r: u16, g: u16, b: u16 };
+    const slots = [_]Slot{
+        .{ .code = 30, .r = 0, .g = 0, .b = 0 },
+        .{ .code = 31, .r = 205, .g = 0, .b = 0 },
+        .{ .code = 32, .r = 0, .g = 205, .b = 0 },
+        .{ .code = 33, .r = 205, .g = 205, .b = 0 },
+        .{ .code = 34, .r = 0, .g = 0, .b = 238 },
+        .{ .code = 35, .r = 205, .g = 0, .b = 205 },
+        .{ .code = 36, .r = 0, .g = 205, .b = 205 },
+        .{ .code = 37, .r = 229, .g = 229, .b = 229 },
+        .{ .code = 90, .r = 127, .g = 127, .b = 127 },
+        .{ .code = 91, .r = 255, .g = 0, .b = 0 },
+        .{ .code = 92, .r = 0, .g = 255, .b = 0 },
+        .{ .code = 93, .r = 255, .g = 255, .b = 0 },
+        .{ .code = 94, .r = 92, .g = 92, .b = 255 },
+        .{ .code = 95, .r = 255, .g = 0, .b = 255 },
+        .{ .code = 96, .r = 0, .g = 255, .b = 255 },
+        .{ .code = 97, .r = 255, .g = 255, .b = 255 },
+    };
+    var best: u8 = 37;
+    var best_dist: i64 = std.math.maxInt(i64);
+    for (slots) |s| {
+        const dr = @as(i64, r) - @as(i64, s.r);
+        const dg = @as(i64, g) - @as(i64, s.g);
+        const db = @as(i64, b) - @as(i64, s.b);
+        const dist = dr * dr + dg * dg + db * db;
+        if (dist < best_dist) {
+            best_dist = dist;
+            best = s.code;
+        }
+    }
+    return best;
+}
+
+/// Built-in user-agent stylesheet: visual defaults for semantic tags so that
+/// pages with little/no CSS still render with browser-like emphasis. Returns
+/// the attributes a tag contributes ON TOP of inherited style (OR-ed in).
+fn uaTagStyle(tag: []const u8, style: *TextStyle) void {
+    if (eql(tag, "strong") or eql(tag, "b")) {
+        style.bold = true;
+    } else if (eql(tag, "em") or eql(tag, "i") or eql(tag, "cite") or eql(tag, "var") or eql(tag, "dfn")) {
+        style.italic = true;
+    } else if (eql(tag, "u") or eql(tag, "ins")) {
+        style.underline = true;
+    } else if (eql(tag, "del") or eql(tag, "s") or eql(tag, "strike")) {
+        style.strike = true;
+    } else if (eql(tag, "mark")) {
+        style.reverse = true;
+    } else if (eql(tag, "small")) {
+        style.dim = true;
+    } else if (eql(tag, "kbd") or eql(tag, "samp")) {
+        style.reverse = true;
+    } else if (eql(tag, "a")) {
+        // Links: underlined. Color/focus emphasis is layered by renderLink.
+        style.underline = true;
+    } else if (eql(tag, "blockquote")) {
+        style.dim = true;
+    } else if (eql(tag, "h1") or eql(tag, "h2")) {
+        style.bold = true;
+        style.underline = true;
+    } else if (eql(tag, "h3")) {
+        style.bold = true;
+    } else if (eql(tag, "h4") or eql(tag, "h5") or eql(tag, "h6")) {
+        style.bold = true;
+        style.dim = true;
+    }
+}
+
+/// Layer resolved author CSS over `s`. `inline_decl` is the caller-owned
+/// parsed inline `style=` declaration (or null). Resolution runs inside the
+/// render module so it shares the DOM `Element` type; cascade precedence
+/// reuses `css_cascade.MatchResult`.
+fn applyCssTextStyle(
+    state: *const RenderState,
+    elem: *const dom.Element,
+    inline_decl: ?*const css_style.StyleDeclaration,
+    s: *TextStyle,
+) void {
+    const fw = resolveCssProp(state, elem, "font-weight", inline_decl);
+    if (fw.len > 0) {
+        if (isBoldWeight(fw)) {
+            s.bold = true;
+        } else if (eql(fw, "normal") or eql(fw, "400") or eql(fw, "300") or eql(fw, "200") or eql(fw, "100")) {
+            s.bold = false;
+        }
+    }
+
+    const fs = resolveCssProp(state, elem, "font-style", inline_decl);
+    if (fs.len > 0) {
+        if (eql(fs, "italic") or eql(fs, "oblique")) {
+            s.italic = true;
+        } else if (eql(fs, "normal")) {
+            s.italic = false;
+        }
+    }
+
+    const td = resolveCssProp(state, elem, "text-decoration", inline_decl);
+    const tdl = resolveCssProp(state, elem, "text-decoration-line", inline_decl);
+    if (containsWord(td, "underline") or containsWord(tdl, "underline")) s.underline = true;
+    if (containsWord(td, "line-through") or containsWord(tdl, "line-through")) s.strike = true;
+    if (containsWord(td, "none") or containsWord(tdl, "none")) {
+        s.underline = false;
+        s.strike = false;
+    }
+
+    const color = resolveCssProp(state, elem, "color", inline_decl);
+    if (color.len > 0) {
+        if (cssColorToAnsi(color)) |code| s.fg = code;
+    }
+
+    const tt = resolveCssProp(state, elem, "text-transform", inline_decl);
+    if (tt.len > 0) {
+        if (eql(tt, "uppercase")) {
+            s.transform = .upper;
+        } else if (eql(tt, "lowercase")) {
+            s.transform = .lower;
+        } else if (eql(tt, "none")) {
+            s.transform = .none;
+        }
+    }
+}
+
+/// Resolve one CSS property for `elem` across the parsed author stylesheets
+/// and the caller-owned inline declaration, honoring specificity, source
+/// order, and `!important`. Returns a borrowed slice (valid for the lifetime
+/// of the stylesheets / inline declaration) or "" when unset.
+fn resolveCssProp(
+    state: *const RenderState,
+    elem: *const dom.Element,
+    prop: []const u8,
+    inline_decl: ?*const css_style.StyleDeclaration,
+) []const u8 {
+    var best: ?css_cascade.MatchResult = null;
+    for (state.parsed_sheets.items, 0..) |*sheet, si| {
+        for (sheet.rules.items, 0..) |*rule, ri| {
+            if (!cssRuleMatches(elem, rule)) continue;
+            const val = rule.declarations.getPropertyValue(prop);
+            if (val.len == 0) continue;
+            const m = css_cascade.MatchResult{
+                .specificity = rule.specificity,
+                .source_index = si,
+                .rule_index = ri,
+                .value = val,
+                .important = declImportant(&rule.declarations, prop),
+            };
+            if (best == null or m.isPrecedentOver(best.?)) best = m;
+        }
+    }
+    if (inline_decl) |decl| {
+        const v = decl.getPropertyValue(prop);
+        if (v.len > 0) {
+            const m = css_cascade.MatchResult{
+                // Inline beats any stylesheet selector (sentinel specificity).
+                .specificity = .{ .id = 9999, .class = 0, .element = 0 },
+                .source_index = std.math.maxInt(usize),
+                .rule_index = std.math.maxInt(usize),
+                .value = v,
+                .important = declImportant(decl, prop),
+            };
+            if (best == null or m.isPrecedentOver(best.?)) best = m;
+        }
+    }
+    return if (best) |m| m.value else "";
+}
+
+/// Match `elem` against a rule's pre-parsed simple selectors (tag / id /
+/// class / universal). No combinators — consistent with the starter CSSOM.
+fn cssRuleMatches(elem: *const dom.Element, rule: *const css_parser.Rule) bool {
+    if (rule.selectors.items.len == 0) return false;
+    for (rule.selectors.items) |sel| {
+        switch (sel.sel_type) {
+            .universal => return true,
+            .tag => if (std.ascii.eqlIgnoreCase(elem.tag, sel.value)) return true,
+            .id => {
+                if (elem.getAttribute("id")) |id| {
+                    if (std.mem.eql(u8, id, sel.value)) return true;
+                }
+            },
+            .class => {
+                if (elem.getAttribute("class")) |classes| {
+                    var parts = std.mem.splitScalar(u8, classes, ' ');
+                    while (parts.next()) |cn| {
+                        if (std.mem.eql(u8, cn, sel.value)) return true;
+                    }
+                }
+            },
+        }
+    }
+    return false;
+}
+
+fn declImportant(decl: *const css_style.StyleDeclaration, prop: []const u8) bool {
+    for (decl.declarations.items) |d| {
+        if (std.ascii.eqlIgnoreCase(d.name, prop)) return d.important;
+    }
+    return false;
+}
+
+/// True when a rule declares any text property the renderer maps to an ANSI
+/// attribute. Used once at setup to gate the per-element resolution.
+fn ruleHasTextProp(rule: *const css_parser.Rule) bool {
+    const props = [_][]const u8{
+        "color",           "font-weight",          "font-style",
+        "text-decoration", "text-decoration-line", "text-transform",
+    };
+    for (props) |p| {
+        if (rule.declarations.getPropertyValue(p).len > 0) return true;
+    }
+    return false;
+}
+
+/// CSS font-weight values that map to terminal bold: the `bold`/`bolder`
+/// keywords and numeric weights ≥ 600.
+fn isBoldWeight(v: []const u8) bool {
+    if (eql(v, "bold") or eql(v, "bolder")) return true;
+    const n = std.fmt.parseInt(u16, std.mem.trim(u8, v, " \t"), 10) catch return false;
+    return n >= 600;
+}
+
+/// True when space-separated `haystack` contains the whole token `needle`
+/// (case-insensitive). Used for multi-value `text-decoration`.
+fn containsWord(haystack: []const u8, needle: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, haystack, " \t");
+    while (it.next()) |word| {
+        if (eql(word, needle)) return true;
+    }
+    return false;
+}
+
+/// ASCII text-transform in place (multibyte UTF-8 bytes are left unchanged).
+fn applyTransformInPlace(text: []u8, t: Transform) void {
+    switch (t) {
+        .none => {},
+        .upper => for (text) |*c| {
+            c.* = std.ascii.toUpper(c.*);
+        },
+        .lower => for (text) |*c| {
+            c.* = std.ascii.toLower(c.*);
+        },
+    }
+}
+
+const Align = enum { start, center, right };
+
+/// Approximate terminal display width (UTF-8 codepoint count; wide CJK/emoji
+/// are not double-counted). Good enough for centering single-line text.
+fn displayWidth(s: []const u8) usize {
+    return std.unicode.utf8CountCodepoints(s) catch s.len;
+}
+
+/// Resolve a block element's effective horizontal alignment: CSS `text-align`
+/// first, then the legacy presentational `align`/`<center>` fallback. Author
+/// CSS resolution is skipped when no rule declares text-align and there is no
+/// inline style.
+fn resolveAlign(state: *const RenderState, elem: *const dom.Element) Align {
+    if (eql(elem.tag, "center")) return .center;
+
+    if (state.has_align_css or elem.getAttribute("style") != null) {
+        var inline_decl: ?css_style.StyleDeclaration = if (elem.getAttribute("style")) |a|
+            css_style.StyleDeclaration.parse(state.allocator, a) catch null
+        else
+            null;
+        defer if (inline_decl) |*d| d.deinit();
+        const v = resolveCssProp(state, elem, "text-align", if (inline_decl) |*d| d else null);
+        if (eql(v, "center")) return .center;
+        if (eql(v, "right") or eql(v, "end")) return .right;
+        if (eql(v, "left") or eql(v, "start")) return .start;
+    }
+
+    // Legacy presentational attribute (e.g. <p align="center">).
+    if (elem.getAttribute("align")) |a| {
+        if (eql(a, "center")) return .center;
+        if (eql(a, "right")) return .right;
+    }
+    return .start;
+}
+
+/// Leading-pad columns to place `content_width` columns of text at `align`
+/// within `max_width`. Zero for start alignment or when content fills the row.
+fn alignPad(al: Align, content_width: usize, max_width: usize) usize {
+    if (content_width >= max_width) return 0;
+    return switch (al) {
+        .start => 0,
+        .center => (max_width - content_width) / 2,
+        .right => max_width - content_width,
+    };
+}
 
 // ── Public API ────────────────────────────────────────────────────────────
 
@@ -634,6 +1137,14 @@ fn renderModelFromRoot(
             }
             if (rule.declarations.getPropertyValue("white-space").len > 0) {
                 state.ws_rules.append(allocator, rule) catch {};
+            }
+            // Flag whether any rule declares a text-affecting property, so the
+            // unstyled render path can skip author-CSS resolution entirely.
+            if (!state.has_text_css and ruleHasTextProp(rule)) {
+                state.has_text_css = true;
+            }
+            if (!state.has_align_css and rule.declarations.getPropertyValue("text-align").len > 0) {
+                state.has_align_css = true;
             }
         }
     }
@@ -853,6 +1364,21 @@ fn renderElement(state: *RenderState, w: anytype, elem: *const dom.Element) anye
         state.pre_depth -= 1;
     };
 
+    // CSS-driven inline text style. Inherit the parent frame, layer UA + author
+    // CSS, emit the SGR run on entry and restore the parent frame on exit.
+    // Gated on `ansi_colors`, so the agent/JSON/Markdown surfaces and the
+    // `ansi_colors=false` corpus snapshots stay byte-identical. `cur_style` is
+    // always updated (even with colors off) so `text-transform` can act.
+    const saved_style = state.cur_style;
+    const new_style = state.computeTextStyle(elem, saved_style);
+    const style_changed = state.opts.ansi_colors and !TextStyle.visualEql(new_style, saved_style);
+    state.cur_style = new_style;
+    if (style_changed) try emitStyleSeq(w, new_style);
+    defer {
+        state.cur_style = saved_style;
+        if (style_changed) emitStyleSeq(w, saved_style) catch {};
+    }
+
     // Step 10: CSS background-image emit. For content-bearing landmarks
     // (`<header>`, `<section>`, `<figure>`) with inline `style="...
     // background-image: url(...)..."`, surface the bg image as an
@@ -968,7 +1494,10 @@ fn renderElement(state: *RenderState, w: anytype, elem: *const dom.Element) anye
     }
 
     // ── Generic block / inline fallback ──────────────────────────────
-    if (isBlockTag(tag)) {
+    if (isBlockTag(tag) or eql(tag, "center")) {
+        // TUI-only center/right alignment for single-line block content
+        // (e.g. <div style="text-align:center"> or legacy <center>).
+        if (try renderAlignedBlock(state, w, elem)) return;
         try state.ensureNewline(w);
         try renderChildren(state, w, elem);
         try state.ensureNewline(w);
@@ -987,18 +1516,25 @@ fn renderHeading(state: *RenderState, w: anytype, elem: *const dom.Element, leve
     const trimmed = std.mem.trim(u8, text, " \t\r\n");
     if (trimmed.len == 0) return;
 
-    // Style: h1/h2 get bold+underline; h3 gets bold; h4-h6 get bold+dim.
-    try state.ansi(w, BOLD);
-    if (level <= 2) try state.ansi(w, UNDERLINE);
-    if (level >= 4) try state.ansi(w, DIM);
+    // CSS text-align (center/right) — TUI only, single-line heading text.
+    const pad = if (state.opts.ansi_colors)
+        alignPad(resolveAlign(state, elem), displayWidth(trimmed), state.opts.max_width)
+    else
+        0;
+    try state.emitAlignPad(w, pad);
+
+    // Style (h1/h2 bold+underline, h3 bold, h4-h6 bold+dim) is supplied by the
+    // UA stylesheet via the inline style stack in `renderElement`.
     try state.writeAll(w, trimmed);
-    try state.ansi(w, RESET);
     try state.newline(w);
 
-    // Decorative underline for h1 ("=") and h2 ("-").
+    // Decorative underline for h1 ("=") and h2 ("-"), aligned under the text.
     if (level <= 2) {
         const ch: u8 = if (level == 1) '=' else '-';
+        // Byte length (not display width) preserves the established agent/JSON
+        // snapshot for the ansi-off path; the alignment pad above is ansi-only.
         const len = @min(trimmed.len, state.opts.max_width);
+        try state.emitAlignPad(w, pad);
         for (0..len) |_| try w.writeByte(ch);
         try state.newline(w);
     }
@@ -1006,22 +1542,55 @@ fn renderHeading(state: *RenderState, w: anytype, elem: *const dom.Element, leve
 }
 
 fn renderParagraph(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
+    if (try renderAlignedBlock(state, w, elem)) {
+        try state.newline(w);
+        return;
+    }
     try state.ensureNewline(w);
     try renderChildren(state, w, elem);
     try state.ensureNewline(w);
     try state.newline(w);
 }
 
+/// TUI-only: when `elem` is center/right aligned and its flattened text fits on
+/// one line, render it aligned and return true; otherwise return false so the
+/// caller renders it normally. Restricted to a single line to avoid a layout
+/// rewrite — multi-line alignment is deferred (browser-roadmap Tier 2+).
+fn renderAlignedBlock(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!bool {
+    if (!state.opts.ansi_colors) return false;
+    const al = resolveAlign(state, elem);
+    if (al == .start) return false;
+    const text = elem.textContentForExtract(state.allocator) catch return false;
+    defer state.allocator.free(text);
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed.len == 0) return false;
+    const wdt = displayWidth(trimmed);
+    if (wdt == 0 or wdt >= state.opts.max_width) return false; // would wrap → leave to normal flow
+    try state.ensureNewline(w);
+    try state.emitAlignPad(w, alignPad(al, wdt, state.opts.max_width));
+    // Drop any inter-word space carried in from a previous sibling: with the
+    // alignment pad already placing the cursor, a phantom leading space would
+    // push a right-aligned line (pad + text == max_width) over the margin and
+    // wrap it back to column 0, discarding the alignment.
+    state.pending_space = false;
+    try renderChildren(state, w, elem);
+    try state.ensureNewline(w);
+    return true;
+}
+
 fn renderLink(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
     const focused = focusMatches(state.opts.focused_element_ptr, elem);
     if (focused and state.opts.ansi_colors) {
+        // Focus emphasis layered on top of the link's UA underline + any
+        // inherited/author color, then restored to that frame afterwards.
         try state.ansi(w, REVERSE);
         try state.ansi(w, BOLD);
+        try renderChildren(state, w, elem);
+        try state.styleReset(w);
     } else {
-        try state.ansi(w, UNDERLINE);
+        // Underline (UA) and color (author CSS) come from the style stack.
+        try renderChildren(state, w, elem);
     }
-    try renderChildren(state, w, elem);
-    try state.ansi(w, RESET);
 
     if (state.opts.show_links) {
         const href = elem.getAttribute("href") orelse "";
@@ -1033,7 +1602,7 @@ fn renderLink(state: *RenderState, w: anytype, elem: *const dom.Element) anyerro
             defer state.allocator.free(ref);
             try state.ansi(w, DIM);
             try state.writeAll(w, ref);
-            try state.ansi(w, RESET);
+            try state.styleReset(w);
         }
     }
 }
@@ -1119,13 +1688,13 @@ fn hasVisibleControl(elem: *const dom.Element) bool {
 
 fn renderBlockquote(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
     try state.ensureNewline(w);
-    try state.ansi(w, DIM);
+    // Dim styling for the quote is supplied by the UA stylesheet via the
+    // inline style stack in `renderElement`; here we only add the indent.
     const saved_indent = state.hang_indent;
     state.hang_indent += 2;
     try renderChildren(state, w, elem);
     try state.ensureNewline(w);
     state.hang_indent = saved_indent;
-    try state.ansi(w, RESET);
 }
 
 fn renderPre(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
@@ -1892,16 +2461,16 @@ fn collapsedLabel(tag: []const u8) []const u8 {
     return "[Header omitted]";
 }
 
+// strong/b and em/i carry their emphasis through the UA stylesheet
+// (`uaTagStyle`) and the inline style stack applied in `renderElement`, which
+// composes with inherited color/emphasis instead of clobbering it (no blanket
+// RESET — fixes the nested-ANSI limitation noted in the file header).
 fn renderStrong(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
-    try state.ansi(w, BOLD);
     try renderChildren(state, w, elem);
-    try state.ansi(w, RESET);
 }
 
 fn renderEm(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
-    try state.ansi(w, ITALIC);
     try renderChildren(state, w, elem);
-    try state.ansi(w, RESET);
 }
 
 // ── Text node renderer ────────────────────────────────────────────────────
@@ -1924,6 +2493,12 @@ fn renderTextNode(state: *RenderState, w: anytype, text_node: *const dom.Text) a
     var buf: [8192]u8 = undefined;
     const normalized = normalizeWhitespace(&buf, raw);
     if (normalized.len == 0) return;
+
+    // CSS text-transform (visual only): applied to TUI output, never to the
+    // extracted/JSON text. ASCII-only; multibyte UTF-8 is left untouched.
+    if (state.opts.ansi_colors and state.cur_style.transform != .none) {
+        applyTransformInPlace(@constCast(normalized), state.cur_style.transform);
+    }
 
     // A normalized leading space means this node was preceded by whitespace
     // in the source; honor it as a pending separator before the first word.
@@ -2965,6 +3540,119 @@ test "render — HN-like table layout respects max width" {
         // to the preceding word and may push slightly past max_width.
         if (text.len > 0) try std.testing.expect(text.len <= 44);
     }
+}
+
+test "cssColorToAnsi — named, hex, and rgb mapping" {
+    try std.testing.expectEqual(@as(?u8, 31), cssColorToAnsi("red"));
+    try std.testing.expectEqual(@as(?u8, 34), cssColorToAnsi("blue"));
+    try std.testing.expectEqual(@as(?u8, 90), cssColorToAnsi("gray"));
+    // #888 ≈ rgb(136,136,136) → nearest is bright-black/gray (90).
+    try std.testing.expectEqual(@as(?u8, 90), cssColorToAnsi("#888"));
+    // Pure red hex maps to the exact bright-red slot (91).
+    try std.testing.expectEqual(@as(?u8, 91), cssColorToAnsi("#ff0000"));
+    try std.testing.expectEqual(@as(?u8, 32), cssColorToAnsi("rgb(0, 200, 0)"));
+    try std.testing.expectEqual(@as(?u8, null), cssColorToAnsi("not-a-color"));
+    try std.testing.expectEqual(@as(?u8, null), cssColorToAnsi(""));
+    // Black/near-black foregrounds are dropped (invisible on dark terminals).
+    try std.testing.expectEqual(@as(?u8, null), cssColorToAnsi("black"));
+    try std.testing.expectEqual(@as(?u8, null), cssColorToAnsi("#000000"));
+    try std.testing.expectEqual(@as(?u8, null), cssColorToAnsi("#111"));
+}
+
+test "isBoldWeight + containsWord helpers" {
+    try std.testing.expect(isBoldWeight("bold"));
+    try std.testing.expect(isBoldWeight("700"));
+    try std.testing.expect(!isBoldWeight("400"));
+    try std.testing.expect(!isBoldWeight("normal"));
+    try std.testing.expect(containsWord("underline dotted", "underline"));
+    try std.testing.expect(containsWord("none", "none"));
+    try std.testing.expect(!containsWord("underline", "line-through"));
+}
+
+test "render — author CSS emits ANSI color/weight and restores nested frame" {
+    // Author stylesheets reach the renderer via `opts.css_stylesheets`
+    // (page.zig extracts <style>/<link> into this); render() does not parse
+    // inline <style> itself.
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body><p class="d">red <a href="https://e.com">link</a> tail</p></body></html>
+    );
+    defer doc.deinit();
+    var buf: [4096]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&buf);
+    try render(std.testing.allocator, &fbs, &doc, .{
+        .ansi_colors = true,
+        .css_stylesheets = &.{".d{color:red;font-weight:bold} a{color:blue}"},
+    });
+    const out = fbs.buffered();
+    // Bold (1) + red (31) frame for the paragraph.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[0;1;31m") != null);
+    // The link layers underline (4) + blue (34) on top of the inherited bold.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[0;1;4;34m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "tail") != null);
+}
+
+test "render — UA semantic tags and text-transform under ANSI" {
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body><p><del>x</del><mark>y</mark>
+        \\<span style="text-transform:uppercase">go</span></p></body></html>
+    );
+    defer doc.deinit();
+    var buf: [2048]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&buf);
+    try render(std.testing.allocator, &fbs, &doc, .{ .ansi_colors = true });
+    const out = fbs.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[0;9m") != null); // del → strike
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[0;7m") != null); // mark → reverse
+    try std.testing.expect(std.mem.indexOf(u8, out, "GO") != null); // uppercase transform
+}
+
+test "render — text-align center/right pad single-line blocks (TUI only)" {
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body>
+        \\<p style="text-align:right">RIGHTX</p>
+        \\<p style="text-align:center">CENTERX</p>
+        \\</body></html>
+    );
+    defer doc.deinit();
+    var buf: [2048]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&buf);
+    try render(std.testing.allocator, &fbs, &doc, .{ .ansi_colors = true, .max_width = 30 });
+    const out = fbs.buffered();
+    // Right: 30 - 6 = 24 leading spaces before RIGHTX.
+    try std.testing.expect(std.mem.indexOf(u8, out, "                        RIGHTX") != null);
+    // Center: (30 - 7)/2 = 11 leading spaces before CENTERX.
+    try std.testing.expect(std.mem.indexOf(u8, out, "           CENTERX") != null);
+}
+
+test "render — text-align is suppressed on the agent surface (ansi off)" {
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body><p style="text-align:center">X</p></body></html>
+    );
+    defer doc.deinit();
+    var buf: [1024]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&buf);
+    try render(std.testing.allocator, &fbs, &doc, .{ .ansi_colors = false, .max_width = 30 });
+    const out = fbs.buffered();
+    // No leading alignment padding when colors are off.
+    try std.testing.expect(std.mem.indexOf(u8, out, "          X") == null);
+}
+
+test "render — CSS styling leaves the agent surface escape-free" {
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><head><style>.d{color:red;font-weight:bold}</style></head><body>
+        \\<p class="d">red</p>
+        \\<span style="text-transform:uppercase">stays lower</span>
+        \\</body></html>
+    );
+    defer doc.deinit();
+    var buf: [2048]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&buf);
+    try render(std.testing.allocator, &fbs, &doc, .{ .ansi_colors = false });
+    const out = fbs.buffered();
+    // No escapes and no visual text-transform on the non-TUI surface.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "stays lower") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "STAYS LOWER") == null);
 }
 
 test "render — complex document with mixed elements" {
