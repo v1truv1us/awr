@@ -95,6 +95,19 @@ Attribute selectors are also honored in the cascade: the DOM selector engine
 flags `[...]` rules complex so the cascade routes them through that engine.
 Coverage: `tests/wpt/css_attribute_selectors.js`.
 
+### 2.2 Computed-value serialization (2026-05-31)
+
+`getComputedStyle` now returns the *resolved* form a real browser exposes to
+scripts, not the authored token: `font-weight: bold` → `"700"` /
+`normal` → `"400"`, and `color` / `background-color` keywords, `#hex`, and
+`rgb()` → `"rgb(r, g, b)"` (or `"rgba(…)"` when alpha < 1). Serialization is
+applied only at the `getComputedStyle` boundary (`__awr_canon_computed__` in
+`src/dom/bridge.zig`); `element.style.*` (the inline `CSSStyleDeclaration`)
+keeps the authored value, and the renderer maps raw author values to ANSI
+independently, so the agent/corpus surfaces are unaffected. Coverage:
+`tests/wpt/css_computed_value_serialization.js` plus updated assertions across
+the existing CSS cases.
+
 ## 3. Implementation shape
 
 Move CSS behavior out of the JS bridge over time:

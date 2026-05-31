@@ -2447,6 +2447,53 @@ const BRIDGE_POLYFILL =
     \\    if (css_name === 'text-align') return (t === 'TH') ? 'center' : 'start';
     \\    return '';
     \\  }
+    \\  // Computed-value serialization (CSSOM §6): getComputedStyle returns the
+    \\  // *resolved* form a browser exposes — font-weight keywords as numbers,
+    \\  // colors as rgb()/rgba(). Renderer styling consumes raw author values
+    \\  // separately, so this only affects the script-facing API.
+    \\  const __AWR_NAMED_COLORS__ = {
+    \\    black:[0,0,0], silver:[192,192,192], gray:[128,128,128], grey:[128,128,128],
+    \\    white:[255,255,255], maroon:[128,0,0], red:[255,0,0], purple:[128,0,128],
+    \\    fuchsia:[255,0,255], magenta:[255,0,255], green:[0,128,0], lime:[0,255,0],
+    \\    olive:[128,128,0], yellow:[255,255,0], navy:[0,0,128], blue:[0,0,255],
+    \\    teal:[0,128,128], aqua:[0,255,255], cyan:[0,255,255], orange:[255,165,0],
+    \\    pink:[255,192,203], brown:[165,42,42], gold:[255,215,0], transparent:[0,0,0,0]
+    \\  };
+    \\  function __awr_serialize_color__(v) {
+    \\    v = String(v).trim().toLowerCase();
+    \\    if (!v) return '';
+    \\    let rgb = null;
+    \\    if (Object.prototype.hasOwnProperty.call(__AWR_NAMED_COLORS__, v)) {
+    \\      rgb = __AWR_NAMED_COLORS__[v].slice();
+    \\    } else if (/^#[0-9a-f]{3}$/.test(v)) {
+    \\      rgb = [parseInt(v[1]+v[1],16), parseInt(v[2]+v[2],16), parseInt(v[3]+v[3],16)];
+    \\    } else if (/^#[0-9a-f]{6}$/.test(v)) {
+    \\      rgb = [parseInt(v.slice(1,3),16), parseInt(v.slice(3,5),16), parseInt(v.slice(5,7),16)];
+    \\    } else {
+    \\      const m = /^rgba?\(([^)]+)\)$/.exec(v);
+    \\      if (m) {
+    \\        const p = m[1].split(',').map(s => s.trim());
+    \\        if (p.length >= 3) rgb = [parseInt(p[0],10), parseInt(p[1],10), parseInt(p[2],10), p[3] !== undefined ? parseFloat(p[3]) : undefined];
+    \\      }
+    \\    }
+    \\    if (!rgb) return '';
+    \\    if (rgb.length >= 4 && rgb[3] !== undefined && rgb[3] < 1) {
+    \\      return 'rgba(' + rgb[0] + ', ' + rgb[1] + ', ' + rgb[2] + ', ' + rgb[3] + ')';
+    \\    }
+    \\    return 'rgb(' + rgb[0] + ', ' + rgb[1] + ', ' + rgb[2] + ')';
+    \\  }
+    \\  function __awr_canon_computed__(name, value) {
+    \\    if (!value) return value;
+    \\    if (name === 'font-weight') {
+    \\      if (value === 'bold' || value === 'bolder') return '700';
+    \\      if (value === 'normal' || value === 'lighter') return '400';
+    \\      return value;
+    \\    }
+    \\    if (name === 'color' || /(^|-)color$/.test(name)) {
+    \\      return __awr_serialize_color__(value) || value;
+    \\    }
+    \\    return value;
+    \\  }
     \\  globalThis.getComputedStyle = function(el) {
     \\    return new Proxy(Object.create(null), {
     \\      get(_target, prop) {
@@ -2458,7 +2505,7 @@ const BRIDGE_POLYFILL =
     \\            }
     \\            const handle = el._h || 0;
     \\            const v = __awr_css_get_computed_property__(handle, css);
-    \\            return v || __awr_ua_default__(el, css);
+    \\            return __awr_canon_computed__(css, v || __awr_ua_default__(el, css));
     \\          };
     \\        }
     \\        const css = String(prop).replace(/[A-Z]/g, m => '-' + m.toLowerCase()).toLowerCase();
@@ -2467,7 +2514,7 @@ const BRIDGE_POLYFILL =
     \\        }
     \\        const handle = el._h || 0;
     \\        const v = __awr_css_get_computed_property__(handle, css);
-    \\        return v || __awr_ua_default__(el, css);
+    \\        return __awr_canon_computed__(css, v || __awr_ua_default__(el, css));
     \\      }
     \\    });
     \\  };

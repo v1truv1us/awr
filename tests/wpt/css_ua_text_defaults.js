@@ -4,11 +4,11 @@
 // AWR's terminal presentation choices — and author rules must still win.
 
 test(() => {
-  assert_equals(getComputedStyle(document.getElementById('strong')).fontWeight, 'bold',
+  assert_equals(getComputedStyle(document.getElementById('strong')).fontWeight, '700',
     '<strong> defaults to font-weight:bold');
-  assert_equals(getComputedStyle(document.getElementById('h2')).fontWeight, 'bold',
+  assert_equals(getComputedStyle(document.getElementById('h2')).fontWeight, '700',
     'headings default to font-weight:bold');
-  assert_equals(getComputedStyle(document.getElementById('plain')).fontWeight, 'normal',
+  assert_equals(getComputedStyle(document.getElementById('plain')).fontWeight, '400',
     'non-emphasis elements default to font-weight:normal');
 }, 'UA default: font-weight');
 
@@ -41,6 +41,6 @@ test(() => {
   // Author CSS and inline styles override the UA default.
   assert_equals(getComputedStyle(document.getElementById('strong')).fontStyle, 'italic',
     'author stylesheet font-style overrides UA default on <strong>');
-  assert_equals(getComputedStyle(document.getElementById('unbold')).fontWeight, 'normal',
+  assert_equals(getComputedStyle(document.getElementById('unbold')).fontWeight, '400',
     'inline font-weight:normal overrides the <strong> UA bold default');
 }, 'author / inline styles override UA defaults');

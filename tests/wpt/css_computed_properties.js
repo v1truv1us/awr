@@ -40,7 +40,7 @@ test(() => {
 test(() => {
   assert_equals(
     getComputedStyle(document.getElementById('fw')).getPropertyValue('font-weight'),
-    'bold',
+    '700',
     'stylesheet font-weight:bold applies via getComputedStyle'
   );
 }, 'computed property: font-weight');
@@ -54,22 +54,22 @@ test(() => {
 }, 'computed property: font-style');
 
 test(() => {
-  assert_equals(getComputedStyle(document.getElementById('col')).color, 'red',
+  assert_equals(getComputedStyle(document.getElementById('col')).color, 'rgb(255, 0, 0)',
     'stylesheet color:red applies via getComputedStyle');
   // camelCase alias
-  assert_equals(getComputedStyle(document.getElementById('col')).getPropertyValue('color'), 'red',
+  assert_equals(getComputedStyle(document.getElementById('col')).getPropertyValue('color'), 'rgb(255, 0, 0)',
     'getPropertyValue(\'color\') returns the same value');
 }, 'computed property: color');
 
 test(() => {
   assert_equals(
     getComputedStyle(document.getElementById('bg')).getPropertyValue('background-color'),
-    'blue',
+    'rgb(0, 0, 255)',
     'stylesheet background-color:blue applies via getComputedStyle'
   );
   assert_equals(
     getComputedStyle(document.getElementById('bg')).backgroundColor,
-    'blue',
+    'rgb(0, 0, 255)',
     'camelCase backgroundColor alias returns the same value'
   );
 }, 'computed property: background-color');

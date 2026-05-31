@@ -649,6 +649,26 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/css_attribute_selectors.js"),
     },
     .{
+        .filename = "css_computed_value_serialization.js",
+        .html =
+        \\<html><head><style>
+        \\  #fwb { font-weight: bold; }
+        \\  #fwn { font-weight: normal; }
+        \\  #fw7 { font-weight: 700; }
+        \\  #cnamed { color: blue; }
+        \\  #chex { color: #00ff00; }
+        \\  #crgb { color: rgb(1,2,3); }
+        \\  #calpha { color: rgba(10, 20, 30, 0.5); }
+        \\  #bg { background-color: #ffffff; }
+        \\</style></head><body>
+        \\<span id="fwb">a</span><span id="fwn">b</span><span id="fw7">c</span>
+        \\<span id="cnamed">d</span><span id="chex">e</span><span id="crgb">f</span>
+        \\<span id="calpha">g</span><span id="bg">h</span>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_computed_value_serialization.js"),
+    },
+    .{
         .filename = "form_properties.js",
         .html =
         \\<html><body>

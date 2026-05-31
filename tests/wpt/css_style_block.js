@@ -4,7 +4,7 @@
 
 test(() => {
   const el = document.getElementById('para');
-  assert_equals(getComputedStyle(el).color, 'green',
+  assert_equals(getComputedStyle(el).color, 'rgb(0, 128, 0)',
     'element-type rule from <style> block applies via getComputedStyle');
 }, '<style> block element-type rule applies');
 
@@ -23,9 +23,9 @@ test(() => {
 test(() => {
   const span = document.getElementById('span1');
   const em   = document.getElementById('em1');
-  assert_equals(getComputedStyle(span).getPropertyValue('font-weight'), 'bold',
+  assert_equals(getComputedStyle(span).getPropertyValue('font-weight'), '700',
     'comma-listed selector applies to first element type');
-  assert_equals(getComputedStyle(em).getPropertyValue('font-weight'), 'bold',
+  assert_equals(getComputedStyle(em).getPropertyValue('font-weight'), '700',
     'comma-listed selector applies to second element type');
 }, '<style> block comma-separated selector list matches all listed types');
 

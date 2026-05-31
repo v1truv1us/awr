@@ -5,7 +5,7 @@ test(() => {
   // Inline:     style="color: blue"
   // Author !important must beat a normal inline declaration.
   const el = document.getElementById('beats-inline');
-  assert_equals(getComputedStyle(el).color, 'red',
+  assert_equals(getComputedStyle(el).color, 'rgb(255, 0, 0)',
     'author !important overrides a normal inline style');
 }, 'author !important beats normal inline style');
 
@@ -14,7 +14,7 @@ test(() => {
   // Inline:     style="color: blue !important"
   // Inline !important must beat a normal author rule.
   const el = document.getElementById('normal-vs-inline-imp');
-  assert_equals(getComputedStyle(el).color, 'blue',
+  assert_equals(getComputedStyle(el).color, 'rgb(0, 0, 255)',
     'inline !important overrides a normal author rule');
 }, 'inline !important beats normal author rule');
 
@@ -23,7 +23,7 @@ test(() => {
   // Inline:     style="color: blue !important"
   // When both are !important, inline wins (highest origin + importance).
   const el = document.getElementById('both-imp');
-  assert_equals(getComputedStyle(el).color, 'blue',
+  assert_equals(getComputedStyle(el).color, 'rgb(0, 0, 255)',
     'inline !important overrides author !important');
 }, 'inline !important beats author !important');
 
@@ -34,6 +34,6 @@ test(() => {
   el.style.setProperty('font-weight', 'bold', 'important');
   assert_true(el.style.cssText.includes('!important'),
     'setProperty with important priority serialises to !important in cssText');
-  assert_equals(getComputedStyle(el).fontWeight, 'bold',
+  assert_equals(getComputedStyle(el).fontWeight, '700',
     'setProperty important value is visible in getComputedStyle');
 }, 'setProperty with important priority round-trips through getComputedStyle');

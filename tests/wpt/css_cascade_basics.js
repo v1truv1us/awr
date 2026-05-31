@@ -6,7 +6,7 @@
 test(() => {
   // Two `p { color: ... }` rules; the later one must win.
   const el = document.getElementById('source-order');
-  assert_equals(getComputedStyle(el).color, 'blue',
+  assert_equals(getComputedStyle(el).color, 'rgb(0, 0, 255)',
     'later rule in source order overrides earlier same-specificity rule');
 }, 'cascade source order: last declaration wins');
 
@@ -14,7 +14,7 @@ test(() => {
   // Stylesheet sets color:blue; inline style sets color:orange.
   // Inline style wins over a normal author rule.
   const el = document.getElementById('inline-wins');
-  assert_equals(getComputedStyle(el).color, 'orange',
+  assert_equals(getComputedStyle(el).color, 'rgb(255, 165, 0)',
     'inline style overrides normal author stylesheet declaration');
 }, 'cascade: inline style beats normal author rule');
 
@@ -24,7 +24,7 @@ test(() => {
   // Class selector has higher specificity; ordering guarantees the test passes
   // regardless of whether specificity or source-order is the deciding factor.
   const el = document.getElementById('class-rule');
-  assert_equals(getComputedStyle(el).color, 'green',
+  assert_equals(getComputedStyle(el).color, 'rgb(0, 128, 0)',
     'class selector wins over element-type selector');
 }, 'cascade specificity: class selector beats element-type selector');
 
@@ -32,6 +32,6 @@ test(() => {
   // Element matches `.accent { color: green }` and `#special { color: purple }`.
   // ID selector has highest specificity; again ordered after class in the sheet.
   const el = document.getElementById('special');
-  assert_equals(getComputedStyle(el).color, 'purple',
+  assert_equals(getComputedStyle(el).color, 'rgb(128, 0, 128)',
     'ID selector wins over class selector');
 }, 'cascade specificity: ID selector beats class selector');
