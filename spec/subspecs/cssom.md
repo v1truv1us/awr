@@ -62,8 +62,24 @@ The first computed-style properties should be small and terminal-useful:
 | `font-style` | Maps to italic/emphasis terminal styling where supported. |
 | `color` | Maps to ANSI foreground color where safe. |
 | `background-color` | Maps to ANSI background color where safe. |
+| `text-decoration` | Maps to ANSI underline / strike-through. |
+| `text-align` | Maps to terminal center/right alignment of single-line blocks. |
 
 Properties may be added only with WPT coverage or a documented render/corpus test.
+
+### 2.1 Post-closure additions (2026-05-31)
+
+`text-decoration` and `text-align` were added to the computed-style set with
+WPT coverage, and user-agent defaults for the emphasis/decoration/align
+properties were extended so `getComputedStyle` reflects the same UA-stylesheet
+values a real browser exposes to scripts (e.g. `strong`→`font-weight:bold`,
+`em`→`font-style:italic`, `a`→`text-decoration:underline`,
+`del`→`line-through`, `th`→`text-align:center`). These UA defaults mirror a
+browser's UA stylesheet, independent of AWR's terminal presentation choices in
+`src/render.zig` (which, for example, underlines headings). Coverage:
+`tests/wpt/css_ua_text_defaults.js`. The renderer consumes the same properties
+via its own in-module cascade resolver (`resolveCssProp` in `src/render.zig`),
+gated on `ansi_colors` so the agent surfaces stay byte-identical.
 
 ## 3. Implementation shape
 

@@ -75,7 +75,7 @@ const EchoServer = struct {
         const target = try allocator.dupe(u8, request.head.target);
         defer allocator.free(target);
         const method = @tagName(request.head.method);
-        std.debug.print("[Server] request: {s} {s}\n", .{method, target});
+        std.debug.print("[Server] request: {s} {s}\n", .{ method, target });
 
         var body_buf: [4 * 1024]u8 = undefined;
         const body_reader = request.readerExpectContinue(&body_buf) catch |err| {
@@ -119,11 +119,12 @@ const EchoServer = struct {
                 var writer_adapter = WriterAdapter{ .inner = &net_writer.interface };
 
                 var handshake_buf: [1024]u8 = undefined;
-                const resp = try std.fmt.bufPrint(&handshake_buf,
+                const resp = try std.fmt.bufPrint(
+                    &handshake_buf,
                     "HTTP/1.1 101 Switching Protocols\r\n" ++
-                    "Upgrade: websocket\r\n" ++
-                    "Connection: Upgrade\r\n" ++
-                    "Sec-WebSocket-Accept: {s}\r\n\r\n",
+                        "Upgrade: websocket\r\n" ++
+                        "Connection: Upgrade\r\n" ++
+                        "Sec-WebSocket-Accept: {s}\r\n\r\n",
                     .{accept},
                 );
                 std.debug.print("[Server] sending handshake...\n", .{});
@@ -137,7 +138,7 @@ const EchoServer = struct {
                         break;
                     };
                     defer allocator.free(frame.payload);
-                    std.debug.print("[Server] readFrame successful, opcode={}, payload_len={d}\n", .{frame.opcode, frame.payload.len});
+                    std.debug.print("[Server] readFrame successful, opcode={}, payload_len={d}\n", .{ frame.opcode, frame.payload.len });
 
                     if (frame.opcode == .close) {
                         std.debug.print("[Server] close frame received, echoing and exiting\n", .{});
@@ -594,6 +595,24 @@ const curated_cases = [_]WptCase{
         \\</body></html>
         ,
         .script = @embedFile("wpt/css_computed_properties.js"),
+    },
+    .{
+        .filename = "css_ua_text_defaults.js",
+        .html =
+        \\<html><head><style>
+        \\  strong { font-style: italic; }
+        \\</style></head><body>
+        \\<strong id="strong">a</strong>
+        \\<strong id="unbold" style="font-weight: normal">b</strong>
+        \\<h2 id="h2">c</h2>
+        \\<span id="plain">d</span>
+        \\<em id="em">e</em>
+        \\<a id="link" href="#">f</a>
+        \\<del id="del">g</del>
+        \\<table><tr><th id="th">h</th></tr></table>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_ua_text_defaults.js"),
     },
     .{
         .filename = "form_properties.js",

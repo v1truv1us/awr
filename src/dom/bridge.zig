@@ -2421,11 +2421,28 @@ const BRIDGE_POLYFILL =
     \\  // stylesheets and inline style attributes.
     \\  const __AWR_UA_BLOCK_TAGS__ = /^(DIV|P|FORM|SECTION|ARTICLE|HEADER|FOOTER|MAIN|H[1-6])$/;
     \\  function __awr_ua_default__(el, css_name) {
+    \\    const t = (el && el.tagName) ? String(el.tagName).toUpperCase() : '';
     \\    if (css_name === 'display') {
-    \\      if (el && el.tagName && __AWR_UA_BLOCK_TAGS__.test(el.tagName)) return 'block';
+    \\      if (t && __AWR_UA_BLOCK_TAGS__.test(t)) return 'block';
     \\      return 'inline';
     \\    }
     \\    if (css_name === 'visibility') return 'visible';
+    \\    // UA stylesheet defaults mirroring a real browser (not AWR's terminal
+    \\    // presentation): emphasis + decoration so getComputedStyle reflects the
+    \\    // same defaults scripts read in a browser. CSSOM §2 starter set.
+    \\    if (css_name === 'font-weight') {
+    \\      return /^(STRONG|B|H1|H2|H3|H4|H5|H6|TH)$/.test(t) ? 'bold' : 'normal';
+    \\    }
+    \\    if (css_name === 'font-style') {
+    \\      return /^(EM|I|CITE|VAR|DFN|ADDRESS)$/.test(t) ? 'italic' : 'normal';
+    \\    }
+    \\    if (css_name === 'text-decoration' || css_name === 'text-decoration-line') {
+    \\      if (/^(A|INS|U)$/.test(t)) return 'underline';
+    \\      if (/^(DEL|S|STRIKE)$/.test(t)) return 'line-through';
+    \\      return 'none';
+    \\    }
+    \\    if (css_name === 'text-transform') return 'none';
+    \\    if (css_name === 'text-align') return (t === 'TH') ? 'center' : 'start';
     \\    return '';
     \\  }
     \\  globalThis.getComputedStyle = function(el) {
