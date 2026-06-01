@@ -203,7 +203,7 @@ why the case was invalid.
 
 ## 8. Mapping from API areas to test files
 
-> **Current status (as of 2026-05-31):** 125 active curated WPT cases pass via
+> **Current status (as of 2026-05-31):** 126 active curated WPT cases pass via
 > `zig build test-wpt`. 58 Test262 cases pass via `zig build test-test262`.
 > All `spec/subspecs/agent-browser.md §4` closure-gate cases are active.
 > `spec/subspecs/browser-tui.md §4.2` Tier 1 closure-gate cases for
@@ -235,7 +235,7 @@ why the case was invalid.
 | Viewport / observers | `viewport_dimensions.js`, `requestAnimationFrame.js`, `request_idle_callback.js`, `request_idle_callback_cancel.js`, `intersection_observer.js`, `resize_observer.js`, `window_basics.js` |
 | Window / navigator | `navigator_basics.js`, `url_search_params_basics.js`, `window_navigator_surface.js` |
 | WebCrypto (subset) | `webcrypto_basics.js` |
-| CSSOM (starter subset, CLOSED 2026-05-27; UA-default extension 2026-05-31) | `css_inline_computed_style.js`, `css_external_stylesheet.js`, `css_style_declaration.js`, `css_style_block.js`, `css_cascade_basics.js`, `css_important.js`, `css_computed_properties.js`, `css_ua_text_defaults.js`, `css_combinator_cascade.js`, `css_attribute_selectors.js`, `css_computed_value_serialization.js`, `css_structural_pseudo.js`, `css_media_cascade.js`, `css_wide_keywords.js`. Renderer integration for `display` / `visibility` / `white-space` covered by inline tests in `src/render.zig`. |
+| CSSOM (starter subset, CLOSED 2026-05-27; UA-default extension 2026-05-31) | `css_inline_computed_style.js`, `css_external_stylesheet.js`, `css_style_declaration.js`, `css_style_block.js`, `css_cascade_basics.js`, `css_important.js`, `css_computed_properties.js`, `css_ua_text_defaults.js`, `css_combinator_cascade.js`, `css_attribute_selectors.js`, `css_computed_value_serialization.js`, `css_structural_pseudo.js`, `css_media_cascade.js`, `css_wide_keywords.js`, `css_color_serialization.js`. Renderer integration for `display` / `visibility` / `white-space` covered by inline tests in `src/render.zig`. |
 | Harness / misc | `promise_test_basics.js`, `console_namespace.js`, `match_media.js` |
 | JS runtime | 58 curated Test262 cases in `tests/test262_runner.zig` (covers ES2019–2023: Object.hasOwn, Array.at/findLast, Promise.allSettled/any, optional chaining, nullish coalescing, logical assignment, BigInt, etc.) |
 

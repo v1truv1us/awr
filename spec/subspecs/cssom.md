@@ -161,6 +161,15 @@ These act only on the script-facing getComputedStyle surface; the renderer
 reads the `text-decoration` shorthand directly and is unaffected. Coverage:
 `tests/wpt/css_wide_keywords.js`.
 
+### 2.7 Color serialization completeness (2026-05-31)
+
+The getComputedStyle color serializer (`__awr_serialize_color__` in
+`src/dom/bridge.zig`) covers the full CSS extended named-color set, `hsl()` /
+`hsla()` (converted to `rgb()` / `rgba()`), `transparent` →
+`rgba(0, 0, 0, 0)`, and `currentColor` (resolves to the element's computed
+`color`; inherits on the `color` property itself). Coverage:
+`tests/wpt/css_color_serialization.js`.
+
 ## 3. Implementation shape
 
 Move CSS behavior out of the JS bridge over time:

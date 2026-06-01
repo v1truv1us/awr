@@ -722,6 +722,23 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/css_wide_keywords.js"),
     },
     .{
+        .filename = "css_color_serialization.js",
+        .html =
+        \\<html><head><style>
+        \\  #hsl { color: hsl(120, 100%, 50%); }
+        \\  #hsla { color: hsla(0, 100%, 50%, 0.5); }
+        \\  #named { color: rebeccapurple; }
+        \\  #named2 { color: lightseagreen; }
+        \\  #trans { background-color: transparent; }
+        \\  #cc { color: blue; background-color: currentColor; }
+        \\</style></head><body>
+        \\<p id="hsl">a</p><p id="hsla">b</p><p id="named">c</p>
+        \\<p id="named2">d</p><p id="trans">e</p><p id="cc">f</p>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_color_serialization.js"),
+    },
+    .{
         .filename = "form_properties.js",
         .html =
         \\<html><body>
