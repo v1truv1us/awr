@@ -1,5 +1,40 @@
 # Sprint Status
 
+## 2026-06-01
+
+### Deliverable
+Status snapshot of where AWR stands against the canonical spec set
+(`spec/MVP.md`). No code or spec changes — reconciliation of status docs only.
+
+### Where the project stands
+- **Tiers 0–3 CLOSED.** Agent runtime baseline, interactive TUI parity
+  (2026-05-11), render + UX polish (2026-05-13), and lightly dynamic site
+  support (2026-05-22) are all closed per `spec/subspecs/browser-roadmap.md §3`.
+- **Daemon mode CLOSED** (2026-05-23): long-lived `awrd` on a Unix socket,
+  JSON-RPC IPC, shared `Client`/pool, per-scope cookie jars.
+- **Starter CSSOM CLOSED** (2026-05-27): stylesheet loading, declaration APIs,
+  cascade, non-layout `getComputedStyle()`, renderer integration. Post-closure,
+  no-layout CSS extensions §2.1–§2.7 landed through 2026-05-31 (UA text
+  defaults, compound/combinator/attribute selectors, computed-value
+  serialization, compiled-selector cache, structural pseudo-classes, `@media`
+  in the cascade, shorthand longhands + CSS-wide keywords, full color
+  serialization) — each backed by curated WPT cases.
+- **TUI Quality Track CLOSED** (2026-05-30): all five UX items done (inline link
+  word-wrap, loading indicator, help modal, table linearization, nav feedback);
+  1196 tests green.
+
+### Active frontier
+- No-layout CSS extensions remain the live track: continuing to grow CSSOM/WPT
+  coverage that does not require a layout engine (the §2.x line of work above).
+
+### Deferred
+- **Tier 4 (layout engine) DEFERRED**, gated on the embed-vs-build decision.
+  No work starts without an ADR amendment recording the chosen path and the
+  supporting evidence in `docs/adr/0003-tier4-layout-strategy.md`.
+- **Tier 5 (full SPA parity) DEFERRED** — only sensible after Tier 4.
+
+---
+
 ## 2026-05-09
 
 ### Deliverable

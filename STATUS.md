@@ -1,6 +1,6 @@
 # AWR — Project Status
 
-> Last updated: 2026-05-29  
+> Last updated: 2026-06-01  
 > Canonical spec: `spec/MVP.md` | Tier ladder: `spec/subspecs/browser-roadmap.md`
 
 ---
@@ -14,8 +14,8 @@
 | 2 | Render + UX polish | **CLOSED** 2026-05-13 |
 | 3 | Lightly dynamic site support | **CLOSED** 2026-05-22 |
 | — | Daemon mode (`awrd`) | **CLOSED** 2026-05-23 |
-| — | Starter CSSOM | **CLOSED** 2026-05-27 |
-| — | TUI Quality Track | **ACTIVE** 2026-05-29 |
+| — | Starter CSSOM | **CLOSED** 2026-05-27 (§2.1–2.7 post-closure additions through 2026-05-31) |
+| — | TUI Quality Track | **CLOSED** 2026-05-30 |
 | 4 | Layout engine | **DEFERRED** (decision pending) |
 | 5 | Full SPA parity | **DEFERRED** |
 
@@ -84,6 +84,18 @@
 - Renderer integration: `display:none` and `visibility:hidden` suppressed in output
 - WPT cases: §4.1–§4.6 coverage (`css_style_declaration.js`, `css_inline_computed_style.js`, `css_style_block.js`, `css_external_stylesheet.js`, `css_cascade_basics.js`, `css_important.js`, `css_computed_properties.js`)
 - WebCrypto subset: `crypto.getRandomValues()` + `subtle.digest()`
+
+#### Post-closure CSSOM additions (§2.1–§2.7, through 2026-05-31)
+Closure boundary is unchanged (2026-05-27); these are no-layout CSS extensions
+made on top of the closed track, each backed by curated WPT cases. Full detail:
+`spec/subspecs/cssom.md §2.1–§2.7`.
+- **§2.1** `text-decoration` + `text-align` added to the computed-style set; UA-stylesheet defaults extended (`strong`→bold, `em`→italic, `a`→underline, `del`→line-through, `th`→center). Compound (`div.foo`) and combinator (`section p`, `ul > li`, sibling) selectors match with proper AND/ancestor semantics; attribute selectors (`[attr]`, `[attr=v]`, `~= |= ^= $= *=`) honored in the cascade. Coverage: `css_ua_text_defaults.js`, `css_combinator_cascade.js`, `css_attribute_selectors.js`
+- **§2.2** `getComputedStyle` returns resolved values (`bold`→`"700"`, colors → `"rgb(…)"`/`"rgba(…)"`), serialized only at the `getComputedStyle` boundary; `element.style.*` keeps authored values. Coverage: `css_computed_value_serialization.js`
+- **§2.3** Compiled-selector cache + exact compound/combinator/attribute matching in the renderer (flat-OR fallback above 48 complex text rules; script-facing cascade always exact)
+- **§2.4** Structural pseudo-classes: `:first-child`, `:last-child`, `:only-child`, `:nth-child(an+b)`, and `*-of-type` variants. Coverage: `css_structural_pseudo.js`
+- **§2.5** `@media` rules applied in the cascade via a Zig port of the `matchMedia` model (`(min|max)-width/height`, `prefers-color-scheme`, `screen`/`all`). Coverage: `css_media_cascade.js`
+- **§2.6** Shorthand longhands (`text-decoration`→`-line`, `font`→`-style`/`-weight`) + CSS-wide keywords (`inherit`/`initial`/`unset`) at the getComputedStyle boundary. Coverage: `css_wide_keywords.js`
+- **§2.7** Full CSS extended named-color set, `hsl()`/`hsla()`, `transparent`, and `currentColor` in the getComputedStyle color serializer. Coverage: `css_color_serialization.js`
 
 ### Real-site support (H2 + decompression) — LANDED 2026-05-27
 - BoringSSL H2 path now decompresses gzip/deflate/zstd response bodies
