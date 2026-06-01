@@ -188,6 +188,19 @@ to the engine. Specificity (CSS Selectors §16) is computed in
 Coverage: `tests/wpt/css_selector_functions.js` plus co-located dom/cascade
 tests.
 
+### 2.9 Custom properties + `var()` substitution (2026-06-01)
+
+CSS custom properties (`--foo` declarations) parse as ordinary declarations
+through the existing `StyleDeclaration` model and resolve through the Zig
+cascade. Custom properties **inherit**, and `var(--foo, fallback)` references
+are substituted, both at the getComputedStyle boundary in `src/dom/bridge.zig`
+(`__awr_custom_prop__` walks the parent chain for inheritance;
+`__awr_substitute_var__` replaces `var()` references with the resolved
+custom-property value or the fallback). This stays non-layout: it acts only on
+the script-facing getComputedStyle surface, so the renderer's own Zig cascade
+and the agent/corpus byte output are unaffected. Coverage:
+`tests/wpt/css_custom_properties.js`.
+
 ## 3. Implementation shape
 
 Move CSS behavior out of the JS bridge over time:

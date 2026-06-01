@@ -757,6 +757,24 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/css_selector_functions.js"),
     },
     .{
+        .filename = "css_custom_properties.js",
+        .html =
+        \\<html><head><style>
+        \\  #root { --brand: blue; }
+        \\  #child { color: var(--brand); }
+        \\  #fb { color: var(--missing, green); }
+        \\  #override { --brand: red; color: var(--brand); }
+        \\</style></head><body>
+        \\<div id="root">
+        \\  <p id="child">a</p>
+        \\  <p id="override">b</p>
+        \\</div>
+        \\<p id="fb">c</p>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_custom_properties.js"),
+    },
+    .{
         .filename = "form_properties.js",
         .html =
         \\<html><body>
