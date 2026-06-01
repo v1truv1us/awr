@@ -148,6 +148,19 @@ its condition does not match the viewport, evaluated by `parser.mediaMatches`
 `prefers-color-scheme` (terminal default dark), and the `screen`/`all` media
 types. Coverage: `tests/wpt/css_media_cascade.js`.
 
+### 2.6 Shorthand longhands + CSS-wide keywords (2026-05-31)
+
+`getComputedStyle` exposes longhands extracted from shorthands
+(`text-decoration` → `text-decoration-line`; `font` → `font-style` /
+`font-weight`) via `declValueForProp` in `src/dom/bridge.zig`, and resolves the
+CSS-wide keywords `inherit` / `initial` / `unset` at the proxy boundary against
+a small property metadata table (initial value + whether the property
+inherits; `unset` = inherit for inherited properties, initial otherwise).
+`inherit`/inherited-`unset` read the parent's computed value recursively.
+These act only on the script-facing getComputedStyle surface; the renderer
+reads the `text-decoration` shorthand directly and is unaffected. Coverage:
+`tests/wpt/css_wide_keywords.js`.
+
 ## 3. Implementation shape
 
 Move CSS behavior out of the JS bridge over time:

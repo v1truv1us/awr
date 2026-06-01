@@ -702,6 +702,26 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/css_media_cascade.js"),
     },
     .{
+        .filename = "css_wide_keywords.js",
+        .html =
+        \\<html><head><style>
+        \\  #td { text-decoration: underline; }
+        \\  #fn { font: italic bold 16px sans-serif; }
+        \\  .box { color: red; font-weight: bold; }
+        \\  #inh { color: inherit; }
+        \\  #ini { color: initial; }
+        \\  #unsc { color: unset; }
+        \\  #fwinh { font-weight: inherit; }
+        \\  #unsd { text-decoration: unset; }
+        \\</style></head><body>
+        \\<p id="td">a</p><p id="fn">b</p>
+        \\<div class="box"><span id="inh">c</span><span id="ini">d</span><span id="unsc">e</span><span id="fwinh">g</span></div>
+        \\<p id="unsd">f</p>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_wide_keywords.js"),
+    },
+    .{
         .filename = "form_properties.js",
         .html =
         \\<html><body>

@@ -1628,7 +1628,7 @@ fn resolveComputedProperty(
                 if (!css_parser.mediaMatches(m, vw_px, vh_px)) continue;
             }
             if (!ruleMatchesElement(elem, &rule)) continue;
-            const val = rule.declarations.getPropertyValue(prop_name);
+            const val = declValueForProp(&rule.declarations, prop_name);
             if (val.len == 0) continue;
             const important = isPropImportantInDecl(&rule.declarations, prop_name);
 
@@ -1665,7 +1665,7 @@ fn resolveComputedProperty(
             return if (best_value) |v| try allocator.dupe(u8, v) else null;
         };
         defer inline_decl.deinit();
-        const inline_val = inline_decl.getPropertyValue(prop_name);
+        const inline_val = declValueForProp(&inline_decl, prop_name);
         if (inline_val.len > 0) {
             const inline_important = isPropImportantInDecl(&inline_decl, prop_name);
             const inline_match = css_cascade.MatchResult{
@@ -1689,6 +1689,38 @@ fn resolveComputedProperty(
     }
 
     return if (best_value) |v| try allocator.dupe(u8, v) else null;
+}
+
+/// A declaration's value for `prop`, falling back to extracting the longhand
+/// from a shorthand the declaration set instead (`text-decoration` →
+/// `text-decoration-line`; `font` → `font-style` / `font-weight`). Returns a
+/// borrowed slice into the declaration, or "" when unset.
+fn declValueForProp(decl: *const css_style.StyleDeclaration, prop: []const u8) []const u8 {
+    const direct = decl.getPropertyValue(prop);
+    if (direct.len > 0) return direct;
+    if (std.ascii.eqlIgnoreCase(prop, "text-decoration-line")) {
+        return extractToken(decl.getPropertyValue("text-decoration"), &.{ "underline", "overline", "line-through", "none" });
+    }
+    if (std.ascii.eqlIgnoreCase(prop, "font-style")) {
+        return extractToken(decl.getPropertyValue("font"), &.{ "italic", "oblique", "normal" });
+    }
+    if (std.ascii.eqlIgnoreCase(prop, "font-weight")) {
+        return extractToken(decl.getPropertyValue("font"), &.{ "bold", "bolder", "lighter", "100", "200", "300", "400", "500", "600", "700", "800", "900" });
+    }
+    return "";
+}
+
+/// First whitespace-separated token of `value` that equals one of `wanted`
+/// (case-insensitive); returns the borrowed token slice or "".
+fn extractToken(value: []const u8, wanted: []const []const u8) []const u8 {
+    if (value.len == 0) return "";
+    var it = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    while (it.next()) |tok| {
+        for (wanted) |w| {
+            if (std.ascii.eqlIgnoreCase(tok, w)) return tok;
+        }
+    }
+    return "";
 }
 
 fn isPropImportantInDecl(decl: *const css_style.StyleDeclaration, prop_name: []const u8) bool {
@@ -2501,6 +2533,43 @@ const BRIDGE_POLYFILL =
     \\    }
     \\    return value;
     \\  }
+    \\  // CSS-wide keywords. `initial`/`inherit`/`unset` resolve at the
+    \\  // getComputedStyle boundary against a small property metadata table.
+    \\  function __awr_initial__(css) {
+    \\    switch (css) {
+    \\      case 'color': return 'rgb(0, 0, 0)';
+    \\      case 'background-color': return 'rgba(0, 0, 0, 0)';
+    \\      case 'font-weight': return '400';
+    \\      case 'font-style': return 'normal';
+    \\      case 'text-transform': return 'none';
+    \\      case 'text-decoration': case 'text-decoration-line': return 'none';
+    \\      case 'text-align': return 'start';
+    \\      case 'display': return 'inline';
+    \\      case 'visibility': return 'visible';
+    \\      case 'white-space': return 'normal';
+    \\      default: return '';
+    \\    }
+    \\  }
+    \\  function __awr_inherited__(css) {
+    \\    return css === 'color' || css === 'font-weight' || css === 'font-style' ||
+    \\      css === 'text-transform' || css === 'text-align' || css === 'visibility' ||
+    \\      css === 'white-space';
+    \\  }
+    \\  function __awr_resolve_wide__(el, css, value) {
+    \\    if (value === 'inherit') {
+    \\      return (el && el.parentElement)
+    \\        ? getComputedStyle(el.parentElement).getPropertyValue(css) : __awr_initial__(css);
+    \\    }
+    \\    if (value === 'initial') return __awr_initial__(css);
+    \\    if (value === 'unset') {
+    \\      if (__awr_inherited__(css)) {
+    \\        return (el && el.parentElement)
+    \\          ? getComputedStyle(el.parentElement).getPropertyValue(css) : __awr_initial__(css);
+    \\      }
+    \\      return __awr_initial__(css);
+    \\    }
+    \\    return value;
+    \\  }
     \\  globalThis.getComputedStyle = function(el) {
     \\    return new Proxy(Object.create(null), {
     \\      get(_target, prop) {
@@ -2512,7 +2581,7 @@ const BRIDGE_POLYFILL =
     \\            }
     \\            const handle = el._h || 0;
     \\            const v = __awr_css_get_computed_property__(handle, css);
-    \\            return __awr_canon_computed__(css, v || __awr_ua_default__(el, css));
+    \\            return __awr_canon_computed__(css, __awr_resolve_wide__(el, css, v || __awr_ua_default__(el, css)));
     \\          };
     \\        }
     \\        const css = String(prop).replace(/[A-Z]/g, m => '-' + m.toLowerCase()).toLowerCase();
@@ -2521,7 +2590,7 @@ const BRIDGE_POLYFILL =
     \\        }
     \\        const handle = el._h || 0;
     \\        const v = __awr_css_get_computed_property__(handle, css);
-    \\        return __awr_canon_computed__(css, v || __awr_ua_default__(el, css));
+    \\        return __awr_canon_computed__(css, __awr_resolve_wide__(el, css, v || __awr_ua_default__(el, css)));
     \\      }
     \\    });
     \\  };
