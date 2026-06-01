@@ -72,23 +72,41 @@ const Pseudo = struct {
     b: i32 = 0,
 };
 
+/// A functional pseudo-class taking a selector-list argument: `:not()`,
+/// `:is()`, `:where()` (CSS Selectors §4.3 / §4.4 / §13.3). Each `arg` is a
+/// compound simple selector; the element matches the list iff it matches
+/// **any** arg. `:not()` negates that. `:where()` is a zero-specificity alias
+/// of `:is()` — the distinction is handled at specificity-calculation time,
+/// not at match time (both match identically).
+const FuncPseudoKind = enum { not, is, where };
+
+const FuncPseudo = struct {
+    kind: FuncPseudoKind,
+    args: std.ArrayListUnmanaged(SimpleSelector) = .empty,
+
+    fn deinit(self: *FuncPseudo, alloc: std.mem.Allocator) void {
+        for (self.args.items) |*a| a.deinit(alloc);
+        self.args.deinit(alloc);
+    }
+};
+
 const SimpleSelector = struct {
     tag: ?[]const u8 = null,
     id: ?[]const u8 = null,
     classes: std.ArrayListUnmanaged([]const u8) = .empty,
     attrs: std.ArrayListUnmanaged(AttrSelector) = .empty,
     pseudos: std.ArrayListUnmanaged(Pseudo) = .empty,
-    not_sel: ?*SimpleSelector = null,
+    /// `:not()` / `:is()` / `:where()` functional pseudo-classes, each holding
+    /// a selector-list argument. Multiple may appear on one compound selector.
+    func_pseudos: std.ArrayListUnmanaged(FuncPseudo) = .empty,
     /// Set when the token carries an unsupported pseudo (state pseudo-classes
     /// like `:hover`, or any pseudo-element `::x`): the simple selector then
     /// never matches, so such rules don't apply rather than over-applying.
     never_match: bool = false,
 
     fn deinit(self: *SimpleSelector, alloc: std.mem.Allocator) void {
-        if (self.not_sel) |n| {
-            n.deinit(alloc);
-            alloc.destroy(n);
-        }
+        for (self.func_pseudos.items) |*f| f.deinit(alloc);
+        self.func_pseudos.deinit(alloc);
         self.classes.deinit(alloc);
         self.attrs.deinit(alloc);
         self.pseudos.deinit(alloc);
@@ -476,10 +494,26 @@ pub const Document = struct {
         for (sel.pseudos.items) |ps| {
             if (!matchesPseudo(elem, ps)) return false;
         }
-        if (sel.not_sel) |n| {
-            if (matchesSimpleSelector(elem, n)) return false;
+        for (sel.func_pseudos.items) |*fp| {
+            if (!matchesFuncPseudo(elem, fp)) return false;
         }
         return true;
+    }
+
+    /// CSS Selectors §4.3/§4.4: an element matches `:is(...)` / `:where(...)`
+    /// when it matches any argument, and `:not(...)` when it matches none.
+    fn matchesFuncPseudo(elem: *const Element, fp: *const FuncPseudo) bool {
+        var any = false;
+        for (fp.args.items) |*arg| {
+            if (matchesSimpleSelector(elem, arg)) {
+                any = true;
+                break;
+            }
+        }
+        return switch (fp.kind) {
+            .not => !any,
+            .is, .where => any,
+        };
     }
 
     /// CSS Selectors §13: structural pseudo-classes. Computes the element's
@@ -624,7 +658,7 @@ pub const Document = struct {
         return out;
     }
 
-    fn parseSimpleSelector(alloc: std.mem.Allocator, token: []const u8) !SimpleSelector {
+    fn parseSimpleSelector(alloc: std.mem.Allocator, token: []const u8) BuildError!SimpleSelector {
         var out: SimpleSelector = .{};
         var i: usize = 0;
         while (i < token.len) {
@@ -641,21 +675,6 @@ pub const Document = struct {
                 const start = i;
                 while (i < token.len and isIdentChar(token[i])) : (i += 1) {}
                 if (i > start) out.id = token[start..i];
-                continue;
-            }
-            if (std.mem.startsWith(u8, token[i..], ":not(")) {
-                i += 5;
-                const start = i;
-                var depth: i32 = 1;
-                while (i < token.len and depth > 0) : (i += 1) {
-                    if (token[i] == '(') depth += 1 else if (token[i] == ')') depth -= 1;
-                }
-                const end = if (i == 0) 0 else i - 1;
-                if (end > start) {
-                    const inner = try alloc.create(SimpleSelector);
-                    inner.* = try parseSimpleSelector(alloc, std.mem.trim(u8, token[start..end], " \t\n\r"));
-                    out.not_sel = inner;
-                }
                 continue;
             }
             if (ch == ':') {
@@ -681,7 +700,17 @@ pub const Document = struct {
                     const aend = if (p > 0) p - 1 else 0;
                     arg = std.mem.trim(u8, token[astart..@min(aend, token.len)], " \t\n\r");
                 }
-                if (structuralPseudo(name, arg)) |ps| {
+                // Functional pseudo-classes :not() / :is() / :where() take a
+                // selector-list argument (CSS Selectors §4.3/§4.4).
+                if (funcPseudoKind(name)) |fk| {
+                    if (arg) |a| {
+                        var fp = FuncPseudo{ .kind = fk };
+                        try parseSimpleSelectorListInto(alloc, a, &fp.args);
+                        try out.func_pseudos.append(alloc, fp);
+                    } else {
+                        out.never_match = true; // `:not`/`:is`/`:where` without args
+                    }
+                } else if (structuralPseudo(name, arg)) |ps| {
                     out.pseudos.append(alloc, ps) catch {};
                 } else {
                     out.never_match = true; // state pseudo-class / unknown
@@ -749,6 +778,45 @@ pub const Document = struct {
             i += 1;
         }
         return out;
+    }
+
+    /// Map a functional pseudo-class name to its kind, or null when it is not
+    /// one of the supported `:not()` / `:is()` / `:where()` forms.
+    fn funcPseudoKind(name: []const u8) ?FuncPseudoKind {
+        if (std.ascii.eqlIgnoreCase(name, "not")) return .not;
+        if (std.ascii.eqlIgnoreCase(name, "is")) return .is;
+        if (std.ascii.eqlIgnoreCase(name, "where")) return .where;
+        return null;
+    }
+
+    /// Parse the comma-separated selector list inside a `:not()` / `:is()` /
+    /// `:where()` argument into `out` as compound simple selectors (respecting
+    /// `[...]` brackets and nested `(...)` parens when splitting). Each arg is a
+    /// single compound; combinators inside the argument are not modeled (out of
+    /// scope for the non-layout cascade).
+    fn parseSimpleSelectorListInto(
+        alloc: std.mem.Allocator,
+        arg: []const u8,
+        out: *std.ArrayListUnmanaged(SimpleSelector),
+    ) BuildError!void {
+        var start: usize = 0;
+        var i: usize = 0;
+        var bracket: i32 = 0;
+        var paren: i32 = 0;
+        while (i <= arg.len) : (i += 1) {
+            const at_end = i == arg.len;
+            const ch = if (at_end) @as(u8, ',') else arg[i];
+            if (!at_end) {
+                if (ch == '[') bracket += 1 else if (ch == ']') bracket -= 1 else if (ch == '(') paren += 1 else if (ch == ')') paren -= 1;
+            }
+            if ((ch == ',' and bracket == 0 and paren == 0) or at_end) {
+                const piece = std.mem.trim(u8, arg[start..i], " \t\n\r");
+                if (piece.len > 0) {
+                    try out.append(alloc, try parseSimpleSelector(alloc, piece));
+                }
+                start = i + 1;
+            }
+        }
     }
 
     /// Parse a structural pseudo-class name (+ optional `an+b` argument) into
@@ -1154,6 +1222,33 @@ test "querySelector — :not pseudo-class" {
     const elem = doc.querySelector("p:not(.a)");
     try std.testing.expect(elem != null);
     try std.testing.expect(std.mem.eql(u8, elem.?.getAttribute("class") orelse "", "b"));
+}
+
+test "querySelector — :not(list) excludes any listed arg" {
+    var doc = try parseDocument(std.testing.allocator, "<html><body><p class=\"a\">a</p><p class=\"b\">b</p><p class=\"c\">c</p></body></html>");
+    defer doc.deinit();
+    const all = try doc.querySelectorAll("p:not(.a, .b)", std.testing.allocator);
+    defer std.testing.allocator.free(all);
+    try std.testing.expectEqual(@as(usize, 1), all.len);
+    try std.testing.expect(std.mem.eql(u8, all[0].getAttribute("class") orelse "", "c"));
+}
+
+test "querySelector — :is(list) matches any arg" {
+    var doc = try parseDocument(std.testing.allocator, "<html><body><h1>a</h1><h2>b</h2><p class=\"title\">c</p><span>d</span></body></html>");
+    defer doc.deinit();
+    const all = try doc.querySelectorAll(":is(h1, h2, .title)", std.testing.allocator);
+    defer std.testing.allocator.free(all);
+    try std.testing.expectEqual(@as(usize, 3), all.len);
+}
+
+test "querySelector — :where(list) matches like :is" {
+    var doc = try parseDocument(std.testing.allocator, "<html><body><div id=\"box\"><span class=\"item\">a</span></div><span class=\"item\">b</span></body></html>");
+    defer doc.deinit();
+    const found = doc.querySelector(":where(#box) .item");
+    try std.testing.expect(found != null);
+    const text = try found.?.textContent(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("a", text);
 }
 
 test "querySelector — combinators > + ~" {
