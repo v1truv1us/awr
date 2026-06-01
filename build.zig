@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
     const test_test262_step = b.step("test-test262", "Run curated Test262 JS runtime tests");
     const test_corpus_step = b.step("test-corpus", "Run real-page render-quality corpus harness");
     const test_image_step = b.step("test-image", "Run image decoder + protocol + cache tests");
+    const test_tui_step = b.step("test-tui", "Run src/tui raw-terminal + escape-parser tests");
     const test_cssom_step = b.step("test-cssom", "Run starter CSSOM parser/cascade tests");
     const test_doc_step = b.step("test-doc", "Run \xc2\xa78 \xe2\x86\x94 curated_cases doc-alignment check");
     const test_integration_step = b.step("test-integration", "Run binary-spawning Zig integration tests (requires built awr/awrd binaries)");
@@ -601,7 +602,6 @@ pub fn build(b: *std.Build) void {
         exe_image_pipeline_mod.addImport("page", exe_page_mod);
         exe_image_pipeline_mod.addImport("image_protocol", exe_image_protocol_mod);
 
-
         // Test target for the pipeline's pure helpers (estimateCellDims,
         // pickFromSrcset, evalMedia, evalFeature). The Pipeline.build
         // path itself isn't unit-tested — it requires a live Page +
@@ -705,14 +705,14 @@ pub fn build(b: *std.Build) void {
         // sign-in) with timing budgets. Each script honors AWR_BIN
         // for non-default binary locations and AWR_SMOKE_OFFLINE=1
         // for network-skipped CI runs.
-        const mvp_smoke = b.addSystemCommand(&.{ "scripts/mvp_smoke.sh" });
+        const mvp_smoke = b.addSystemCommand(&.{"scripts/mvp_smoke.sh"});
         mvp_smoke.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
-        const regression_smoke = b.addSystemCommand(&.{ "scripts/regression_smoke.sh" });
+        const regression_smoke = b.addSystemCommand(&.{"scripts/regression_smoke.sh"});
         regression_smoke.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
         // T-86 / Tier 1 closure smoke (T1.11): Google search round-trip
         // + optional HN sign-in. Honors AWR_SMOKE_OFFLINE=1 like the
         // other smokes; in offline mode it exits 0 immediately.
-        const browse_smoke = b.addSystemCommand(&.{ "scripts/browse_smoke.sh" });
+        const browse_smoke = b.addSystemCommand(&.{"scripts/browse_smoke.sh"});
         browse_smoke.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
         smoke_step.dependOn(&mvp_smoke.step);
         smoke_step.dependOn(&regression_smoke.step);
@@ -724,7 +724,7 @@ pub fn build(b: *std.Build) void {
         // because TLS+CA-bundle costs don't fire on HTTP). Set
         // BENCH_HTTPS=<url> to gate the spec's 30%-floor against a
         // real HTTPS endpoint. Depends on both binaries being built.
-        const bench_daemon = b.addSystemCommand(&.{ "scripts/bench_daemon.sh" });
+        const bench_daemon = b.addSystemCommand(&.{"scripts/bench_daemon.sh"});
         bench_daemon.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
         bench_daemon.step.dependOn(&b.addInstallArtifact(awrd_exe, .{}).step);
         bench_daemon_step.dependOn(&bench_daemon.step);
@@ -993,6 +993,24 @@ pub fn build(b: *std.Build) void {
         const run_image_protocol = b.addRunArtifact(image_protocol_test);
         test_image_step.dependOn(&run_image_protocol.step);
         test_step.dependOn(&run_image_protocol.step);
+
+        // src/tui.zig — raw-terminal I/O + escape-sequence parser. Pure-Zig;
+        // needs libc only for the termios/ioctl C imports. The escape parser
+        // is exercised headlessly via a fake byte source (no real TTY), which
+        // is what guards the DA-reply-as-keystroke regression.
+        const tui_mod = b.createModule(.{
+            .root_source_file = b.path("src/tui.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        const tui_test = b.addTest(.{
+            .name = "tui",
+            .root_module = tui_mod,
+        });
+        const run_tui = b.addRunArtifact(tui_test);
+        test_tui_step.dependOn(&run_tui.step);
+        test_step.dependOn(&run_tui.step);
 
         // src/image/braille.zig — pure-Zig 2×4 braille downsampler.
         // Imports decode.zig for the Image type, so it transitively
