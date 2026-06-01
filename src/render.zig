@@ -989,6 +989,12 @@ fn resolveCssProp(
 /// fall back to the allocation-free flat OR approximation. Single simple
 /// selectors always use the fast flat path.
 fn cssRuleMatches(state: *const RenderState, elem: *const dom.Element, rule: *const css_parser.Rule) bool {
+    if (rule.media) |m| {
+        // Viewport width ≈ render columns × 8 CSS px (matches the matchMedia
+        // model); height is approximated since the renderer is width-driven.
+        const vw: i64 = @as(i64, @intCast(state.opts.max_width)) * 8;
+        if (!css_parser.mediaMatches(m, vw, 24 * 16)) return false;
+    }
     if (rule.complex and state.exact_complex_selectors) {
         if (state.compiled_selectors.getPtr(rule)) |list| {
             return dom.matchesCompiled(elem, list);

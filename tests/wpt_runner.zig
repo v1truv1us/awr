@@ -686,6 +686,22 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/css_structural_pseudo.js"),
     },
     .{
+        .filename = "css_media_cascade.js",
+        .html =
+        \\<html><head><style>
+        \\  #base { color: orange; }
+        \\  @media (min-width: 600px) { #wide { color: red; } }
+        \\  @media (min-width: 700px) { #narrow { color: blue; } }
+        \\  @media (max-width: 100px) { #small { color: green; } }
+        \\  @media (prefers-color-scheme: dark) { #dark { font-weight: bold; } }
+        \\</style></head><body>
+        \\<p id="wide">a</p><p id="narrow">b</p><p id="small">c</p>
+        \\<p id="base">d</p><p id="dark">e</p>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_media_cascade.js"),
+    },
+    .{
         .filename = "form_properties.js",
         .html =
         \\<html><body>

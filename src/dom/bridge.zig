@@ -1588,7 +1588,9 @@ fn cssGetComputedPropertyFn(ctx: ?*qjs.Context, _: qjs.Value, args: []const @imp
     defer c.freeCString(name_cstr);
     const prop_name = std.mem.span(name_cstr);
 
-    const value = resolveComputedProperty(bridge.allocator, elem, bridge.stylesheets.items, prop_name) catch return qjs.Value.initStringLen(c, "");
+    const vw_px: i64 = @as(i64, @intCast(bridge.viewport_width)) * 8;
+    const vh_px: i64 = @as(i64, @intCast(bridge.viewport_height)) * 16;
+    const value = resolveComputedProperty(bridge.allocator, elem, bridge.stylesheets.items, prop_name, vw_px, vh_px) catch return qjs.Value.initStringLen(c, "");
     defer if (value) |v| bridge.allocator.free(v);
     if (value) |v| return qjs.Value.initStringLen(c, v);
     return qjs.Value.initStringLen(c, "");
@@ -1609,6 +1611,8 @@ fn resolveComputedProperty(
     elem: *const dom.Element,
     stylesheets: []const css_parser.Stylesheet,
     prop_name: []const u8,
+    vw_px: i64,
+    vh_px: i64,
 ) !?[]u8 {
     // Track the best author-stylesheet match. We dup at the end so we don't
     // pay an alloc-per-rule when many rules touch the same property.
@@ -1620,6 +1624,9 @@ fn resolveComputedProperty(
 
     for (stylesheets, 0..) |sheet, src_idx| {
         for (sheet.rules.items, 0..) |rule, rule_idx| {
+            if (rule.media) |m| {
+                if (!css_parser.mediaMatches(m, vw_px, vh_px)) continue;
+            }
             if (!ruleMatchesElement(elem, &rule)) continue;
             const val = rule.declarations.getPropertyValue(prop_name);
             if (val.len == 0) continue;

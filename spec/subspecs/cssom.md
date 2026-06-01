@@ -136,6 +136,18 @@ unsupported pseudo-classes (state pseudos like `:hover`, pseudo-elements
 `::before`) mark the selector non-matching so such rules don't over-apply.
 Coverage: `tests/wpt/css_structural_pseudo.js`.
 
+### 2.5 @media in the cascade (2026-05-31)
+
+`cssom/parser.zig` no longer skips `@media` blocks: it brace-matches the block,
+parses the nested rules, and tags each with its media condition
+(`Rule.media`). Cascades (the renderer and getComputedStyle) skip a rule when
+its condition does not match the viewport, evaluated by `parser.mediaMatches`
+— a Zig port of the `matchMedia` model (`src/js/engine.zig`): comma = OR,
+`and` = AND of parenthesized features; supports `(min|max)-width`,
+`(min|max)-height` (viewport ≈ columns × 8 / rows × 16 CSS px),
+`prefers-color-scheme` (terminal default dark), and the `screen`/`all` media
+types. Coverage: `tests/wpt/css_media_cascade.js`.
+
 ## 3. Implementation shape
 
 Move CSS behavior out of the JS bridge over time:
