@@ -14,7 +14,7 @@
 | 2 | Render + UX polish | **CLOSED** 2026-05-13 |
 | 3 | Lightly dynamic site support | **CLOSED** 2026-05-22 |
 | — | Daemon mode (`awrd`) | **CLOSED** 2026-05-23 |
-| — | Starter CSSOM | **CLOSED** 2026-05-27 (§2.1–2.7 post-closure additions through 2026-05-31) |
+| — | Starter CSSOM | **CLOSED** 2026-05-27 (§2.1–2.9 post-closure additions through 2026-06-01) |
 | — | TUI Quality Track | **CLOSED** 2026-05-30 |
 | 4 | Layout engine | **DEFERRED** (decision pending) |
 | 5 | Full SPA parity | **DEFERRED** |
@@ -30,7 +30,7 @@
 - Cookie jar — RFC 6265, disk persistence, per-origin scoping
 - `fetch()` and `XMLHttpRequest` — async GET and POST, `URLSearchParams` bodies
 - `<form method="post">` end-to-end through `awr browse`
-- WPT runner (`zig build test-wpt`) and Test262 runner (`zig build test-test262`) both wired and green; 122 WPT cases, 8 Test262 cases
+- WPT runner (`zig build test-wpt`) and Test262 runner (`zig build test-test262`) both wired and green; 128 WPT cases, 8 Test262 cases
 - DOM bridge: parent/sibling tracking, live `classList`, Lexbor-backed `innerHTML`, `cloneNode`, `contains()`
 - Full event system: `addEventListener`/`removeEventListener`/`dispatchEvent`, capture/bubble/target phases, `CustomEvent`, browser lifecycle events (`DOMContentLoaded`, `load`, `readystatechange`)
 - `MutationObserver` with microtask delivery
@@ -85,10 +85,10 @@
 - WPT cases: §4.1–§4.6 coverage (`css_style_declaration.js`, `css_inline_computed_style.js`, `css_style_block.js`, `css_external_stylesheet.js`, `css_cascade_basics.js`, `css_important.js`, `css_computed_properties.js`)
 - WebCrypto subset: `crypto.getRandomValues()` + `subtle.digest()`
 
-#### Post-closure CSSOM additions (§2.1–§2.7, through 2026-05-31)
+#### Post-closure CSSOM additions (§2.1–§2.9, through 2026-06-01)
 Closure boundary is unchanged (2026-05-27); these are no-layout CSS extensions
 made on top of the closed track, each backed by curated WPT cases. Full detail:
-`spec/subspecs/cssom.md §2.1–§2.7`.
+`spec/subspecs/cssom.md §2.1–§2.9`.
 - **§2.1** `text-decoration` + `text-align` added to the computed-style set; UA-stylesheet defaults extended (`strong`→bold, `em`→italic, `a`→underline, `del`→line-through, `th`→center). Compound (`div.foo`) and combinator (`section p`, `ul > li`, sibling) selectors match with proper AND/ancestor semantics; attribute selectors (`[attr]`, `[attr=v]`, `~= |= ^= $= *=`) honored in the cascade. Coverage: `css_ua_text_defaults.js`, `css_combinator_cascade.js`, `css_attribute_selectors.js`
 - **§2.2** `getComputedStyle` returns resolved values (`bold`→`"700"`, colors → `"rgb(…)"`/`"rgba(…)"`), serialized only at the `getComputedStyle` boundary; `element.style.*` keeps authored values. Coverage: `css_computed_value_serialization.js`
 - **§2.3** Compiled-selector cache + exact compound/combinator/attribute matching in the renderer (flat-OR fallback above 48 complex text rules; script-facing cascade always exact)
@@ -96,6 +96,8 @@ made on top of the closed track, each backed by curated WPT cases. Full detail:
 - **§2.5** `@media` rules applied in the cascade via a Zig port of the `matchMedia` model (`(min|max)-width/height`, `prefers-color-scheme`, `screen`/`all`). Coverage: `css_media_cascade.js`
 - **§2.6** Shorthand longhands (`text-decoration`→`-line`, `font`→`-style`/`-weight`) + CSS-wide keywords (`inherit`/`initial`/`unset`) at the getComputedStyle boundary. Coverage: `css_wide_keywords.js`
 - **§2.7** Full CSS extended named-color set, `hsl()`/`hsla()`, `transparent`, and `currentColor` in the getComputedStyle color serializer. Coverage: `css_color_serialization.js`
+- **§2.8** Selector functions `:not()` / `:is()` / `:where()` with full selector-list arguments and correct specificity (`:where()` contributes 0; `:is()`/`:not()` take their most-specific argument). Coverage: `css_selector_functions.js`
+- **§2.9** CSS custom properties (`--foo`, parent-chain inheritance) + `var(--foo, fallback)` substitution at the getComputedStyle boundary. Coverage: `css_custom_properties.js`
 
 ### Real-site support (H2 + decompression) — LANDED 2026-05-27
 - BoringSSL H2 path now decompresses gzip/deflate/zstd response bodies
@@ -191,7 +193,7 @@ HN, YC jobs, and layout-table pages are now fully readable. Data tables
 
 - **Tier 4 — Layout engine**: full CSS layout, box model, flex/grid, text shaping, geometry-backed observers (`IntersectionObserver`, `ResizeObserver`). Decision pending: build native Zig layout engine (~12–18 person-months) vs. embed external layout oracle (Servo/Ladybird/CDP). Requires ADR amendment before any work starts. See `docs/adr/0003-tier4-layout-strategy.md`.
 - **Tier 5 — Full SPA parity**: Service Workers, IndexedDB, full Web Crypto, Workers, Notifications, multi-tab TUI session, anti-bot canvas/WebGL/font fingerprint shimming.
-- **Native MCP stdio server**: `spec/subspecs/mcp-stdio.md` — will be a thin client of daemon-mode. Not active.
+- **Native MCP stdio server**: a real, tested implementation **landed on `main` 2026-06-01** (`src/mcp_stdio.zig`, `awr mcp <url>`, `zig build test-mcp` 35/35) as a thin client over the runtime. ⚠️ **Governance**: `spec/subspecs/mcp-stdio.md` and `spec/MVP.md §7` still classify this track as **DEFERRED**. Formal promotion (DEFERRED → shipped) requires a `spec/MVP.md §8` amendment to `spec/MVP.md`, `spec/subspecs/mcp-stdio.md`, and `docs/adr/0001-spec-governance.md`. Until that amendment, treat the code as present-but-not-formally-promoted.
 - **Fingerprinting roadmap**: `spec/Fingerprint-Plan.md` — owned browser identity work. Not active.
 - **`IntersectionObserver` / `ResizeObserver`**: blocked on Tier 4 layout.
 
@@ -208,6 +210,7 @@ WebGL/WebGPU, `<video>`/`<audio>` playback, WebRTC, canvas pixel-level access, C
 - **`setTimeout`/`setInterval` in standalone JS tests**: in the `test-js` target there is no EventLoop, so timers are no-ops. In the Page/TUI path the EventLoop is always attached and timers fire correctly.
 - **Pool/cookie `Io` threading**: `src/net/pool.zig` and `src/net/cookie.zig` use POSIX wall-clock reads directly rather than the `Io` abstraction — flagged for cleanup once `Io` APIs stabilize in Zig.
 - **`test-render` build step does not exist**: render unit tests are co-located in `src/render.zig` and run under `zig build test`; there is no standalone `zig build test-render` step.
+- **`test-corpus` red on `main` (stale snapshot, not a regression)**: `corpus[wikipedia_octopus]` fails its byte-snapshot (`expected 99495, got 87421`) because the fixture live-fetches Wikipedia and the page drifted since the snapshot was blessed. Verified identical on base `8b85b66` and on the 2026-06-01 integration — pre-existing external drift, fixed by re-blessing the snapshot, not a code bug. (Argues for making corpus fixtures hermetic rather than live-fetching.)
 
 ---
 
@@ -224,7 +227,8 @@ zig build test-js       # QuickJS engine
 zig build test-html     # HTML parser
 zig build test-dom      # DOM tree + bridge
 zig build test-page     # Page orchestrator
-zig build test-render   # Renderer
+zig build test-cssom    # CSSOM parser/cascade/computed
+zig build test-mcp      # MCP stdio server (35 tests)
 zig build test-e2e      # End-to-end integration
 zig build test-daemon   # Daemon mode integration
 zig build test-corpus   # Render corpus harness (12 fixtures)
