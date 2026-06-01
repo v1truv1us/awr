@@ -2,6 +2,7 @@ const std = @import("std");
 const build_opts = @import("build_opts");
 const page_mod = @import("page");
 const mock_mod = @import("mock.zig");
+const mcp_stdio = @import("mcp_stdio.zig");
 const browser_mod = @import("browser.zig");
 const session_import = @import("session_import.zig");
 const bookmarks_mod = @import("bookmarks.zig");
@@ -1384,6 +1385,21 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
             telemetry.emit(&metrics, alloc, io);
             std.process.exit(1);
         }
+        return;
+    }
+
+    // Subcommand: awr mcp <url>
+    //
+    // DEFERRED track (spec/subspecs/mcp-stdio.md): a native MCP JSON-RPC
+    // 2.0 server over stdin/stdout that re-exports the loaded page's
+    // WebMCP tools. Wired here so the surface dispatches and is testable;
+    // promoting it out of DEFERRED requires a spec/MVP.md §8 amendment.
+    if (std.mem.eql(u8, args[1], "mcp")) {
+        if (args.len < 3) {
+            try stdoutWrite(io, "usage: awr mcp <url>\n");
+            std.process.exit(1);
+        }
+        try mcp_stdio.serve(alloc, io, args[2]);
         return;
     }
 
