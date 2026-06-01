@@ -87,6 +87,7 @@ pub fn build(b: *std.Build) void {
     const test_doc_step = b.step("test-doc", "Run \xc2\xa78 \xe2\x86\x94 curated_cases doc-alignment check");
     const test_integration_step = b.step("test-integration", "Run binary-spawning Zig integration tests (requires built awr/awrd binaries)");
     const test_daemon_step = b.step("test-daemon", "Run daemon integration tests (requires built awr/awrd binaries)");
+    const test_mcp_step = b.step("test-mcp", "Run MCP stdio server (deferred track) unit tests");
     const smoke_step = b.step("smoke", "Run mvp + regression smoke suites against the built binary");
     const bench_daemon_step = b.step("bench-daemon", "Daemon vs per-process chained-flow benchmark (spec §4.5 gate)");
 
@@ -601,7 +602,6 @@ pub fn build(b: *std.Build) void {
         exe_image_pipeline_mod.addImport("page", exe_page_mod);
         exe_image_pipeline_mod.addImport("image_protocol", exe_image_protocol_mod);
 
-
         // Test target for the pipeline's pure helpers (estimateCellDims,
         // pickFromSrcset, evalMedia, evalFeature). The Pipeline.build
         // path itself isn't unit-tested — it requires a live Page +
@@ -670,6 +670,31 @@ pub fn build(b: *std.Build) void {
         const run_daemon = b.addRunArtifact(daemon_test);
         test_step.dependOn(&run_daemon.step);
 
+        // ── MCP stdio server unit tests (deferred track) ────────────
+        // src/mcp_stdio.zig is a thin MCP client over page.zig + the
+        // jsonrpc.zig framing module. Per spec/subspecs/mcp-stdio.md
+        // this track is DEFERRED; the co-located tests pin the protocol
+        // mapping (initialize / tools/list / tools/call happy + error
+        // paths) and ride the default `test` gate so the file can't bit-
+        // rot. Reuses exe_page_mod (page pulls in QuickJS/lexbor/BoringSSL)
+        // and opts_mod; jsonrpc.zig is resolved as a sibling-file import.
+        const mcp_mod = b.createModule(.{
+            .root_source_file = b.path("src/mcp_stdio.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libcpp = supports_boringssl,
+        });
+        mcp_mod.addImport("page", exe_page_mod);
+        mcp_mod.addImport("build_opts", opts_mod);
+        const mcp_test = b.addTest(.{
+            .name = "mcp",
+            .root_module = mcp_mod,
+            .use_llvm = true, // page transitively pulls in QuickJS-NG
+        });
+        const run_mcp = b.addRunArtifact(mcp_test);
+        test_step.dependOn(&run_mcp.step);
+        test_mcp_step.dependOn(&run_mcp.step);
+
         // ── Binary-spawning Zig integration tests ───────────────────
         // tests/integration_runner.zig spawns awr/awrd via
         // std.process.Child to verify CLI argv parsing, env handling,
@@ -705,14 +730,14 @@ pub fn build(b: *std.Build) void {
         // sign-in) with timing budgets. Each script honors AWR_BIN
         // for non-default binary locations and AWR_SMOKE_OFFLINE=1
         // for network-skipped CI runs.
-        const mvp_smoke = b.addSystemCommand(&.{ "scripts/mvp_smoke.sh" });
+        const mvp_smoke = b.addSystemCommand(&.{"scripts/mvp_smoke.sh"});
         mvp_smoke.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
-        const regression_smoke = b.addSystemCommand(&.{ "scripts/regression_smoke.sh" });
+        const regression_smoke = b.addSystemCommand(&.{"scripts/regression_smoke.sh"});
         regression_smoke.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
         // T-86 / Tier 1 closure smoke (T1.11): Google search round-trip
         // + optional HN sign-in. Honors AWR_SMOKE_OFFLINE=1 like the
         // other smokes; in offline mode it exits 0 immediately.
-        const browse_smoke = b.addSystemCommand(&.{ "scripts/browse_smoke.sh" });
+        const browse_smoke = b.addSystemCommand(&.{"scripts/browse_smoke.sh"});
         browse_smoke.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
         smoke_step.dependOn(&mvp_smoke.step);
         smoke_step.dependOn(&regression_smoke.step);
@@ -724,7 +749,7 @@ pub fn build(b: *std.Build) void {
         // because TLS+CA-bundle costs don't fire on HTTP). Set
         // BENCH_HTTPS=<url> to gate the spec's 30%-floor against a
         // real HTTPS endpoint. Depends on both binaries being built.
-        const bench_daemon = b.addSystemCommand(&.{ "scripts/bench_daemon.sh" });
+        const bench_daemon = b.addSystemCommand(&.{"scripts/bench_daemon.sh"});
         bench_daemon.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
         bench_daemon.step.dependOn(&b.addInstallArtifact(awrd_exe, .{}).step);
         bench_daemon_step.dependOn(&bench_daemon.step);
