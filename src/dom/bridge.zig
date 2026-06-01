@@ -2623,17 +2623,62 @@ const BRIDGE_POLYFILL =
     \\    }
     \\    return value;
     \\  }
+    \\  // CSS custom properties (--foo). They inherit, so resolve the element's
+    \\  // own cascaded value first, then walk up the parent chain. Returns '' when
+    \\  // unset anywhere. Names are matched case-insensitively to mirror the Zig
+    \\  // cascade's lowercased storage.
+    \\  function __awr_custom_prop__(el, name) {
+    \\    if (!el || typeof __awr_css_get_computed_property__ !== 'function') return '';
+    \\    const own = __awr_css_get_computed_property__(el._h || 0, name);
+    \\    if (own) return own;
+    \\    return el.parentElement ? __awr_custom_prop__(el.parentElement, name) : '';
+    \\  }
+    \\  // Substitute var(--name, fallback) references in a property value against
+    \\  // the element's resolved custom properties (CSS Variables §3). One pass
+    \\  // covers the common single-reference case; the fallback (everything after
+    \\  // the first top-level comma) is used when the custom property is unset.
+    \\  function __awr_substitute_var__(el, value) {
+    \\    if (typeof value !== 'string' || value.indexOf('var(') < 0) return value;
+    \\    let out = '';
+    \\    let i = 0;
+    \\    while (i < value.length) {
+    \\      const at = value.indexOf('var(', i);
+    \\      if (at < 0) { out += value.slice(i); break; }
+    \\      out += value.slice(i, at);
+    \\      let depth = 1;
+    \\      let j = at + 4;
+    \\      for (; j < value.length && depth > 0; j++) {
+    \\        if (value[j] === '(') depth++;
+    \\        else if (value[j] === ')') depth--;
+    \\      }
+    \\      const inner = value.slice(at + 4, j - 1); // contents between the parens
+    \\      const comma = inner.indexOf(',');
+    \\      const varName = (comma < 0 ? inner : inner.slice(0, comma)).trim();
+    \\      const fallback = comma < 0 ? '' : inner.slice(comma + 1).trim();
+    \\      const resolved = __awr_custom_prop__(el, varName.toLowerCase());
+    \\      out += resolved || __awr_substitute_var__(el, fallback);
+    \\      i = j;
+    \\    }
+    \\    return out.trim();
+    \\  }
     \\  globalThis.getComputedStyle = function(el) {
     \\    return new Proxy(Object.create(null), {
     \\      get(_target, prop) {
     \\        if (prop === 'getPropertyValue') {
     \\          return function(name) {
-    \\            const css = String(name).toLowerCase();
+    \\            const raw = String(name);
+    \\            // Custom properties are case-sensitive and inherit; return the
+    \\            // substituted value without UA defaults or color serialization.
+    \\            if (raw.slice(0, 2) === '--') {
+    \\              return __awr_substitute_var__(el, __awr_custom_prop__(el, raw.toLowerCase()));
+    \\            }
+    \\            const css = raw.toLowerCase();
     \\            if (!el || typeof __awr_css_get_computed_property__ !== 'function') {
     \\              return __awr_ua_default__(el, css);
     \\            }
     \\            const handle = el._h || 0;
-    \\            const v = __awr_css_get_computed_property__(handle, css);
+    \\            let v = __awr_css_get_computed_property__(handle, css);
+    \\            v = __awr_substitute_var__(el, v);
     \\            return __awr_canon_computed__(css, __awr_resolve_wide__(el, css, v || __awr_ua_default__(el, css)));
     \\          };
     \\        }
@@ -2642,7 +2687,8 @@ const BRIDGE_POLYFILL =
     \\          return __awr_ua_default__(el, css);
     \\        }
     \\        const handle = el._h || 0;
-    \\        const v = __awr_css_get_computed_property__(handle, css);
+    \\        let v = __awr_css_get_computed_property__(handle, css);
+    \\        v = __awr_substitute_var__(el, v);
     \\        return __awr_canon_computed__(css, __awr_resolve_wide__(el, css, v || __awr_ua_default__(el, css)));
     \\      }
     \\    });

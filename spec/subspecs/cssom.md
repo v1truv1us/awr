@@ -170,6 +170,37 @@ The getComputedStyle color serializer (`__awr_serialize_color__` in
 `color`; inherits on the `color` property itself). Coverage:
 `tests/wpt/css_color_serialization.js`.
 
+### 2.8 Selector functions `:not()` / `:is()` / `:where()` (2026-06-01)
+
+The DOM selector engine (`src/dom/node.zig`) implements the functional
+pseudo-classes `:not()`, `:is()`, `:where()` with full selector-list
+arguments (e.g. `:not(.a, .b)`, `:is(h1, h2, .title)`, `:where(#box) .item`).
+An element matches `:is()` / `:where()` when **any** argument matches and
+`:not()` when **none** match; each argument is a compound simple selector
+(combinators inside arguments are out of non-layout scope). The previous
+single-simple-selector `:not()` representation was replaced by a
+`FuncPseudo` list so multiple functional pseudos can co-exist on one compound
+selector, and the leaked-on-failure `:not` allocation path was removed. The
+parser already flags `:`-bearing rules `complex`, so the cascade routes these
+to the engine. Specificity (CSS Selectors §16) is computed in
+`Specificity.calculate` (`src/cssom/cascade.zig`): `:where()` contributes 0;
+`:is()` / `:not()` take the specificity of their most-specific argument.
+Coverage: `tests/wpt/css_selector_functions.js` plus co-located dom/cascade
+tests.
+
+### 2.9 Custom properties + `var()` substitution (2026-06-01)
+
+CSS custom properties (`--foo` declarations) parse as ordinary declarations
+through the existing `StyleDeclaration` model and resolve through the Zig
+cascade. Custom properties **inherit**, and `var(--foo, fallback)` references
+are substituted, both at the getComputedStyle boundary in `src/dom/bridge.zig`
+(`__awr_custom_prop__` walks the parent chain for inheritance;
+`__awr_substitute_var__` replaces `var()` references with the resolved
+custom-property value or the fallback). This stays non-layout: it acts only on
+the script-facing getComputedStyle surface, so the renderer's own Zig cascade
+and the agent/corpus byte output are unaffected. Coverage:
+`tests/wpt/css_custom_properties.js`.
+
 ## 3. Implementation shape
 
 Move CSS behavior out of the JS bridge over time:

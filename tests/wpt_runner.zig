@@ -739,6 +739,42 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/css_color_serialization.js"),
     },
     .{
+        .filename = "css_selector_functions.js",
+        .html =
+        \\<html><head><style>
+        \\  p:not(.skip) { color: red; }
+        \\  div:not(.a, .b) { font-weight: bold; }
+        \\  :is(h1, h2, .title) { font-style: italic; }
+        \\  :is(#box) .item { color: blue; }
+        \\  :where(#box) .item { color: green; }
+        \\</style></head><body>
+        \\<p id="p1">a</p><p id="p2" class="skip">b</p>
+        \\<div id="q1">c</div><div id="q2" class="a">d</div>
+        \\<h1 id="h">e</h1><span id="t" class="title">f</span><span id="n">g</span>
+        \\<div id="box"><span id="w" class="item">h</span></div>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_selector_functions.js"),
+    },
+    .{
+        .filename = "css_custom_properties.js",
+        .html =
+        \\<html><head><style>
+        \\  #root { --brand: blue; }
+        \\  #child { color: var(--brand); }
+        \\  #fb { color: var(--missing, green); }
+        \\  #override { --brand: red; color: var(--brand); }
+        \\</style></head><body>
+        \\<div id="root">
+        \\  <p id="child">a</p>
+        \\  <p id="override">b</p>
+        \\</div>
+        \\<p id="fb">c</p>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_custom_properties.js"),
+    },
+    .{
         .filename = "form_properties.js",
         .html =
         \\<html><body>

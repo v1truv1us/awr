@@ -39,6 +39,39 @@ pub const Specificity = struct {
                 spec.class += 1;
                 i += 1;
                 while (i < s.len and isIdentChar(s[i])) : (i += 1) {}
+            } else if (char == ':') {
+                // Functional pseudo-classes adjust specificity per CSS
+                // Selectors §16: `:where()` contributes 0; `:is()`/`:not()`
+                // take the specificity of their most-specific argument. Other
+                // tokens after `:` keep the prior flat-scan behavior.
+                const name_start = if (i + 1 < s.len and s[i + 1] == ':') i + 2 else i + 1;
+                var p = name_start;
+                while (p < s.len and isIdentChar(s[p])) : (p += 1) {}
+                const name = s[name_start..p];
+                if (p < s.len and s[p] == '(') {
+                    const open = p;
+                    var close = s.len; // exclusive end of the argument
+                    var depth: i32 = 0;
+                    while (p < s.len) : (p += 1) {
+                        if (s[p] == '(') depth += 1 else if (s[p] == ')') {
+                            depth -= 1;
+                            if (depth == 0) {
+                                close = p;
+                                p += 1;
+                                break;
+                            }
+                        }
+                    }
+                    const inner = s[open + 1 .. close];
+                    if (std.ascii.eqlIgnoreCase(name, "where")) {
+                        // contributes nothing
+                    } else if (std.ascii.eqlIgnoreCase(name, "is") or std.ascii.eqlIgnoreCase(name, "not")) {
+                        spec = spec.add(maxArgSpecificity(inner));
+                    }
+                    i = p;
+                } else {
+                    i = p;
+                }
             } else if (isIdentStart(char)) {
                 spec.element += 1;
                 i += 1;
@@ -48,6 +81,41 @@ pub const Specificity = struct {
             }
         }
         return spec;
+    }
+
+    fn add(self: Specificity, other: Specificity) Specificity {
+        return .{
+            .id = self.id + other.id,
+            .class = self.class + other.class,
+            .element = self.element + other.element,
+        };
+    }
+
+    /// The most-specific argument in a comma-separated selector list (used for
+    /// `:is()` / `:not()` specificity). Splits on top-level commas (respecting
+    /// `[...]` and nested `(...)`).
+    fn maxArgSpecificity(list: []const u8) Specificity {
+        var best = Specificity{};
+        var start: usize = 0;
+        var i: usize = 0;
+        var bracket: i32 = 0;
+        var paren: i32 = 0;
+        while (i <= list.len) : (i += 1) {
+            const at_end = i == list.len;
+            const ch = if (at_end) @as(u8, ',') else list[i];
+            if (!at_end) {
+                if (ch == '[') bracket += 1 else if (ch == ']') bracket -= 1 else if (ch == '(') paren += 1 else if (ch == ')') paren -= 1;
+            }
+            if ((ch == ',' and bracket == 0 and paren == 0) or at_end) {
+                const piece = std.mem.trim(u8, list[start..i], " \t\r\n");
+                if (piece.len > 0) {
+                    const ps = calculate(piece);
+                    if (best.isLessThan(ps)) best = ps;
+                }
+                start = i + 1;
+            }
+        }
+        return best;
     }
 };
 
@@ -104,6 +172,35 @@ test "Specificity calculation" {
     try std.testing.expectEqual(@as(u16, 1), s4.id);
     try std.testing.expectEqual(@as(u16, 1), s4.class);
     try std.testing.expectEqual(@as(u16, 1), s4.element);
+}
+
+test "Specificity — functional pseudo-classes :not / :is / :where" {
+    // :where() contributes nothing.
+    const w = Specificity.calculate(":where(#box) .item");
+    try std.testing.expectEqual(@as(u16, 0), w.id);
+    try std.testing.expectEqual(@as(u16, 1), w.class); // only `.item`
+    try std.testing.expectEqual(@as(u16, 0), w.element);
+
+    // :is() takes the most-specific argument (the #box id here).
+    const is = Specificity.calculate(":is(#box) .item");
+    try std.testing.expectEqual(@as(u16, 1), is.id);
+    try std.testing.expectEqual(@as(u16, 1), is.class);
+    try std.testing.expectEqual(@as(u16, 0), is.element);
+
+    // :not() likewise takes its argument's specificity.
+    const not = Specificity.calculate("p:not(.skip)");
+    try std.testing.expectEqual(@as(u16, 0), not.id);
+    try std.testing.expectEqual(@as(u16, 1), not.class); // `.skip`
+    try std.testing.expectEqual(@as(u16, 1), not.element); // `p`
+
+    // :is() picks the MOST specific arg, not the sum.
+    const is_max = Specificity.calculate(":is(#a, .b, c)");
+    try std.testing.expectEqual(@as(u16, 1), is_max.id);
+    try std.testing.expectEqual(@as(u16, 0), is_max.class);
+    try std.testing.expectEqual(@as(u16, 0), is_max.element);
+
+    // :is() > :where() for the same argument set.
+    try std.testing.expect(w.isLessThan(is));
 }
 
 test "Specificity comparison" {
