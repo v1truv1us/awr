@@ -669,6 +669,23 @@ const curated_cases = [_]WptCase{
         .script = @embedFile("wpt/css_computed_value_serialization.js"),
     },
     .{
+        .filename = "css_structural_pseudo.js",
+        .html =
+        \\<html><head><style>
+        \\  li:first-child { color: red; }
+        \\  li:last-child { color: blue; }
+        \\  li:nth-child(2) { font-weight: bold; }
+        \\  p:only-child { font-style: italic; }
+        \\  .list span:nth-of-type(odd) { text-decoration: underline; }
+        \\</style></head><body>
+        \\<ul><li id="l1">a</li><li id="l2">b</li><li id="l3">c</li></ul>
+        \\<div><p id="solo">only</p></div>
+        \\<div class="list"><span id="s1">1</span><b>x</b><span id="s2">2</span><span id="s3">3</span></div>
+        \\</body></html>
+        ,
+        .script = @embedFile("wpt/css_structural_pseudo.js"),
+    },
+    .{
         .filename = "form_properties.js",
         .html =
         \\<html><body>

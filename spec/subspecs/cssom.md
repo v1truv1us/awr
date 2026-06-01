@@ -125,6 +125,17 @@ always exact. Covered by an inline `src/render.zig` test plus the unchanged
 `css_combinator_cascade.js` / `css_attribute_selectors.js` getComputedStyle
 cases.
 
+### 2.4 Structural pseudo-classes (2026-05-31)
+
+The selector engine (`src/dom/node.zig`) implements the structural
+pseudo-classes `:first-child`, `:last-child`, `:only-child`, `:nth-child(an+b)`
+(incl. `odd`/`even`), and the of-type variants `:first-of-type`,
+`:last-of-type`, `:only-of-type`, `:nth-of-type(an+b)`. The parser flags
+`:`-bearing rules complex so the cascade routes them to the engine, and
+unsupported pseudo-classes (state pseudos like `:hover`, pseudo-elements
+`::before`) mark the selector non-matching so such rules don't over-apply.
+Coverage: `tests/wpt/css_structural_pseudo.js`.
+
 ## 3. Implementation shape
 
 Move CSS behavior out of the JS bridge over time:

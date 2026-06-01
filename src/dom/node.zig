@@ -53,12 +53,36 @@ const AttrSelector = struct {
     op: AttrOp = .presence,
 };
 
+/// Structural pseudo-class (CSS Selectors §13). `nth_child` / `nth_of_type`
+/// carry the `an+b` coefficients; the boolean forms set a=0,b=fixed.
+const PseudoKind = enum {
+    first_child,
+    last_child,
+    only_child,
+    nth_child,
+    first_of_type,
+    last_of_type,
+    only_of_type,
+    nth_of_type,
+};
+
+const Pseudo = struct {
+    kind: PseudoKind,
+    a: i32 = 0,
+    b: i32 = 0,
+};
+
 const SimpleSelector = struct {
     tag: ?[]const u8 = null,
     id: ?[]const u8 = null,
     classes: std.ArrayListUnmanaged([]const u8) = .empty,
     attrs: std.ArrayListUnmanaged(AttrSelector) = .empty,
+    pseudos: std.ArrayListUnmanaged(Pseudo) = .empty,
     not_sel: ?*SimpleSelector = null,
+    /// Set when the token carries an unsupported pseudo (state pseudo-classes
+    /// like `:hover`, or any pseudo-element `::x`): the simple selector then
+    /// never matches, so such rules don't apply rather than over-applying.
+    never_match: bool = false,
 
     fn deinit(self: *SimpleSelector, alloc: std.mem.Allocator) void {
         if (self.not_sel) |n| {
@@ -67,6 +91,7 @@ const SimpleSelector = struct {
         }
         self.classes.deinit(alloc);
         self.attrs.deinit(alloc);
+        self.pseudos.deinit(alloc);
     }
 };
 
@@ -432,6 +457,7 @@ pub const Document = struct {
     }
 
     fn matchesSimpleSelector(elem: *const Element, sel: *const SimpleSelector) bool {
+        if (sel.never_match) return false;
         if (sel.tag) |tag| {
             if (tag.len > 0 and !std.mem.eql(u8, tag, "*") and !std.ascii.eqlIgnoreCase(elem.tag, tag)) return false;
         }
@@ -447,10 +473,57 @@ pub const Document = struct {
             const v = elem.getAttribute(a.name) orelse return false;
             if (!attrMatches(a, v)) return false;
         }
+        for (sel.pseudos.items) |ps| {
+            if (!matchesPseudo(elem, ps)) return false;
+        }
         if (sel.not_sel) |n| {
             if (matchesSimpleSelector(elem, n)) return false;
         }
         return true;
+    }
+
+    /// CSS Selectors §13: structural pseudo-classes. Computes the element's
+    /// 1-based position among its element siblings (and among same-tag
+    /// siblings) in one pass, then tests the requested form.
+    fn matchesPseudo(elem: *const Element, ps: Pseudo) bool {
+        var pos: i32 = 1;
+        var total: i32 = 1;
+        var pos_type: i32 = 1;
+        var total_type: i32 = 1;
+        if (elem.parent) |par| {
+            var i: i32 = 0;
+            var it: i32 = 0;
+            for (par.children.items) |n| {
+                if (n != .element) continue;
+                i += 1;
+                const same = std.ascii.eqlIgnoreCase(n.element.tag, elem.tag);
+                if (same) it += 1;
+                if (n.element == elem) {
+                    pos = i;
+                    pos_type = it;
+                }
+            }
+            total = i;
+            total_type = it;
+        }
+        return switch (ps.kind) {
+            .first_child => pos == 1,
+            .last_child => pos == total,
+            .only_child => total == 1,
+            .nth_child => nthMatches(pos, ps.a, ps.b),
+            .first_of_type => pos_type == 1,
+            .last_of_type => pos_type == total_type,
+            .only_of_type => total_type == 1,
+            .nth_of_type => nthMatches(pos_type, ps.a, ps.b),
+        };
+    }
+
+    /// True when 1-based `idx` satisfies `an + b` for some integer `n >= 0`.
+    fn nthMatches(idx: i32, a: i32, b: i32) bool {
+        if (a == 0) return idx == b;
+        const diff = idx - b;
+        if (@rem(diff, a) != 0) return false;
+        return @divTrunc(diff, a) >= 0;
     }
 
     /// CSS Selectors §6: test an attribute value `v` against a parsed
@@ -585,6 +658,37 @@ pub const Document = struct {
                 }
                 continue;
             }
+            if (ch == ':') {
+                // Pseudo-element (`::x`) — unsupported, never matches.
+                if (i + 1 < token.len and token[i + 1] == ':') {
+                    out.never_match = true;
+                    i += 2;
+                    while (i < token.len and isIdentChar(token[i])) : (i += 1) {}
+                    continue;
+                }
+                var p = i + 1;
+                const nstart = p;
+                while (p < token.len and isIdentChar(token[p])) : (p += 1) {}
+                const name = token[nstart..p];
+                var arg: ?[]const u8 = null;
+                if (p < token.len and token[p] == '(') {
+                    const astart = p + 1;
+                    var d: i32 = 1;
+                    p += 1;
+                    while (p < token.len and d > 0) : (p += 1) {
+                        if (token[p] == '(') d += 1 else if (token[p] == ')') d -= 1;
+                    }
+                    const aend = if (p > 0) p - 1 else 0;
+                    arg = std.mem.trim(u8, token[astart..@min(aend, token.len)], " \t\n\r");
+                }
+                if (structuralPseudo(name, arg)) |ps| {
+                    out.pseudos.append(alloc, ps) catch {};
+                } else {
+                    out.never_match = true; // state pseudo-class / unknown
+                }
+                i = p;
+                continue;
+            }
             if (ch == '[') {
                 i += 1;
                 const start = i;
@@ -645,6 +749,67 @@ pub const Document = struct {
             i += 1;
         }
         return out;
+    }
+
+    /// Parse a structural pseudo-class name (+ optional `an+b` argument) into
+    /// a `Pseudo`, or null for unsupported pseudo-classes.
+    fn structuralPseudo(name: []const u8, arg: ?[]const u8) ?Pseudo {
+        if (std.ascii.eqlIgnoreCase(name, "first-child")) return .{ .kind = .first_child };
+        if (std.ascii.eqlIgnoreCase(name, "last-child")) return .{ .kind = .last_child };
+        if (std.ascii.eqlIgnoreCase(name, "only-child")) return .{ .kind = .only_child };
+        if (std.ascii.eqlIgnoreCase(name, "first-of-type")) return .{ .kind = .first_of_type };
+        if (std.ascii.eqlIgnoreCase(name, "last-of-type")) return .{ .kind = .last_of_type };
+        if (std.ascii.eqlIgnoreCase(name, "only-of-type")) return .{ .kind = .only_of_type };
+        if (std.ascii.eqlIgnoreCase(name, "nth-child")) {
+            const ab = parseNth(arg orelse return null) orelse return null;
+            return .{ .kind = .nth_child, .a = ab[0], .b = ab[1] };
+        }
+        if (std.ascii.eqlIgnoreCase(name, "nth-of-type")) {
+            const ab = parseNth(arg orelse return null) orelse return null;
+            return .{ .kind = .nth_of_type, .a = ab[0], .b = ab[1] };
+        }
+        return null;
+    }
+
+    /// Parse an `An+B` micro-syntax (`odd`, `even`, `n`, `2n+1`, `-n+3`, `5`)
+    /// into `[a, b]`, or null if malformed.
+    fn parseNth(raw: []const u8) ?[2]i32 {
+        var buf: [32]u8 = undefined;
+        var n: usize = 0;
+        for (raw) |ch| {
+            if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') continue;
+            if (n >= buf.len) return null;
+            buf[n] = ch;
+            n += 1;
+        }
+        const s = buf[0..n];
+        if (s.len == 0) return null;
+        if (std.ascii.eqlIgnoreCase(s, "odd")) return .{ 2, 1 };
+        if (std.ascii.eqlIgnoreCase(s, "even")) return .{ 2, 0 };
+
+        var npos: ?usize = null;
+        for (s, 0..) |ch, idx| {
+            if (ch == 'n' or ch == 'N') {
+                npos = idx;
+                break;
+            }
+        }
+        if (npos) |np| {
+            var a: i32 = 1;
+            const acoef = s[0..np];
+            if (acoef.len == 0 or std.mem.eql(u8, acoef, "+")) {
+                a = 1;
+            } else if (std.mem.eql(u8, acoef, "-")) {
+                a = -1;
+            } else {
+                a = std.fmt.parseInt(i32, acoef, 10) catch return null;
+            }
+            var b: i32 = 0;
+            if (np + 1 < s.len) b = std.fmt.parseInt(i32, s[np + 1 ..], 10) catch return null;
+            return .{ a, b };
+        }
+        const b = std.fmt.parseInt(i32, s, 10) catch return null;
+        return .{ 0, b };
     }
 
     fn isIdentStart(ch: u8) bool {
