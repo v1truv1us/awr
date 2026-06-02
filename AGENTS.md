@@ -29,7 +29,7 @@ Execution specs:
   TUI parity — form fields, focus, keyboard input, history, URL bar,
   cookie inspector, browser-cookie import)
 - Deferred tracks: `spec/subspecs/mcp-stdio.md`, `spec/Fingerprint-Plan.md`
-- Historical/background docs: `MVP_PLAN.md`, `MVP_BACKLOG.md`, `spec/PRD.md`
+- Historical/background docs: `archive/MVP_PLAN.md`, `archive/MVP_BACKLOG.md`, `spec/PRD.md`
 - Governance ADR: `docs/adr/0001-spec-governance.md`
 
 Change control rule:

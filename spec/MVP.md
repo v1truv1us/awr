@@ -80,8 +80,8 @@ sub-specs; they're created when promoted to ACTIVE.
 | Document | Role |
 |---|---|
 | `spec/PRD.md` | Product context and rationale; not execution authority |
-| `MVP_PLAN.md` | Historical record of the earlier WebMCP/browser slice |
-| `MVP_BACKLOG.md` | Pre-consolidation backlog snapshot; not current priority authority |
+| `archive/MVP_PLAN.md` | Historical record of the earlier WebMCP/browser slice |
+| `archive/MVP_BACKLOG.md` | Pre-consolidation backlog snapshot; not current priority authority |
 
 ---
 

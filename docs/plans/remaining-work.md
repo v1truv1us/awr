@@ -192,13 +192,15 @@ pipe-masked): `zig build` green; `test-wpt` 128 cases / 0 failures; `test-cssom`
 `test-h2` 61/61; `test-dom` 38/38; `test-js` 81/82 (1 skipped).
 
 ### Open decisions for the maintainer
-1. **MCP promotion (governance).** Track E's `src/mcp_stdio.zig` is real, tested,
-   and now on `main`, but `spec/MVP.md §7` + `spec/subspecs/mcp-stdio.md` still
-   classify the track DEFERRED. Decide: formally promote via a `spec/MVP.md §8`
-   amendment, or keep as present-but-not-promoted.
+1. **MCP — PARKED (not now).** Track E's `src/mcp_stdio.zig` exists on `main` and
+   is tested, but the MCP stdio server is **deferred and intentionally not a
+   current priority** — it only becomes interesting much further along, once the
+   reading-browser surface (P1 below) and any Tier 4 decision are settled. Leave
+   it parked: `spec/MVP.md §7` + `spec/subspecs/mcp-stdio.md` keep it DEFERRED, no
+   promotion now. Do **not** treat it as active work.
 2. **Tier 4 path.** Track B's four evidence docs are ready; the ADR 0003
-   amendment (path A/B/C, or "defer again in favor of Brotli") is the maintainer's
-   call.
+   amendment (path A/B/C, or "defer again in favor of P1") is the maintainer's
+   call. Evidence says no tested site is blocked by layout (see §6).
 
 ### New follow-up tracks surfaced
 - **Track G — Brotli response decode** *(OPEN, high value, ~bounded)*. AWR
@@ -208,14 +210,66 @@ pipe-masked): `zig build` green; `test-wpt` 128 cases / 0 failures; `test-cssom`
   (Track B target-site audit). Adding a Brotli decoder unblocks more real pages
   than Tier 4 and is fingerprint-safe (no header change). This is the strongest
   evidence-backed candidate for the next near-term slice.
-- **Corpus hermeticity / re-bless** *(OPEN, small)*. `test-corpus`'s
-  `wikipedia_octopus` fixture live-fetches Wikipedia; the page drifted
-  (99495 → 87421 bytes) so the snapshot is stale and the gate is red on `main`
-  (pre-existing, not a regression — confirmed byte-identical on base `8b85b66`).
-  Re-bless the snapshot and/or make corpus fixtures hermetic so an external site
-  can't redden the gate.
+- **Corpus re-bless** *(OPEN, small — in progress)*. The corpus is **hermetic**
+  (every fixture renders an embedded `@embedFile`'d `.html`, no network — verified
+  2026-06-02). `test-corpus`'s `wikipedia_octopus` snapshot is **stale** relative
+  to the current renderer (`99495` expected vs `~87.9K` produced) — an earlier
+  render change was never re-blessed; it has been red on `main` since before the
+  2026-06-01 work and is not a regression. Fix = re-bless the snapshot.
 
 ### Remaining Track A slices (still no-layout)
 `:has()`, `@supports`, `@import`, `calc()` for non-layout values, and inheritance
 edge cases — each a failing→passing `tests/wpt/css_*.js`, stopping at the first
 property that needs geometry.
+
+---
+
+## 6. Validated path to a "full terminal browser"
+
+> Grounded in `docs/research/2026-06-01-tier4-*` (target-site + WPT-delta audits)
+> and live observations on 2026-06-02 (TUI CRLF fix, Ghostty→kitty, SVG/image
+> findings). "Full terminal browser" = the **readable web for humans + agents**,
+> not Chromium parity.
+
+**Already excellent (don't re-litigate):** Tiers 0–3 + the 2026-06-02 TUI fixes.
+HN, GitHub, Stack Overflow, old.reddit all render cleanly; forms, history,
+storage, WebSocket/SSE, CSSOM cascade, JS all work.
+
+### P1 — Reach & fidelity (cheap, high-impact, mostly non-layout) ← do next
+1. **Brotli decode** *(highest ROI)*. Google, Google Search, Discourse return
+   HTTP 200 but undecoded Brotli — AWR advertises `br` (fingerprint) but only
+   decodes gzip/deflate/zstd (`src/net/http1.zig:66`). Bounded networking fix;
+   unblocks major sites; not layout.
+2. **SVG handling.** stb_image is raster-only; SVG sources (HN's `y18.svg`) →
+   a 1×1 placeholder blob. Minimum: degrade gracefully (skip/alt-text, not a
+   degenerate blob); ideal: a rasterizer.
+3. **Image vertical row-height.** A kitty image occupies `r` cell rows but the
+   render model counts it as one logical line → rows after an image space oddly
+   (the item-8 gap on HN). Renderer-layer fix, not a layout engine.
+4. **Renderer whitespace polish.** GitHub's extracted text carries excess
+   structural whitespace (renderer-heuristic).
+
+**Key finding:** the target-site audit found **no tested site is blocked by
+layout** — only Brotli (network), anti-bot (out of scope), and renderer polish.
+The P1 cluster makes AWR a great daily-driver reader **without** the Tier 4
+investment.
+
+### P2 — Tier 4 layout engine (bounded, ADR-gated)
+Small, well-bounded surface (per WPT-delta audit): CSS-pixel
+`getBoundingClientRect`, `IntersectionObserver`/`ResizeObserver`, flexbox/grid,
+box model, scroll geometry (`scrollTo` is a no-op today). Needed for JS that
+**reads geometry to render** and **scroll-driven lazy-loading** — not basic
+readability. Gated on `docs/adr/0003`; packaging evidence favors Path C
+(native Zig) if pursued, but argues P1-first.
+
+### P3 — Tier 5 SPA parity (deferred, after Tier 4)
+Service Workers, IndexedDB, full `crypto.subtle`, Workers — X/Slack/Notion-class
+apps. Only sensible after Tier 4. (MCP stdio, §"Open decisions", is also parked
+in this far-out bucket.)
+
+### Permanently out of scope
+Per-site anti-bot (Cloudflare / new-reddit challenges), WebGL/WebGPU/Canvas
+pixels, `<video>`/`<audio>` playback, WebRTC (`browser-roadmap.md §5`).
+
+### Recommended sequence
+**P1 cluster → (then decide) Tier 4 via ADR 0003 → Tier 5.** Brotli first.

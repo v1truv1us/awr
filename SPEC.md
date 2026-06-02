@@ -36,9 +36,9 @@ This is the entry point for AWR product and engineering scope. If a document con
 
 6. **Background only**
    - `spec/PRD.md`
-   - `spec/MVP-Review.md`
-   - `MVP_PLAN.md`
-   - `MVP_BACKLOG.md`
+   - `archive/MVP-Review.md` (archived 2026-06-02)
+   - `archive/MVP_PLAN.md`
+   - `archive/MVP_BACKLOG.md`
 
 ## ADRs
 
