@@ -1,0 +1,144 @@
+# GOAL — Complete the readable-terminal-browser cluster
+
+> Executable goal/backlog. Rationale + evidence: `docs/plans/remaining-work.md §6`.
+> Source of truth for the self-paced work loop. Each task is independently
+> verifiable; the loop does ONE task per iteration, commits it, checks it off,
+> and stops when every task is `[x]` or a guardrail trips.
+
+## Definition of done
+
+All tasks below are `[x]`, and on `main`:
+- `zig build` is green; both `awr` and `awrd` build.
+- `zig build test-tls` and `zig build test-h2` are green (Chrome-132 fingerprint
+  intact) — **non-negotiable**.
+- Each task's targeted gate (below) is green.
+- The only acceptable red in `zig build test` is `corpus[wikipedia_octopus]`
+  (owned by a separate worktree; see Coordination) — **no other** corpus
+  fixture is red, and no NEW corpus fixture is reddened without a justified
+  re-bless.
+
+## Guardrails (apply every iteration)
+
+1. **Fingerprint is sacred.** Never touch `src/net/` header order, cipher order,
+   ALPN, or HTTP/2 SETTINGS. Run `zig build test-tls` + `test-h2` before every
+   commit; if either goes red, revert the change.
+2. **Governance.** Do not change `spec/MVP.md`, `spec/subspecs/*`, or `docs/adr/*`
+   scope/authority. If a task seems to require promoting a deferred track or
+   changing a spec boundary, STOP and surface it — don't do it in the loop.
+3. **Coordination.** A separate worktree owns `tests/corpus/fixtures/` (the
+   `wikipedia_octopus` re-bless). Do NOT edit corpus fixtures except to re-bless
+   one your own change legitimately altered — and then only with a one-line diff
+   justification in the commit. Never re-bless `wikipedia_octopus`.
+4. **Commit discipline.** For each task: branch off `main`
+   (`fix/<task-id>` or `feat/<task-id>`), implement, add/extend a co-located
+   test that fails before and passes after, run the gates, `zig fmt src/`,
+   commit, fast-forward `main`. Check the task off in this file in the same
+   commit.
+5. **Verify, don't assume.** Real exit codes (no pipe-masking). Where a terminal
+   effect is involved, validate with the PTY/strict-VT approach already proven in
+   this repo (parse rendered cursor position, not just the byte stream).
+6. **Stop conditions.** Stop the loop and surface to the user if: a gate can't be
+   made green after a reasonable attempt; a task is ambiguous; a fix would need to
+   break a guardrail; or all tasks are done.
+7. **Conventions.** Match existing style: `///` doc comments, co-located tests,
+   explicit allocators, `errdefer`. Surgical changes only.
+
+## Coordination state
+
+- `wikipedia_octopus` corpus re-bless → **owned by another worktree.** Excluded
+  from this goal.
+- MCP stdio → **PARKED** (deferred, not now). Not in this goal.
+- Tier 4 layout / Tier 5 SPA → **out of this goal** (ADR-gated; this goal is the
+  P1 readable-browser cluster only).
+
+---
+
+## Tasks (do in order)
+
+### [ ] T1 — `tabindex` / `role=button` focusability
+**Why:** Elements made focusable via `tabindex="0"` (or `role="button"`, or a
+styled `<a>` without `href`) aren't in the Tab order — only links + native form
+controls are. Blocks flows like "create an account" on
+`research.v1truc1us.dev/login`. `render.zig` has zero `tabindex` handling today.
+**Files:** `src/render.zig` (focus/field registration), `src/browser.zig`
+(focus traversal + Enter activation + focus highlight), maybe `src/dom/`.
+**Approach:** register elements with `tabindex >= 0` (and `role="button"`) as
+focusable targets; Enter activates (click semantics) like a button/link; honor
+positive-`tabindex` ordering before `tabindex=0`/DOM order; give non-field
+focusables a visible focus indicator.
+**Done-criteria / verify:** a co-located test asserts a `tabindex=0` `<div>` and
+a `role=button` element appear in the focus order and activate on Enter;
+`zig build test-tui` (or the co-located tests under `zig build test`) green;
+`test-tls`/`test-h2` green. Manual: a PTY drive that Tab reaches the synthetic
+focusable.
+
+### [ ] T2 — App-shell render fallback (don't blank out non-article pages)
+**Why:** `awr render`/`browse` shows only `[Navigation omitted]`/`[Footer
+omitted]` on app-shell pages (e.g. `audiofile.app`) while `awr <url>` (agent)
+has the real `body_text`. The readability picker (`browse_heuristics.zig`) is
+article-tuned and drops content not under `<main>`/`<article>`.
+**Files:** `src/browse_heuristics.zig`, possibly `src/page.zig`/`src/render.zig`.
+**Approach:** when the picked content root renders to near-empty (e.g. visible
+text below a small threshold while the full `<body>` has substantially more),
+fall back to rendering the full `<body>` so the shell (nav links, "Sign in",
+headings) is always visible.
+**Done-criteria / verify:** a co-located test with an app-shell DOM (content in
+plain `<div>`s, no `<main>`) asserts the rendered output contains the shell text
+instead of only omit-markers; existing article-page corpus fixtures still pass
+(re-bless only with justification, never `wikipedia_octopus`); `test-tls`/`h2`
+green.
+
+### [ ] T3 — Brotli response decode
+**Why:** AWR advertises `br` in `Accept-Encoding` (fingerprint) but only decodes
+gzip/deflate/zstd (`src/net/http1.zig:66`), so Google/Discourse return 200 but
+undecoded bytes. Highest-reach P1 item.
+**Files:** the decompression path (`src/client.zig` / `src/net/`), **without**
+touching header/fingerprint emission.
+**Approach:** add a Brotli decoder for `Content-Encoding: br` on all three fetch
+paths (stdlib H1, BoringSSL H1, H2), mirroring the existing gzip/zstd handling.
+Use an available Brotli implementation; do not alter `Accept-Encoding`.
+**Done-criteria / verify:** a round-trip unit test (pre-compressed Brotli bytes →
+decoded) like the existing gzip/zstd tests; `zig build test-client`/`test-net`
+green; `test-tls`/`test-h2` green (headers unchanged); manual: `awr https://www.google.com/`
+returns readable text, not binary.
+
+### [ ] T4 — SVG graceful degradation
+**Why:** stb_image is raster-only; SVG sources (HN's `y18.svg`) become a 1×1
+placeholder blob. Should degrade to alt-text / skip, not a degenerate image.
+**Files:** `src/image/pipeline.zig` / `decode.zig` (detect SVG/unsupported and
+skip → alt-text path instead of emitting a 1×1 image).
+**Done-criteria / verify:** a test that an SVG (or undecodable) `<img>` yields
+the alt-text/footnote fallback, not a 1×1 image emit; `test-image` green.
+
+### [ ] T5 — Image vertical row-height accounting
+**Why:** a kitty/iterm image occupies `r` cell rows but the render model counts
+it as one logical line, so rows after an image space oddly (the item-8 gap).
+**Files:** `src/render.zig` (image line modeling), `src/browser.zig` (draw line
+accounting), `src/image/`.
+**Approach:** reserve the image's `r` rows in the render model's line count so
+following content lays out below the image, not over it.
+**Done-criteria / verify:** a test asserting an image line reserves its rows;
+`test-image`/`test-tui` green; manual PTY check that content after an image
+doesn't overlap.
+
+### [ ] T6 — Renderer whitespace polish
+**Why:** extracted text (e.g. GitHub) carries excess structural whitespace
+(renderer-heuristic), per the target-site audit.
+**Files:** `src/render.zig` (whitespace collapsing in the flow path).
+**Done-criteria / verify:** a test on a whitespace-heavy DOM asserts collapsed
+output; corpus fixtures still pass (re-bless with justification if improved);
+`test-tls`/`h2` green.
+
+---
+
+## Loop protocol (what each iteration does)
+
+1. Read this file; pick the first `[ ]` task in order.
+2. If none remain → announce DONE and stop.
+3. Branch off `main`; implement per the task's Approach.
+4. Add/extend the failing→passing test; run the task's gate + `test-tls` +
+   `test-h2` with real exit codes; `zig fmt src/`.
+5. If green: check the task `[x]`, commit (code + this file), fast-forward
+   `main`. If not green after a reasonable attempt, or a guardrail would break,
+   or it's ambiguous → STOP and surface.
+6. Continue to the next task.
