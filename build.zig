@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
     const test_test262_step = b.step("test-test262", "Run curated Test262 JS runtime tests");
     const test_corpus_step = b.step("test-corpus", "Run real-page render-quality corpus harness");
     const test_image_step = b.step("test-image", "Run image decoder + protocol + cache tests");
+    const test_tui_step = b.step("test-tui", "Run src/tui raw-terminal + escape-parser tests");
     const test_cssom_step = b.step("test-cssom", "Run starter CSSOM parser/cascade tests");
     const test_doc_step = b.step("test-doc", "Run \xc2\xa78 \xe2\x86\x94 curated_cases doc-alignment check");
     const test_integration_step = b.step("test-integration", "Run binary-spawning Zig integration tests (requires built awr/awrd binaries)");
@@ -1018,6 +1019,24 @@ pub fn build(b: *std.Build) void {
         const run_image_protocol = b.addRunArtifact(image_protocol_test);
         test_image_step.dependOn(&run_image_protocol.step);
         test_step.dependOn(&run_image_protocol.step);
+
+        // src/tui.zig — raw-terminal I/O + escape-sequence parser. Pure-Zig;
+        // needs libc only for the termios/ioctl C imports. The escape parser
+        // is exercised headlessly via a fake byte source (no real TTY), which
+        // is what guards the DA-reply-as-keystroke regression.
+        const tui_mod = b.createModule(.{
+            .root_source_file = b.path("src/tui.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        const tui_test = b.addTest(.{
+            .name = "tui",
+            .root_module = tui_mod,
+        });
+        const run_tui = b.addRunArtifact(tui_test);
+        test_tui_step.dependOn(&run_tui.step);
+        test_step.dependOn(&run_tui.step);
 
         // src/image/braille.zig — pure-Zig 2×4 braille downsampler.
         // Imports decode.zig for the Image type, so it transitively

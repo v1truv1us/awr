@@ -1,3 +1,14 @@
+/// Raw terminal I/O for the TUI browser surface.
+///
+/// Owns the termios switch into raw mode, fullscreen alt-screen control,
+/// terminal size queries, and the key/escape-sequence reader. The escape
+/// parser is split into a pure `parseKeyFrom` helper (generic over a byte
+/// source) so it can be unit-tested headlessly without a real TTY — see the
+/// co-located tests at the bottom of this file. This matters because a real
+/// terminal answers startup queries (Device Attributes, cursor position,
+/// bracketed paste) that a headless PTY never sends; the parser must fully
+/// consume those CSI sequences instead of leaking their trailing bytes (e.g.
+/// the `c` that terminates a DA1 reply) as stray keystrokes.
 const std = @import("std");
 
 const c = @cImport({
@@ -55,6 +66,16 @@ pub const Terminal = struct {
 
         if (c.tcsetattr(stdin_file.handle, c.TCSAFLUSH, &raw) != 0) return error.TermiosUnavailable;
 
+        // Discard any bytes already sitting in the TTY input buffer before the
+        // key loop starts. A real terminal answers startup queries — most
+        // notably the Sixel Device-Attributes probe (`ESC [ c`) that runs
+        // before the TUI launches — and a fragmented or late DA reply can
+        // leave residual bytes (including the trailing `c`) in the buffer. The
+        // run loop would otherwise read that `c` as the open-cookie-inspector
+        // keystroke. Flushing here is the primary, reliable guard; the escape
+        // parser below is the belt-and-suspenders backstop.
+        _ = c.tcflush(stdin_file.handle, c.TCIFLUSH);
+
         var terminal = Terminal{
             .stdin_file = stdin_file,
             .stdout_file = stdout_file,
@@ -105,29 +126,7 @@ pub const Terminal = struct {
     /// path SIGWINCH-equivalent resize events (iOS↔SSH↔tmux) are invisible to
     /// the renderer until the next keystroke arrives.
     pub fn readKeyTimeout(self: *Terminal, timeout_ms: i32) !?Key {
-        const first = (try self.readByteWithTimeout(timeout_ms)) orelse return null;
-        switch (first) {
-            0x03, 0x04 => return .interrupt,
-            '\r', '\n' => return .enter,
-            0x7f, 0x08 => return .backspace,
-            '\t' => return .tab,
-            0x1b => {
-                const second = (try self.readByteWithTimeout(25)) orelse return .escape;
-                if (second == '[') {
-                    const third = (try self.readByteWithTimeout(25)) orelse return .escape;
-                    return switch (third) {
-                        'A' => .arrow_up,
-                        'B' => .arrow_down,
-                        'C' => .arrow_right,
-                        'D' => .arrow_left,
-                        'Z' => .shift_tab,
-                        else => .escape,
-                    };
-                }
-                return .escape;
-            },
-            else => return .{ .char = first },
-        }
+        return parseKeyFrom(self, timeout_ms);
     }
 
     fn readByte(self: *Terminal) !u8 {
@@ -148,3 +147,144 @@ pub const Terminal = struct {
         return try self.readByte();
     }
 };
+
+/// Decode one key from `source`, which must expose
+/// `readByteWithTimeout(i32) !?u8`. Generic over the source so the escape
+/// parser is testable without a real TTY (the tests pass a byte-slice fake).
+///
+/// `timeout_ms` bounds only the *first* byte; continuation bytes of an escape
+/// sequence use a short fixed window so a lone `ESC` keypress still resolves
+/// to `.escape`. Returns null when the first byte times out.
+///
+/// CSI handling is the load-bearing part: a full `ESC [ <params> <final>`
+/// sequence is consumed to its final byte (`0x40..=0x7e`) and mapped to a
+/// non-char token. Only the cursor/navigation finals (`A`/`B`/`C`/`D`/`Z`)
+/// produce arrow/shift-tab keys; every other sequence — including a Device
+/// Attributes reply such as `ESC [ ? 6 2 ; 1 ; 6 c` — is fully drained and
+/// reported as `.escape`, never leaking its terminator (here `c`) as a
+/// `.char` keystroke.
+fn parseKeyFrom(source: anytype, timeout_ms: i32) !?Key {
+    const first = (try source.readByteWithTimeout(timeout_ms)) orelse return null;
+    switch (first) {
+        0x03, 0x04 => return .interrupt,
+        '\r', '\n' => return .enter,
+        0x7f, 0x08 => return .backspace,
+        '\t' => return .tab,
+        0x1b => {
+            const second = (try source.readByteWithTimeout(25)) orelse return .escape;
+            if (second != '[') return .escape;
+            return try parseCsi(source);
+        },
+        else => return .{ .char = first },
+    }
+}
+
+/// Consume the body of a CSI sequence after the leading `ESC [` has been read.
+/// Reads intermediate/parameter bytes (`0x20..=0x3f`) until a final byte
+/// (`0x40..=0x7e`) arrives, then maps the recognized cursor finals to keys and
+/// everything else to `.escape`. A truncated sequence (timeout before a final
+/// byte) also resolves to `.escape`. The key invariant: no byte of a CSI
+/// sequence is ever returned as a `.char`.
+fn parseCsi(source: anytype) !Key {
+    var final: u8 = (try source.readByteWithTimeout(25)) orelse return .escape;
+    // Skip parameter and intermediate bytes (digits, `;`, `?`, `<`, etc.).
+    while (final >= 0x20 and final <= 0x3f) {
+        final = (try source.readByteWithTimeout(25)) orelse return .escape;
+    }
+    return switch (final) {
+        'A' => .arrow_up,
+        'B' => .arrow_down,
+        'C' => .arrow_right,
+        'D' => .arrow_left,
+        'Z' => .shift_tab,
+        else => .escape,
+    };
+}
+
+// ── Tests ───────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+/// Headless byte source for the escape parser. Replays a fixed slice one
+/// byte per `readByteWithTimeout` call, returning null (timeout) once the
+/// slice is drained — mirroring how a real TTY runs dry mid-sequence.
+const FakeSource = struct {
+    bytes: []const u8,
+    pos: usize = 0,
+
+    fn readByteWithTimeout(self: *FakeSource, timeout_ms: i32) !?u8 {
+        _ = timeout_ms;
+        if (self.pos >= self.bytes.len) return null;
+        const b = self.bytes[self.pos];
+        self.pos += 1;
+        return b;
+    }
+};
+
+fn parseAll(allocator: std.mem.Allocator, bytes: []const u8) ![]Key {
+    var src = FakeSource{ .bytes = bytes };
+    var keys: std.ArrayList(Key) = .empty;
+    errdefer keys.deinit(allocator);
+    while (try parseKeyFrom(&src, 25)) |key| {
+        try keys.append(allocator, key);
+    }
+    return keys.toOwnedSlice(allocator);
+}
+
+test "parseKeyFrom: DA reply is fully consumed, never yields char 'c'" {
+    // This is the regression guard for the cookie-inspector-on-launch bug:
+    // a real terminal's Device Attributes reply (ESC [ ? 6 2 ; 1 ; 6 c) used
+    // to leak its trailing `c` into the key loop, which bound `c` to "open
+    // cookie inspector". The whole sequence must collapse to a single,
+    // non-char `.escape` token.
+    const keys = try parseAll(testing.allocator, "\x1b[?62;1;6c");
+    defer testing.allocator.free(keys);
+
+    try testing.expectEqual(@as(usize, 1), keys.len);
+    try testing.expectEqual(Key.escape, keys[0]);
+    for (keys) |k| {
+        try testing.expect(k != .char);
+    }
+}
+
+test "parseKeyFrom: plain 'c' still reaches the key loop as char 'c'" {
+    // The fix must not swallow a genuine `c` keypress (cookie inspector
+    // binding); only DA-style escape sequences are consumed.
+    const keys = try parseAll(testing.allocator, "c");
+    defer testing.allocator.free(keys);
+
+    try testing.expectEqual(@as(usize, 1), keys.len);
+    try testing.expectEqual(Key{ .char = 'c' }, keys[0]);
+}
+
+test "parseKeyFrom: arrow keys and shift-tab still decode" {
+    const keys = try parseAll(testing.allocator, "\x1b[A\x1b[B\x1b[C\x1b[D\x1b[Z");
+    defer testing.allocator.free(keys);
+
+    try testing.expectEqual(@as(usize, 5), keys.len);
+    try testing.expectEqual(Key.arrow_up, keys[0]);
+    try testing.expectEqual(Key.arrow_down, keys[1]);
+    try testing.expectEqual(Key.arrow_right, keys[2]);
+    try testing.expectEqual(Key.arrow_left, keys[3]);
+    try testing.expectEqual(Key.shift_tab, keys[4]);
+}
+
+test "parseKeyFrom: DA reply followed by a real keystroke isolates the key" {
+    // Even if a DA reply and a user keystroke arrive back to back, the `j`
+    // (scroll-down) must survive as its own char and not be merged into or
+    // shadowed by the escape sequence.
+    const keys = try parseAll(testing.allocator, "\x1b[?62;1;6cj");
+    defer testing.allocator.free(keys);
+
+    try testing.expectEqual(@as(usize, 2), keys.len);
+    try testing.expectEqual(Key.escape, keys[0]);
+    try testing.expectEqual(Key{ .char = 'j' }, keys[1]);
+}
+
+test "parseKeyFrom: lone ESC resolves to escape" {
+    const keys = try parseAll(testing.allocator, "\x1b");
+    defer testing.allocator.free(keys);
+
+    try testing.expectEqual(@as(usize, 1), keys.len);
+    try testing.expectEqual(Key.escape, keys[0]);
+}
