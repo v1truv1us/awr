@@ -2020,7 +2020,7 @@ pub fn drawFrame(
 
     try writer.writeAll("\x1b[7m\x1b[1m"); // REVERSE + BOLD
     try writeClippedLine(writer, cols, header_line.items);
-    try writer.writeAll("\x1b[0m\n");
+    try writer.writeAll("\x1b[0m\r\n");
 
     // T-83: when a `<select>` picker is open it replaces the body
     // area entirely so the user's attention is on the option list.
@@ -2048,7 +2048,7 @@ pub fn drawFrame(
                 var hi = sh.header_line_start;
                 while (hi < sh.header_line_end and sticky_lines < viewport_height) : (hi += 1) {
                     try writeClippedLine(writer, size.cols, screen_model.lineText(hi));
-                    try writer.writeAll("\x1b[K\n");
+                    try writer.writeAll("\x1b[K\r\n");
                     sticky_lines += 1;
                 }
                 break; // at most one sticky header at a time
@@ -2061,7 +2061,7 @@ pub fn drawFrame(
             if (line_index < screen_model.lines.len) {
                 try writeClippedLine(writer, size.cols, screen_model.lineText(line_index));
             }
-            try writer.writeAll("\x1b[K\n");
+            try writer.writeAll("\x1b[K\r\n");
         }
     } else {
         try drawWelcome(writer, size.cols, viewport_height);
@@ -2116,7 +2116,7 @@ fn drawHelpOverlay(writer: anytype, cols: usize, viewport_height: usize) !void {
     var title_buf: [64]u8 = undefined;
     const title = std.fmt.bufPrint(&title_buf, "{s}{s} AWR keybindings {s}", .{ REVERSE, BOLD, RESET }) catch " AWR keybindings ";
     try writeClippedLine(writer, cols, title);
-    try writer.writeAll("\x1b[K\n");
+    try writer.writeAll("\x1b[K\r\n");
 
     const max_rows = if (viewport_height > 2) viewport_height - 2 else 1;
     var shown: usize = 0;
@@ -2125,12 +2125,12 @@ fn drawHelpOverlay(writer: anytype, cols: usize, viewport_height: usize) !void {
         var row_buf: [160]u8 = undefined;
         const line = std.fmt.bufPrint(&row_buf, "  {s}{s:<16}{s} {s}", .{ BOLD, rows[idx][0], RESET, rows[idx][1] }) catch rows[idx][1];
         try writeClippedLine(writer, cols, line);
-        try writer.writeAll("\x1b[K\n");
+        try writer.writeAll("\x1b[K\r\n");
         shown += 1;
     }
 
     while (shown < max_rows) : (shown += 1) {
-        try writer.writeAll("\x1b[K\n");
+        try writer.writeAll("\x1b[K\r\n");
     }
 
     var hint_buf: [64]u8 = undefined;
@@ -2168,7 +2168,7 @@ fn drawSelectPicker(
     try writer.writeAll(BOLD);
     try writeClippedLine(writer, cols, "Select an option — ↑/↓ to move · Enter to pick · Esc to cancel");
     try writer.writeAll(RESET);
-    try writer.writeAll("\x1b[K\n");
+    try writer.writeAll("\x1b[K\r\n");
     row += 1;
 
     // List rows.
@@ -2176,7 +2176,7 @@ fn drawSelectPicker(
     while (i < list_rows) : (i += 1) {
         const opt_idx = top + i;
         if (opt_idx >= picker.options.len) {
-            try writer.writeAll("\x1b[K\n");
+            try writer.writeAll("\x1b[K\r\n");
             row += 1;
             continue;
         }
@@ -2188,13 +2188,13 @@ fn drawSelectPicker(
         try writer.writeAll(" ");
         try writeClippedLine(writer, if (cols > 4) cols - 4 else cols, opt.label);
         if (opt_idx == picker.cursor) try writer.writeAll(RESET);
-        try writer.writeAll("\x1b[K\n");
+        try writer.writeAll("\x1b[K\r\n");
         row += 1;
     }
 
     // Pad remaining rows so the frame fills the viewport.
     while (row < viewport_height - 1) : (row += 1) {
-        try writer.writeAll("\x1b[K\n");
+        try writer.writeAll("\x1b[K\r\n");
     }
     // Status hint as the last row.
     try writer.writeAll(DIM);
@@ -2202,7 +2202,7 @@ fn drawSelectPicker(
     const hint = std.fmt.bufPrint(&hint_buf, "{d}/{d} options", .{ picker.cursor + 1, picker.options.len }) catch "";
     try writeClippedLine(writer, cols, hint);
     try writer.writeAll(RESET);
-    try writer.writeAll("\x1b[K\n");
+    try writer.writeAll("\x1b[K\r\n");
 }
 
 fn viewportHeight(size: tui.Size) usize {
@@ -2250,7 +2250,7 @@ fn drawCookieInspector(
     const title = std.fmt.bufPrint(&title_buf, "Cookies for {s} — d delete · C clear all · q close", .{ci.origin_host}) catch "Cookies";
     try writeClippedLine(writer, cols, title);
     try writer.writeAll(RESET);
-    try writer.writeAll("\x1b[K\n");
+    try writer.writeAll("\x1b[K\r\n");
 
     if (ci.confirm_clear_all) {
         // Confirmation overlay — replace the table area entirely so
@@ -2258,7 +2258,7 @@ fn drawCookieInspector(
         // fill the viewport so leftover row text doesn't leak through.
         var row: usize = 1;
         const pad_top = if (viewport_height > 5) (viewport_height - 5) / 2 else 0;
-        while (row < pad_top) : (row += 1) try writer.writeAll("\x1b[K\n");
+        while (row < pad_top) : (row += 1) try writer.writeAll("\x1b[K\r\n");
 
         try writer.writeAll(BOLD);
         var prompt_buf: [128]u8 = undefined;
@@ -2271,10 +2271,10 @@ fn drawCookieInspector(
         }
         try writer.writeAll(prompt);
         try writer.writeAll(RESET);
-        try writer.writeAll("\x1b[K\n");
+        try writer.writeAll("\x1b[K\r\n");
         row += 1;
 
-        while (row < viewport_height) : (row += 1) try writer.writeAll("\x1b[K\n");
+        while (row < viewport_height) : (row += 1) try writer.writeAll("\x1b[K\r\n");
         return;
     }
 
@@ -2284,9 +2284,9 @@ fn drawCookieInspector(
         try writer.writeAll(DIM);
         try writeClippedLine(writer, cols, "  (no cookies for this origin)");
         try writer.writeAll(RESET);
-        try writer.writeAll("\x1b[K\n");
+        try writer.writeAll("\x1b[K\r\n");
         var row: usize = 2;
-        while (row < viewport_height) : (row += 1) try writer.writeAll("\x1b[K\n");
+        while (row < viewport_height) : (row += 1) try writer.writeAll("\x1b[K\r\n");
         return;
     }
 
@@ -2317,7 +2317,7 @@ fn drawCookieInspector(
     try writer.writeAll(" ");
     try writeFixed(writer, "flgs", flags_w);
     try writer.writeAll(RESET);
-    try writer.writeAll("\x1b[K\n");
+    try writer.writeAll("\x1b[K\r\n");
 
     // Tally active / session / expired for the footer.
     var _ts: std.posix.timespec = undefined;
@@ -2345,7 +2345,7 @@ fn drawCookieInspector(
     while (i < list_rows) : (i += 1) {
         const ri = top + i;
         if (ri >= ci.rows.items.len) {
-            try writer.writeAll("\x1b[K\n");
+            try writer.writeAll("\x1b[K\r\n");
             continue;
         }
         const r = ci.rows.items[ri];
@@ -2371,7 +2371,7 @@ fn drawCookieInspector(
         flags_buf[3] = ' ';
         try writeFixed(writer, &flags_buf, flags_w);
         if (ri == ci.cursor) try writer.writeAll(RESET);
-        try writer.writeAll("\x1b[K\n");
+        try writer.writeAll("\x1b[K\r\n");
     }
 
     // Footer: classified counts + navigation hints.
@@ -2384,7 +2384,7 @@ fn drawCookieInspector(
     ) catch "";
     try writeClippedLine(writer, cols, hint);
     try writer.writeAll(RESET);
-    try writer.writeAll("\x1b[K\n");
+    try writer.writeAll("\x1b[K\r\n");
 }
 
 /// Write `s` clipped or padded to exactly `width` visible columns.
@@ -2445,7 +2445,7 @@ fn drawWelcome(writer: anytype, cols: usize, viewport_height: usize) !void {
     const block_left: usize = if (cols > block_width) (cols - block_width) / 2 else 0;
 
     var row: usize = 0;
-    while (row < top_pad) : (row += 1) try writer.writeAll("\x1b[K\n");
+    while (row < top_pad) : (row += 1) try writer.writeAll("\x1b[K\r\n");
 
     for (tips) |line| {
         if (row >= viewport_height) break;
@@ -2453,14 +2453,14 @@ fn drawWelcome(writer: anytype, cols: usize, viewport_height: usize) !void {
         row += 1;
     }
 
-    while (row < viewport_height) : (row += 1) try writer.writeAll("\x1b[K\n");
+    while (row < viewport_height) : (row += 1) try writer.writeAll("\x1b[K\r\n");
 }
 
 fn writeWelcomeLine(writer: anytype, cols: usize, left_pad: usize, line: []const u8) !void {
     const pad = @min(left_pad, cols);
     for (0..pad) |_| try writer.writeByte(' ');
     try writeClippedLine(writer, cols - pad, line);
-    try writer.writeAll("\x1b[K\n");
+    try writer.writeAll("\x1b[K\r\n");
 }
 
 /// Read the URL-history capacity from $AWR_URL_HISTORY_LEN with a
