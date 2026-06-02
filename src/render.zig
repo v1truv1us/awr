@@ -687,11 +687,17 @@ fn emitStyleSeq(w: anytype, style: TextStyle) !void {
     try w.writeAll("m");
 }
 
-/// Map a CSS color value to the nearest ANSI-16 foreground SGR code, or null
-/// when unrecognised. Deterministic and allocation-free (Rule 5: routing/
-/// parsing is plain code, not a model call). Bright variants (90-97) are used
-/// for light colors so they read on dark terminals.
-fn cssColorToAnsi(raw: []const u8) ?u8 {
+/// A readable foreground resolution: an ANSI SGR code (or null = terminal
+/// default) plus whether the `dim` attribute should be layered on to preserve
+/// a "subdued/secondary" intent without picking an illegible color.
+const Fg = struct { code: ?u8, dim: bool = false };
+
+/// Map a CSS color value to a readable ANSI-16 foreground, or null when
+/// unrecognised. Deterministic and allocation-free (Rule 5: routing/parsing is
+/// plain code, not a model call). Bright variants (90-97) are used for light
+/// colors so they read on dark terminals; near-black/dark-gray inputs are made
+/// legible by `readableFg` (see its doc comment).
+fn cssColorToAnsi(raw: []const u8) ?Fg {
     const v = std.mem.trim(u8, raw, " \t\n\r");
     if (v.len == 0) return null;
 
@@ -724,11 +730,23 @@ fn cssColorToAnsi(raw: []const u8) ?u8 {
     return null;
 }
 
-/// Drop ANSI black (30) foregrounds: browsers assume a light page background,
-/// but terminals are conventionally dark, where black text is invisible.
-/// Returning null falls back to the terminal's default foreground.
-fn readableFg(code: u8) ?u8 {
-    return if (code == 30) null else code;
+/// Rescue foregrounds that are unreadable on a conventionally dark terminal.
+/// Browsers assume a light page background, but terminals are dark, so the two
+/// near-black ANSI slots picked by `nearestAnsi16` are illegible as literal
+/// colors:
+///   - code 30 (black, rgb 0,0,0)        — e.g. `#000`, `black`
+///   - code 90 (bright-black/dark gray)  — e.g. `#828282`, `gray`
+/// Both resolve to the terminal's default foreground (`code = null`). Code 90
+/// additionally carries `dim = true`: page authors use mid-gray for secondary
+/// metadata (HN/YC bylines, timestamps), and the SGR `dim` attribute preserves
+/// that muted-but-legible hierarchy on both dark and light terminals instead of
+/// a fixed, possibly-invisible dark color. All other codes pass through as-is.
+fn readableFg(code: u8) Fg {
+    return switch (code) {
+        30 => .{ .code = null },
+        90 => .{ .code = null, .dim = true },
+        else => .{ .code = code },
+    };
 }
 
 fn parseRgb(v: []const u8, r: *u16, g: *u16, b: *u16) bool {
@@ -925,7 +943,13 @@ fn applyCssTextStyle(
 
     const color = if (best[4]) |m| m.value else "";
     if (color.len > 0) {
-        if (cssColorToAnsi(color)) |code| s.fg = code;
+        if (cssColorToAnsi(color)) |fg| {
+            // A null code keeps the terminal default; `dim` is OR-ed in so a
+            // muted gray reads as subdued-but-legible rather than a fixed dark
+            // color that vanishes on dark terminals.
+            if (fg.code) |c| s.fg = c;
+            if (fg.dim) s.dim = true;
+        }
     }
 
     const tt = if (best[5]) |m| m.value else "";
@@ -3640,20 +3664,40 @@ test "render — HN-like table layout respects max width" {
 }
 
 test "cssColorToAnsi — named, hex, and rgb mapping" {
-    try std.testing.expectEqual(@as(?u8, 31), cssColorToAnsi("red"));
-    try std.testing.expectEqual(@as(?u8, 34), cssColorToAnsi("blue"));
-    try std.testing.expectEqual(@as(?u8, 90), cssColorToAnsi("gray"));
-    // #888 ≈ rgb(136,136,136) → nearest is bright-black/gray (90).
-    try std.testing.expectEqual(@as(?u8, 90), cssColorToAnsi("#888"));
+    // Genuine chromatic colors keep their (bright) ANSI slot with no dim.
+    try std.testing.expectEqual(@as(?u8, 31), cssColorToAnsi("red").?.code);
+    try std.testing.expectEqual(@as(?u8, 34), cssColorToAnsi("blue").?.code);
     // Pure red hex maps to the exact bright-red slot (91).
-    try std.testing.expectEqual(@as(?u8, 91), cssColorToAnsi("#ff0000"));
-    try std.testing.expectEqual(@as(?u8, 32), cssColorToAnsi("rgb(0, 200, 0)"));
-    try std.testing.expectEqual(@as(?u8, null), cssColorToAnsi("not-a-color"));
-    try std.testing.expectEqual(@as(?u8, null), cssColorToAnsi(""));
-    // Black/near-black foregrounds are dropped (invisible on dark terminals).
-    try std.testing.expectEqual(@as(?u8, null), cssColorToAnsi("black"));
-    try std.testing.expectEqual(@as(?u8, null), cssColorToAnsi("#000000"));
-    try std.testing.expectEqual(@as(?u8, null), cssColorToAnsi("#111"));
+    try std.testing.expectEqual(@as(?u8, 91), cssColorToAnsi("#ff0000").?.code);
+    try std.testing.expectEqual(@as(?u8, 32), cssColorToAnsi("rgb(0, 200, 0)").?.code);
+    try std.testing.expect(!cssColorToAnsi("red").?.dim);
+    try std.testing.expect(!cssColorToAnsi("#ff0000").?.dim);
+    // Unrecognised input still yields null (no fg applied).
+    try std.testing.expectEqual(@as(?Fg, null), cssColorToAnsi("not-a-color"));
+    try std.testing.expectEqual(@as(?Fg, null), cssColorToAnsi(""));
+    // Black foregrounds drop to the terminal default (invisible on dark
+    // terminals), with no dim attribute.
+    try std.testing.expectEqual(@as(?u8, null), cssColorToAnsi("black").?.code);
+    try std.testing.expectEqual(@as(?u8, null), cssColorToAnsi("#000000").?.code);
+    try std.testing.expectEqual(@as(?u8, null), cssColorToAnsi("#111").?.code);
+    try std.testing.expect(!cssColorToAnsi("black").?.dim);
+}
+
+test "cssColorToAnsi — mid-gray metadata is muted-but-legible, not dark fg" {
+    // Regression: HN/YC metadata grays like #828282 = rgb(130,130,130) land on
+    // the bright-black ANSI slot (90) via nearestAnsi16. Emitting raw 90 (or
+    // black 30) is unreadable on a dark terminal. readableFg must instead
+    // resolve such grays to the terminal default foreground + dim, so they read
+    // as subdued secondary text rather than invisible dark gray.
+    inline for (.{ "#828282", "rgb(130,130,130)", "gray", "grey", "#888" }) |g| {
+        const fg = cssColorToAnsi(g) orelse return error.TestUnexpectedNull;
+        // Not a hard-to-read literal dark foreground.
+        try std.testing.expect(fg.code == null);
+        try std.testing.expect(fg.code != @as(?u8, 90));
+        try std.testing.expect(fg.code != @as(?u8, 30));
+        // Subdued hierarchy preserved via the dim attribute.
+        try std.testing.expect(fg.dim);
+    }
 }
 
 test "isBoldWeight + containsWord helpers" {
