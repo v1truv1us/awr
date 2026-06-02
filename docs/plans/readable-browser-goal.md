@@ -71,6 +71,14 @@ a `role=button` element appear in the focus order and activate on Enter;
 `zig build test-tui` (or the co-located tests under `zig build test`) green;
 `test-tls`/`test-h2` green. Manual: a PTY drive that Tab reaches the synthetic
 focusable.
+**Diagnosis (2026-06-02):** native `<button>` already registers as a field
+(`renderButton` → `registerField`, render.zig ~2433), so the gap is purely
+non-native focusables — `tabindex>=0` and `role="button"` on `<div>`/`<span>`/
+`<a>`-without-href, which the element dispatch (render.zig ~1614 generic
+fallback) never registers. Intercept in the generic-element path: if the elem
+has `tabindex>=0` or `role="button"` and isn't already a field/link, register it
+as a focusable target and render its children. (The live `research.v1truc1us.dev`
+page is DNS-unreachable from CI, so verify with a synthetic DOM, not the site.)
 
 ### [ ] T2 — App-shell render fallback (don't blank out non-article pages)
 **Why:** `awr render`/`browse` shows only `[Navigation omitted]`/`[Footer
