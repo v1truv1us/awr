@@ -47,6 +47,8 @@ pub const EnvSnapshot = struct {
     kitty_window_id: ?[]const u8 = null,
     term_program: ?[]const u8 = null,
     lc_terminal: ?[]const u8 = null,
+    /// `TERM`, e.g. `xterm-ghostty`. Used to detect Ghostty (kitty graphics).
+    term: ?[]const u8 = null,
 };
 
 /// Optional Sixel-capability probe. Called only when `mode == .auto` and
@@ -87,10 +89,12 @@ pub fn parseMode(value: []const u8) ?Mode {
 ///   1. stdout is not a TTY → `.none` (safety override; gate 8).
 ///   2. Explicit non-auto mode → echo it back.
 ///   3. `KITTY_WINDOW_ID` set → `.kitty`.
-///   4. `TERM_PROGRAM == "iTerm.app"` → `.iterm`.
-///   5. `LC_TERMINAL == "iTerm2"` → `.iterm`.
-///   6. `probe_sixel != null` and probe returns true → `.sixel`.
-///   7. fall through → `.braille`.
+///   4. Ghostty (`TERM_PROGRAM == "ghostty"` or `TERM` contains "ghostty") →
+///      `.kitty` (Ghostty implements the kitty graphics protocol).
+///   5. `TERM_PROGRAM == "iTerm.app"` → `.iterm`.
+///   6. `LC_TERMINAL == "iTerm2"` → `.iterm`.
+///   7. `probe_sixel != null` and probe returns true → `.sixel`.
+///   8. fall through → `.braille`.
 pub fn resolve(opts: ResolveOptions) Protocol {
     if (!opts.stdout_is_tty) return .none;
 
@@ -105,6 +109,14 @@ pub fn resolve(opts: ResolveOptions) Protocol {
 
     if (opts.env.kitty_window_id) |v| {
         if (v.len > 0) return .kitty;
+    }
+    // Ghostty speaks the kitty graphics protocol; it advertises itself via
+    // TERM_PROGRAM=ghostty and TERM=xterm-ghostty.
+    if (opts.env.term_program) |v| {
+        if (std.mem.eql(u8, v, "ghostty")) return .kitty;
+    }
+    if (opts.env.term) |v| {
+        if (std.mem.indexOf(u8, v, "ghostty") != null) return .kitty;
     }
     if (opts.env.term_program) |v| {
         if (std.mem.eql(u8, v, "iTerm.app")) return .iterm;
@@ -153,6 +165,7 @@ pub fn realEnvSnapshot() EnvSnapshot {
         .kitty_window_id = getenvSlice("KITTY_WINDOW_ID"),
         .term_program = getenvSlice("TERM_PROGRAM"),
         .lc_terminal = getenvSlice("LC_TERMINAL"),
+        .term = getenvSlice("TERM"),
     };
 }
 
@@ -301,6 +314,19 @@ test "resolve auto: LC_TERMINAL=iTerm2 detects iTerm" {
         .mode = .auto,
         .stdout_is_tty = true,
         .env = .{ .lc_terminal = "iTerm2" },
+    }));
+}
+
+test "resolve auto: Ghostty detects kitty graphics (TERM_PROGRAM and TERM)" {
+    try testing.expectEqual(Protocol.kitty, resolve(.{
+        .mode = .auto,
+        .stdout_is_tty = true,
+        .env = .{ .term_program = "ghostty" },
+    }));
+    try testing.expectEqual(Protocol.kitty, resolve(.{
+        .mode = .auto,
+        .stdout_is_tty = true,
+        .env = .{ .term = "xterm-ghostty" },
     }));
 }
 
