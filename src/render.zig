@@ -496,6 +496,12 @@ const RenderState = struct {
             } else {
                 try self.writeByte(w, ' ');
             }
+        } else if (self.col > 0 and self.col + word.len > self.opts.max_width) {
+            // No pending space — the word is glued to preceding punctuation
+            // (e.g. the link text in `(example.com`). It would still overflow
+            // the line, so wrap it: AWR must never emit a line wider than the
+            // viewport, or the real terminal hard-wraps it mid-word.
+            try self.newline(w);
         }
         self.pending_space = false;
         try self.writeAll(w, word);
@@ -1699,7 +1705,30 @@ fn renderAlignedBlock(state: *RenderState, w: anytype, elem: *const dom.Element)
     return true;
 }
 
+/// Column width of a footnote ref `[n]` (brackets + digits).
+fn footnoteRefWidth(n: usize) usize {
+    var digits: usize = 1;
+    var v = n;
+    while (v >= 10) : (v /= 10) digits += 1;
+    return digits + 2;
+}
+
 fn renderLink(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
+    const href = if (state.opts.show_links) (elem.getAttribute("href") orelse "") else "";
+
+    // Reserve room for the trailing footnote ref while flowing the link text so
+    // flowWord wraps the last word early enough to keep `text[N]` together on
+    // one line — instead of appending the ref past max_width (which the real
+    // terminal then hard-wraps mid-word, e.g. the YC jobs board) or orphaning it
+    // onto its own line. Registration order is left unchanged (footnote numbers
+    // stay stable); the ref width is predicted from the current link count, so a
+    // rare digit-boundary off-by-one only costs a single column.
+    const saved_max = state.opts.max_width;
+    if (href.len > 0) {
+        const reserve = footnoteRefWidth(state.links.items.len + 1);
+        if (state.opts.max_width > reserve) state.opts.max_width -= reserve;
+    }
+
     const focused = focusMatches(state.opts.focused_element_ptr, elem);
     if (focused and state.opts.ansi_colors) {
         // Focus emphasis layered on top of the link's UA underline + any
@@ -1713,18 +1742,17 @@ fn renderLink(state: *RenderState, w: anytype, elem: *const dom.Element) anyerro
         try renderChildren(state, w, elem);
     }
 
-    if (state.opts.show_links) {
-        const href = elem.getAttribute("href") orelse "";
-        if (href.len > 0) {
-            const raw_text = elem.textContentForExtract(state.allocator) catch return;
-            defer state.allocator.free(raw_text);
-            const idx = state.registerLink(@intFromPtr(elem), href, std.mem.trim(u8, raw_text, " \t\r\n")) catch return;
-            const ref = try std.fmt.allocPrint(state.allocator, "[{d}]", .{idx});
-            defer state.allocator.free(ref);
-            try state.ansi(w, DIM);
-            try state.writeAll(w, ref);
-            try state.styleReset(w);
-        }
+    state.opts.max_width = saved_max;
+
+    if (href.len > 0) {
+        const raw_text = elem.textContentForExtract(state.allocator) catch return;
+        defer state.allocator.free(raw_text);
+        const idx = state.registerLink(@intFromPtr(elem), href, std.mem.trim(u8, raw_text, " \t\r\n")) catch return;
+        const ref = try std.fmt.allocPrint(state.allocator, "[{d}]", .{idx});
+        defer state.allocator.free(ref);
+        try state.ansi(w, DIM);
+        try state.writeAll(w, ref);
+        try state.styleReset(w);
     }
 }
 
@@ -3297,9 +3325,11 @@ test "render §2.1 — linked word wrapping continues at column 0" {
     const out = fbs.buffered();
     var lines = std.mem.splitScalar(u8, out, '\n');
     while (lines.next()) |line| {
-        // Footnote ref markers like "[1]" are appended inline; allow a small
-        // slack for them but the body word-wrap itself must respect width.
-        try std.testing.expect(line.len <= width + 4);
+        // renderLink reserves the footnote ref's width during flow, so the
+        // glued "[N]" stays on-line and nothing overflows the budget. (The old
+        // behavior appended the ref past the margin, which the real terminal
+        // then hard-wrapped mid-word.)
+        try std.testing.expect(line.len <= width);
     }
 }
 
@@ -4039,8 +4069,9 @@ test "render - link-list table omits row separators" {
 
     for (model.lines) |line| {
         const text = model.text[line.start..line.end];
-        // Allow up to 4 chars of footnote-ref overflow.
-        if (text.len > 0) try std.testing.expect(text.len <= 44);
+        // Footnote refs are width-reserved during flow, so no line overflows
+        // max_width — the terminal can't hard-wrap a link's "[N]" mid-word.
+        if (text.len > 0) try std.testing.expect(text.len <= 40);
     }
 }
 

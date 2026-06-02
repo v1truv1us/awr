@@ -1,18 +1,20 @@
 [image][2] Hacker News[3]new[4] | past[5] | comments[6] | ask[7] | show[8] |
 jobs[9] | submit[10] login[11]
 1.[12] Ghostty is leaving GitHub[13] (mitchellh.com[14])
-1737 points by WadeGrimridge[15] 6 hours ago[16] | hide[17] | 559 comments[18]
-2.[19] ChatGPT serves ads. Here's the full attribution loop[20] (buchodi.com[21])
+1737 points by WadeGrimridge[15] 6 hours ago[16] | hide[17] |
+559 comments[18]
+2.[19] ChatGPT serves ads. Here's the full attribution loop[20] (
+buchodi.com[21])
 147 points by lmbbuchodi[22] 2 hours ago[23] | hide[24] | 94 comments[25]
-3.[26] Claude system prompt bug wastes user money and bricks managed agents[27]
-(github.com/anthropics[28])
+3.[26] Claude system prompt bug wastes user money and bricks managed
+agents[27] (github.com/anthropics[28])
 104 points by thomashobohm[29] 2 hours ago[30] | hide[31] | 30 comments[32]
 4.[33] Before GitHub[34] (pocoo.org[35])
 276 points by mlex[36] 4 hours ago[37] | hide[38] | 74 comments[39]
 5.[40] We decreased our LLM costs with Opus[41] (mendral.com[42])
 28 points by shad42[43] 1 hour ago[44] | hide[45] | 4 comments[46]
-6.[47] OpenAI models coming to Amazon Bedrock: Interview with OpenAI and AWS
-CEOs[48] (stratechery.com[49])
+6.[47] OpenAI models coming to Amazon Bedrock: Interview with OpenAI and
+AWS CEOs[48] (stratechery.com[49])
 185 points by translocator[50] 6 hours ago[51] | hide[52] | 71 comments[53]
 7.[54] Claude for Creative Work[55] (anthropic.com[56])
 53 points by elsewhen[57] 2 hours ago[58] | hide[59] | 37 comments[60]
@@ -29,48 +31,59 @@ experience[69] (quantamagazine.org[70])
 251 points by bo0tzz[92] 10 hours ago[93] | hide[94] | 63 comments[95]
 13.[96] CJIT: C, Just in Time[97] (dyne.org[98])
 89 points by smartmic[99] 7 hours ago[100] | hide[101] | 25 comments[102]
-14.[103] Your phone is about to stop being yours[104] (keepandroidopen.org[105])
+14.[103] Your phone is about to stop being yours[104] (
+keepandroidopen.org[105])
 997 points by doener[106] 10 hours ago[107] | hide[108] | 481 comments[109]
-15.[110] Who owns the code Claude Code wrote?[111] (legallayer.substack.com[112])
-262 points by senaevren[113] 14 hours ago[114] | hide[115] | 299 comments[116]
+15.[110] Who owns the code Claude Code wrote?[111] (
+legallayer.substack.com[112])
+262 points by senaevren[113] 14 hours ago[114] | hide[115] |
+299 comments[116]
 16.[117] Warp is now open-source[118] (warp.dev[119])
-169 points by meetpateltech[120] 10 hours ago[121] | hide[122] | 53 comments[123]
+169 points by meetpateltech[120] 10 hours ago[121] | hide[122] |
+53 comments[123]
 17.[124] Localsend: An open-source cross-platform alternative to AirDrop[125]
 (github.com/localsend[126])
 743 points by bilsbie[127] 14 hours ago[128] | hide[129] | 234 comments[130]
 18.[131] I have officially retired from Emacs[132] (nullprogram.com[133])
 182 points by Fudgel[134] 13 hours ago[135] | hide[136] | 116 comments[137]
-19.[138] VibeVoice: Open-source frontier voice AI[139] (github.com/microsoft[140])
+19.[138] VibeVoice: Open-source frontier voice AI[139] (
+github.com/microsoft[140])
 322 points by tosh[141] 14 hours ago[142] | hide[143] | 168 comments[144]
 20.[145] UAE to leave OPEC[146] (ft.com[147])
 348 points by bazzmt[148] 13 hours ago[149] | hide[150] | 474 comments[151]
-21.[152] Talkie: a 13B vintage language model from 1930[153] (talkie-lm.com[154])
+21.[152] Talkie: a 13B vintage language model from 1930[153] (
+talkie-lm.com[154])
 646 points by jekude[155] 1 day ago[156] | hide[157] | 262 comments[158]
 22.[159] A playable DOOM MCP app[160] (chrisnager.com[161])
 78 points by chrisnager[162] 7 hours ago[163] | hide[164] | 28 comments[165]
-23.[166] Patch applies fake diffs from commit messages[167] (samizdat.dev[168])
-79 points by reconquestio[169] 7 hours ago[170] | hide[171] | 24 comments[172]
-24.[image] Infisical (YC W23) Is Hiring Full Stack Software Engineers (Remote)[174]
-(ashbyhq.com[175])
+23.[166] Patch applies fake diffs from commit messages[167] (samizdat.dev[168]
+)
+79 points by reconquestio[169] 7 hours ago[170] | hide[171] |
+24 comments[172]
+24.[image] Infisical (YC W23) Is Hiring Full Stack Software Engineers
+(Remote)[174] (ashbyhq.com[175])
 9 hours ago[176] | hide[177]
 25.[178] An update on GitHub availability[179] (github.blog[180])
 320 points by salkahfi[181] 16 hours ago[182] | hide[183] | 211 comments[184]
 26.[185] APL\? (1990)[186] (acm.org[187])
 21 points by tosh[188] 5 hours ago[189] | hide[190] | 8 comments[191]
-27.[192] Show HN: Drive any macOS app in the background without stealing the
-cursor[193] (github.com/trycua[194])
+27.[192] Show HN: Drive any macOS app in the background without stealing
+the cursor[193] (github.com/trycua[194])
 59 points by frabonacci[195] 6 hours ago[196] | hide[197] | 22 comments[198]
 28.[199] Waymo in Portland[200] (waymo.com[201])
 254 points by xnx[202] 8 hours ago[203] | hide[204] | 402 comments[205]
-29.[206] Show HN: Live Sun and Moon Dashboard with NASA Footage[207] (lumara-space.app[208])
-163 points by beeswaxpat[209] 12 hours ago[210] | hide[211] | 58 comments[212]
+29.[206] Show HN: Live Sun and Moon Dashboard with NASA Footage[207] (
+lumara-space.app[208])
+163 points by beeswaxpat[209] 12 hours ago[210] | hide[211] |
+58 comments[212]
 30.[213] Apple CMF (Color-Matching Functions) 2026[214] (lttlabs.com[215])
 5 points by HeyMeco[216] 1 hour ago[217] | hide[218] | discuss[219]
 More[220]
 [image]
 
-Consider applying for YC's Summer 2026 batch! Applications are open till May 4[222]
-Guidelines[223] | FAQ[224] | Lists[225] | API[226] | Security[227] | Legal[228]
-| Apply to YC[229] | Contact[230]
+Consider applying for YC's Summer 2026 batch! Applications are open till
+May 4[222]
+Guidelines[223] | FAQ[224] | Lists[225] | API[226] | Security[227] |
+Legal[228] | Apply to YC[229] | Contact[230]
 
 Search:[____________________]
