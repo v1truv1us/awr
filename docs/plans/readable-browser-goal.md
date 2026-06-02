@@ -55,7 +55,21 @@ All tasks below are `[x]`, and on `main`:
 
 ## Tasks (do in order)
 
-### [ ] T1 — `tabindex` / `role=button` focusability
+### [ ] T1 — `tabindex` / `role=button` focusability + activation  ⚠️ SCOPE GREW — needs maintainer call
+> **Loop finding (2026-06-02): T1 is bigger than a single render increment.**
+> Making these controls *work* (not just reachable) needs three layers:
+> (a) render: register `tabindex>=0`/`role=button` as focusables — small;
+> (b) browser: wire Enter on a non-submit focusable to dispatch a click — small;
+> (c) **NEW bridge plumbing: dispatch a real `MouseEvent('click')` on a DOM
+> element by ptr so the page's `onclick` runs, then re-render on the resulting
+> DOM mutation.** This does **not** exist today — `browser.zig` tracks field
+> state in its own session tables and `submitForm` builds the POST from those;
+> it never dispatches JS events to the DOM. Elements *do* have `.click()` in the
+> bridge (`bridge.zig:2299`), but there's no ptr→element→`.click()` call path
+> from the TUI. Delivering only (a)+(b) yields a focusable-but-inert control
+> (false affordance), so this should land as one scoped feature. Paused for the
+> maintainer to confirm scope before building the bridge surface.
+
 **Why:** Elements made focusable via `tabindex="0"` (or `role="button"`, or a
 styled `<a>` without `href`) aren't in the Tab order — only links + native form
 controls are. Blocks flows like "create an account" on
