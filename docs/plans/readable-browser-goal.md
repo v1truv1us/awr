@@ -37,9 +37,13 @@ All tasks below are `[x]`, and on `main`:
 5. **Verify, don't assume.** Real exit codes (no pipe-masking). Where a terminal
    effect is involved, validate with the PTY/strict-VT approach already proven in
    this repo (parse rendered cursor position, not just the byte stream).
-6. **Stop conditions.** Stop the loop and surface to the user if: a gate can't be
-   made green after a reasonable attempt; a task is ambiguous; a fix would need to
-   break a guardrail; or all tasks are done.
+6. **Unblock by default — do NOT skip or mark blocked.** If a task turns out to
+   need a new capability or cross-layer plumbing, **build that capability as part
+   of the task** (carefully, with tests). "It got bigger / needs new plumbing" is
+   never a reason to skip. Reserve **STOP and surface** for only: (a) a genuine
+   product/scope decision the user must make, (b) a fix that would break a hard
+   guardrail (fingerprint, governance), (c) a gate that can't be made green after
+   a real attempt, or (d) all tasks done.
 7. **Conventions.** Match existing style: `///` doc comments, co-located tests,
    explicit allocators, `errdefer`. Surgical changes only.
 
@@ -55,20 +59,18 @@ All tasks below are `[x]`, and on `main`:
 
 ## Tasks (do in order)
 
-### [ ] T1 — `tabindex` / `role=button` focusability + activation  ⚠️ SCOPE GREW — needs maintainer call
-> **Loop finding (2026-06-02): T1 is bigger than a single render increment.**
-> Making these controls *work* (not just reachable) needs three layers:
-> (a) render: register `tabindex>=0`/`role=button` as focusables — small;
-> (b) browser: wire Enter on a non-submit focusable to dispatch a click — small;
-> (c) **NEW bridge plumbing: dispatch a real `MouseEvent('click')` on a DOM
-> element by ptr so the page's `onclick` runs, then re-render on the resulting
-> DOM mutation.** This does **not** exist today — `browser.zig` tracks field
-> state in its own session tables and `submitForm` builds the POST from those;
-> it never dispatches JS events to the DOM. Elements *do* have `.click()` in the
-> bridge (`bridge.zig:2299`), but there's no ptr→element→`.click()` call path
-> from the TUI. Delivering only (a)+(b) yields a focusable-but-inert control
-> (false affordance), so this should land as one scoped feature. Paused for the
-> maintainer to confirm scope before building the bridge surface.
+### [x] T1 — `tabindex` / `role=button` focusability + activation (build all 3 layers) — DONE 2026-06-03
+> **Scope (maintainer chose to build, not skip — 2026-06-02):** three layers,
+> landed as one feature:
+> (a) render: register `tabindex>=0`/`role=button` (on non-native elements) as
+>     focusables, rendered with the focus highlight;
+> (b) browser: Enter/Space on such a focusable dispatches a click;
+> (c) **bridge: a `ptr → element → .click()` path** so a real
+>     `MouseEvent('click')` fires on the element (running the page's `onclick`),
+>     then the TUI re-renders on the resulting DOM mutation. Elements already
+>     expose `.click()` in JS (`bridge.zig:2299`); this adds the Zig→that-element
+>     call keyed by `element_ptr` (mirror how event targets resolve a node ptr to
+>     its JS wrapper).
 
 **Why:** Elements made focusable via `tabindex="0"` (or `role="button"`, or a
 styled `<a>` without `href`) aren't in the Tab order — only links + native form

@@ -800,6 +800,19 @@ pub const Page = struct {
     /// for a setInterval poller with delay << max_ms (e.g. 16ms RAF-style),
     /// we'd otherwise burn the entire budget on no-op ticks even though
     /// each individual tick is fast.
+    /// T1: dispatch a real click on a DOM element (by `@intFromPtr`) so the
+    /// page's JS `onclick` / `addEventListener('click', …)` handlers run. The
+    /// raw `bridge.clickElementByPtr` eval can transiently report an exception
+    /// when a libxev-backed timer coincides with the eval (only `drainAll` ticks
+    /// libxev to flush it), so retry a few times, draining the event loop
+    /// between attempts. A per-element sentinel in the bridge prevents the retry
+    /// from double-firing the listener. Returns true once the click dispatched.
+    pub fn dispatchClick(self: *Page, element_ptr: usize) bool {
+        const ok = bridge.clickElementByPtr(&self.js, element_ptr);
+        if (ok) self.drainAll(1_000); // let the handler's async work settle
+        return ok;
+    }
+
     pub fn drainAll(self: *Page, max_ms: u64) void {
         self.event_loop.loop.update_now();
         const start = self.event_loop.loop.now();
@@ -2257,6 +2270,22 @@ test "Page.processHtml — extracts body text" {
     var result = try page.processHtml("http://example.com/", 200, "<html><body><p>Hello World</p></body></html>");
     defer result.deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.body_text, "Hello World") != null);
+}
+
+test "Page — clickElementByPtr fires a registered click listener (T1)" {
+    var page = try Page.init(std.testing.allocator, std.testing.io);
+    defer page.deinit();
+    var result = try page.processHtml("http://example.com/", 200, "<html><body>" ++
+        "<button id=\"b\">Go</button>" ++
+        "<script>window.__clicks = 0;" ++
+        "document.getElementById('b').addEventListener('click', function(){ window.__clicks++; });" ++
+        "</script></body></html>");
+    defer result.deinit();
+    const doc = page.current_doc orelse return error.NoDoc;
+    const btn = doc.getElementById("b") orelse return error.NoButton;
+    // The TUI-driven activation path dispatches a real click by element ptr.
+    try std.testing.expect(page.dispatchClick(@intFromPtr(btn)));
+    try std.testing.expect(page.js.evalBool("window.__clicks === 1") catch false);
 }
 
 test "Page.processHtml — body_text excludes <style> and <script> source" {

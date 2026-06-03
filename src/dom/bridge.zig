@@ -121,6 +121,45 @@ pub fn clearDomDirty(eng: *engine.JsEngine) void {
     bctx.dirty = false;
 }
 
+/// Dispatch a real `MouseEvent('click')` on the element identified by the
+/// renderer's `element_ptr` (= `@intFromPtr` of the `*dom.Element`). Resolves
+/// the element to its JS wrapper via its handle + the element cache — so
+/// listeners registered by the page (`addEventListener('click', …)`) fire — and
+/// calls `.click()`. Returns false if there is no DOM bridge or the element
+/// could not be clicked. T1: lets the TUI activate `tabindex`/`role=button`
+/// controls and non-submit buttons (whose behavior lives in JS handlers).
+pub fn clickElementByPtr(eng: *engine.JsEngine, element_ptr: usize) bool {
+    if (element_ptr == 0) return false;
+    const bctx = getBridge(eng.ctx) orelse return false;
+    const elem: *dom.Element = @ptrFromInt(element_ptr);
+    const handle = ensureHandle(bctx, elem) orelse return false;
+    // Dispatch a real click on the element's cached JS wrapper so its listeners
+    // (`addEventListener('click', …)`) and `onclick` fire. Shape notes:
+    //  - Call through an IIFE: a bare top-level expression does not resolve the
+    //    globalThis-assigned cache as a free variable in QuickJS's global-eval
+    //    scope; inside a function it resolves via the scope chain.
+    //  - A per-element sentinel (`__awr_clk_<h>`) guards the actual `.click()`
+    //    so a caller that retries (to ride out a transient pending-exception
+    //    from a libxev timer coinciding with the eval) never double-fires the
+    //    listener: the first body run clicks once and marks done.
+    // Returns true only when the click was dispatched (or already had been);
+    // an exceptional eval (stray pending-job throw) returns false so the caller
+    // can tick the event loop (`Page.dispatchClick`) and retry.
+    var buf: [256]u8 = undefined;
+    // NOTE: must be null-terminated — QuickJS's JS_Eval reads buf[len] during
+    // UTF-8 validation even though it is given an explicit length, so a plain
+    // (non-terminated) bufPrint slice causes a spurious "invalid UTF-8" syntax
+    // error. bufPrintZ adds the terminator.
+    const expr = std.fmt.bufPrintZ(
+        &buf,
+        "(function(){{try{{var g=globalThis;var k='__awr_clk_{d}';if(g[k])return 'dup';var c=g.__awr_element_cache__;var el=c&&c.get({d});if(!el||typeof el.click!=='function')return 'noel';g[k]=true;el.click();return 'ok';}}catch(e){{return 'err';}}}})()",
+        .{ handle, handle },
+    ) catch return false;
+    const s = eng.evalString(expr) catch return false;
+    defer eng.allocator.free(s);
+    return std.mem.eql(u8, s, "ok") or std.mem.eql(u8, s, "dup");
+}
+
 pub const BridgeError = error{ AllocFailed, EvalFailed };
 
 /// Install the DOM bridge into `eng`, backed by `doc`.
@@ -2696,6 +2735,22 @@ const BRIDGE_POLYFILL =
     \\  globalThis.__awr_document_ready_state__ = globalThis.__awr_document_ready_state__ || 'loading';
     \\  globalThis.document  = document;
     \\  globalThis.window    = globalThis;
+    \\  // T1: TUI-driven click activation. Resolves an element handle to its
+    \\  // (cached, listener-bearing) wrapper and dispatches a real click so the
+    \\  // page's onclick handlers run. Called from Zig clickElementByPtr.
+    \\  globalThis.__awr_click_handle__ = function(h) {
+    \\    globalThis.__awr_click_ok__ = false;
+    \\    var c = globalThis.__awr_element_cache__;
+    \\    var el = c && c.get(h);
+    \\    if (!el || typeof el.click !== 'function') return;
+    \\    // Mark success BEFORE dispatching: the listener runs synchronously, but
+    \\    // a queued job drained after this eval may throw and surface as the
+    \\    // eval's exception — the click itself still happened. The caller reads
+    \\    // __awr_click_ok__ via a separate eval so that post-click job noise
+    \\    // does not mask a successful activation.
+    \\    globalThis.__awr_click_ok__ = true;
+    \\    try { el.click(); } catch (e) {}
+    \\  };
     \\  globalThis.addEventListener = function(type, callback, options) { __awr_add_event_listener__(globalThis, type, callback, options); };
     \\  globalThis.removeEventListener = function(type, callback, options) { __awr_remove_event_listener__(globalThis, type, callback, options); };
     \\  globalThis.dispatchEvent = function(event) { return __awr_dispatch_event__(globalThis, event); };

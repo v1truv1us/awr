@@ -1585,6 +1585,18 @@ pub const BrowserSession = struct {
         }
         try self.setSearchQuery(if (previous_query) |query| query else "");
     }
+
+    /// T1: dispatch a real click on a focused button / `role=button` /
+    /// `tabindex` control so the page's JS `onclick` handler runs, then settle
+    /// the event loop and repaint if the DOM changed. Native non-submit buttons
+    /// benefit too (they previously did nothing on Enter).
+    fn activateFocusable(self: *BrowserSession, element_ptr: usize) void {
+        _ = self.page.dispatchClick(element_ptr);
+        if (page_mod.bridge.isDomDirty(&self.page.js)) {
+            self.rerenderCurrent() catch {};
+            page_mod.bridge.clearDomDirty(&self.page.js);
+        }
+    }
 };
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, start_url: []const u8) !void {
@@ -1855,6 +1867,10 @@ pub fn processKey(
                         // T-83: Enter on a select opens the inline picker
                         // (same as Space; matches Chrome/Firefox).
                         session.openSelectPicker() catch |err| session.reportError("picker failed", err);
+                    } else if (field != null and std.mem.eql(u8, field.?.field_type, "button")) {
+                        // T1: Enter on a button / role=button / tabindex control
+                        // dispatches a real click so the page's onclick runs.
+                        session.activateFocusable(field.?.element_ptr);
                     } else {
                         session.openSelectedLink() catch |err| session.reportError("open failed", err);
                     }
@@ -1871,6 +1887,9 @@ pub fn processKey(
                         if (session.activeField()) |f| {
                             if (std.mem.eql(u8, f.field_type, "select")) {
                                 session.openSelectPicker() catch |err| session.reportError("picker failed", err);
+                            } else if (std.mem.eql(u8, f.field_type, "button")) {
+                                // T1: Space activates a button/role=button/tabindex control.
+                                session.activateFocusable(f.element_ptr);
                             } else {
                                 session.toggleCheckedField() catch |err| session.reportError("toggle failed", err);
                                 session.rerenderCurrent() catch {};

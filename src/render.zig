@@ -1651,6 +1651,16 @@ fn renderElement(state: *RenderState, w: anytype, elem: *const dom.Element) anye
         return;
     }
 
+    // ── Focusable non-native controls (tabindex / role=button) ───────
+    // ARIA / custom widgets: a `<div tabindex="0">` or `<span role="button">`
+    // is keyboard-focusable and click-activatable even though it is not a
+    // native control. Register it so Tab reaches it and Enter/Space dispatches
+    // a click (which runs the page's onclick handler). T1.
+    if (genericFocusable(elem)) {
+        try renderFocusable(state, w, elem);
+        return;
+    }
+
     // ── Generic block / inline fallback ──────────────────────────────
     if (isBlockTag(tag) or eql(tag, "center")) {
         // TUI-only center/right alignment for single-line block content
@@ -2480,6 +2490,50 @@ fn renderButton(state: *RenderState, w: anytype, elem: *const dom.Element) anyer
         display.len + 2,
         eql(btn_type, "submit"),
     ) catch {};
+}
+
+/// True when a generic element is a non-native keyboard-focusable control:
+/// `role="button"` or a non-negative `tabindex`. Native controls
+/// (input/button/select/textarea/a) are dispatched by their own renderers
+/// before this point, so this only catches generic elements (div/span/…). T1.
+fn genericFocusable(elem: *const dom.Element) bool {
+    if (elem.getAttribute("role")) |r| {
+        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, r, " \t\r\n"), "button")) return true;
+    }
+    if (elem.getAttribute("tabindex")) |t| {
+        const v = std.fmt.parseInt(i32, std.mem.trim(u8, t, " \t\r\n"), 10) catch return false;
+        return v >= 0; // negative tabindex is script-focusable only, not in Tab order
+    }
+    return false;
+}
+
+/// Render a non-native focusable (see `genericFocusable`): its content with a
+/// focus highlight when selected, registered as a non-submit "button" field so
+/// Tab reaches it and Enter/Space dispatches a click (T1, browser.zig).
+///
+/// Only elements that render visible content of their own become focusable
+/// targets. Icon-only generic focusables (e.g. GitHub's `<summary role="button">`
+/// that merely wraps a native close button) are left to their normal rendering
+/// — synthesizing a label marker for them would duplicate adjacent native
+/// controls and add noise. Native `<button>`/`<input>` still handle the
+/// icon-only case via their own renderers.
+fn renderFocusable(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
+    if (isBlockTag(elem.tag)) try state.ensureNewline(w);
+    const focused = focusMatches(state.opts.focused_element_ptr, elem);
+    const label: []const u8 = elem.getAttribute("aria-label") orelse
+        (elem.getAttribute("title") orelse "button");
+    try state.prepareForContent(w);
+    const col = state.col;
+    const line = state.line_index;
+    if (focused and state.opts.ansi_colors) try state.ansi(w, REVERSE);
+    try renderChildren(state, w, elem);
+    if (focused and state.opts.ansi_colors) try state.styleReset(w);
+    // Register as a focusable button only when the element produced visible
+    // content (advanced the column on this line, or wrapped to a later line).
+    if (state.line_index != line or state.col != col) {
+        const width = if (state.line_index == line and state.col > col) state.col - col else label.len;
+        _ = state.registerField(@intFromPtr(elem), "", "button", label, col, width, false) catch {};
+    }
 }
 
 fn renderSelect(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
@@ -3400,6 +3454,25 @@ test "render §2.1 — linked word wrapping continues at column 0" {
         // then hard-wrapped mid-word.)
         try std.testing.expect(line.len <= width);
     }
+}
+
+test "render — tabindex/role=button elements become focusable button fields (T1)" {
+    // T1: non-native controls (tabindex>=0 / role=button) must enter the focus
+    // order as click-activatable "button" fields; tabindex<0 and plain elements
+    // must not. Wrapped in <main> so the readability picker keeps the content.
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><main>" ++
+        "<div tabindex=\"0\">Open dialog</div>" ++
+        "<span role=\"button\">Run it</span>" ++
+        "<div tabindex=\"-1\">script only</div>" ++
+        "<div>plain block of text</div>" ++
+        "</main></body></html>");
+    defer doc.deinit();
+    var model = try renderBrowseModel(std.testing.allocator, &doc, .{ .ansi_colors = false });
+    defer model.deinit();
+    try std.testing.expectEqual(@as(usize, 2), model.fields.len);
+    for (model.fields) |f| try std.testing.expect(std.mem.eql(u8, f.field_type, "button"));
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Open dialog") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Run it") != null);
 }
 
 test "render — links produce reference footnotes" {
