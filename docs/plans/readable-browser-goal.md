@@ -96,7 +96,14 @@ has `tabindex>=0` or `role="button"` and isn't already a field/link, register it
 as a focusable target and render its children. (The live `research.v1truc1us.dev`
 page is DNS-unreachable from CI, so verify with a synthetic DOM, not the site.)
 
-### [ ] T2 — App-shell render fallback (don't blank out non-article pages)
+### [x] T2 — App-shell render fallback (don't blank out non-article pages) — DONE 2026-06-03 (commit ed7f28a)
+> Delivered via a two-pass rescue rather than the originally-sketched "render
+> full <body>": `renderBrowseModel` detects a blank/omit-only first pass
+> (`isBlankRender`) and re-renders relaxing the `[hidden]` CSS reset, which
+> rescues Next.js/streaming app shells without un-hiding real chrome. Verified:
+> an app-shell DOM (nav + `<div id=app>` content + Sign-in, no `<main>`) now
+> renders its shell text instead of only `[… omitted]` markers. Test:
+> `isBlankRender treats whitespace + omitted-region placeholders as blank`.
 **Why:** `awr render`/`browse` shows only `[Navigation omitted]`/`[Footer
 omitted]` on app-shell pages (e.g. `audiofile.app`) while `awr <url>` (agent)
 has the real `body_text`. The readability picker (`browse_heuristics.zig`) is
