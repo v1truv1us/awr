@@ -12,8 +12,8 @@ inference microservices
 [Sidebar omitted]
 
 
-[Filters (2)]8 models[____________________][Search]Sort By[dateCreated:DESC ▼][Most Recent]Z.ai[3]Free
-Endpointglm-4.7
+[Filters (2)]8 models[____________________][Search]Sort By[dateCreated:DESC ▼][Most Recent]
+Z.ai[3]Free Endpointglm-4.7
 
 
 GLM-4.7 is a multilingual agentic coding partner with stronger reasoning, tool
@@ -37,8 +37,8 @@ top results.agentic coding[9][+3]3.27M7mo[Header omitted]
 State-of-the-art open mixture-of-experts model with strong reasoning, coding,
 and agentic capabilitiescoding[10][+3]15.32M9mo[Header omitted]
 
-High performance reasoning model optimized for efficiency and edge deploymentcoding[11][+3]1.19M9moItems
-per page[24][Go to first page][Go to previous page][11][Go to next page][Go to last page][1___________________]of
-1 pages
+High performance reasoning model optimized for efficiency and edge deployment
+coding[11][+3]1.19M9moItems per page[24][Go to first page][Go to previous page][11][Go to next page][Go to last page][1___________________]
+of 1 pages
 [Footer omitted]
 

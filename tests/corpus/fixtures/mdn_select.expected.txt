@@ -176,8 +176,8 @@ fully customizable select elements:
 Legacy select styling
 
 In browsers that don't support the modern customization features (or legacy
-codebases where they can't be used), you are limited to manipulating the box
-model[48], the displayed font[49], etc. You can also use the`appearance`[50]
+codebases where they can't be used), you are limited to manipulating the
+box model[48], the displayed font[49], etc. You can also use the`appearance`[50]
 property to remove the default system`appearance` .
 It is however, hard to get a consistent result across browsers with
 traditional`<select>` elements. If you want to get full control, you should

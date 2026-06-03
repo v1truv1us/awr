@@ -29,7 +29,14 @@ NameNameLast commit messageLast commit dateLatest commit
  History
 -------
 
-36,058 Commits[12][13]36,058 Commits.forgejo[14].forgejo[15]  ci[16]ci[17]  cmake[18]cmake[19]  doc[20]doc[21]  lib[22]lib[23]  src[24]src[25]  stage1[26]stage1[27]  test[28]test[29]  tools[30]tools[31]  .gitattributes[32].gitattributes[33]  .gitignore[34].gitignore[35]  .mailmap[36].mailmap[37]  CMakeLists.txt[38]CMakeLists.txt[39]  LICENSE[40]LICENSE[41]  README.md[42]README.md[43]  bootstrap.c[44]bootstrap.c[45]  build.zig[46]build.zig[47]  build.zig.zon[48]build.zig.zon[49]  [View all files]Repository files navigation
+36,058 Commits[12][13]36,058 Commits.forgejo[14].forgejo[15]  ci[16]ci[17] 
+ cmake[18]cmake[19]  doc[20]doc[21]  lib[22]lib[23]  src[24]src[25]  
+stage1[26]stage1[27]  test[28]test[29]  tools[30]tools[31]  
+.gitattributes[32].gitattributes[33]  .gitignore[34].gitignore[35]  
+.mailmap[36].mailmap[37]  CMakeLists.txt[38]CMakeLists.txt[39]  
+LICENSE[40]LICENSE[41]  README.md[42]README.md[43]  bootstrap.c[44]
+bootstrap.c[45]  build.zig[46]build.zig[47]  build.zig.zon[48]
+build.zig.zon[49]  [View all files]Repository files navigation
 ---------------------------
 
 [Navigation omitted]

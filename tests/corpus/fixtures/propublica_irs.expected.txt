@@ -120,14 +120,14 @@ The tax data was provided to ProPublica after we published a series of
 articles scrutinizing the IRS[9]. The articles exposed how years of budget
 cuts have hobbled the agency’s ability to enforce the law[10] and how the
 largest corporations and the rich[11] have benefited from the IRS’ weakness.
-They also showed how people in poor regions are now more likely to be audited[12]
-than those in affluent areas.
+They also showed how people in poor regions are now more likely to be
+audited[12] than those in affluent areas.
 Read More
 
-Why We Are Publishing the Tax Secrets of the .001%[13] The Secret IRS Files
-Short Form: A Quick Guide to What We Uncovered[14] How We Calculated the True
-Tax Rates of the Wealthiest[15] ProPublica is not disclosing how it obtained
-the data, which was given to us in raw form, with no conditions or
+Why We Are Publishing the Tax Secrets of the .001%[13] The Secret IRS
+Files Short Form: A Quick Guide to What We Uncovered[14] How We Calculated
+the True Tax Rates of the Wealthiest[15] ProPublica is not disclosing how it
+obtained the data, which was given to us in raw form, with no conditions or
 conclusions. ProPublica reporters spent months processing and analyzing the
 material to transform it into a usable database.
 We then verified the information by comparing elements of it with dozens of
@@ -539,10 +539,10 @@ Help Us Report on Taxes and the Ultrawealthy
 Do you have expertise in tax law, accounting or wealth management? Do you have
 tips to share? Here’s how to get in touch. We are looking for both specific
 tips and broader expertise.
-I may know something related to your investigation. Submit a Tip Through Our
-Form[45] We take privacy seriously. Any tips you submit via the above form are
-encrypted on our end. But if you wish for additional anonymity, please get in
-touch via one of these methods: Signal[46] SecureDrop[47] Postal Mail[48]Corrections
+I may know something related to your investigation. Submit a Tip Through
+Our Form[45] We take privacy seriously. Any tips you submit via the above form
+are encrypted on our end. But if you wish for additional anonymity, please get
+in touch via one of these methods: Signal[46] SecureDrop[47] Postal Mail[48]Corrections
 -----------
 
 

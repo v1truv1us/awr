@@ -42,8 +42,8 @@ Cell C Cell D
 Anchor edge cases
 -----------------
 
-Anchor with no href + Empty href + Fragment-only[1] + Javascript URL — must
-be quarantined or rendered as text[2].
+Anchor with no href + Empty href + Fragment-only[1] + Javascript URL —
+must be quarantined or rendered as text[2].
 
 
 Unknown elements

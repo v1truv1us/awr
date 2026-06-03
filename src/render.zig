@@ -335,6 +335,13 @@ const BufferWriter = struct {
 const RenderState = struct {
     allocator: std.mem.Allocator,
     opts: RenderOptions,
+    /// When true, `isCssHidden` ignores the generic `[hidden]`-attribute
+    /// `display:none` reset (Tailwind / modern-normalize) so JS-revealed
+    /// content stays visible. Off by default — the renderer only sets it on a
+    /// rescue re-render when the normal pass produced a blank page (e.g. a
+    /// Next.js app whose entire body streams into a single `<div hidden>`).
+    /// See `renderModelFromRoot`.
+    relax_hidden_attr: bool = false,
     col: usize = 0,
     at_line_start: bool = true,
     line_index: usize = 0,
@@ -1204,10 +1211,43 @@ pub fn renderModelFromElement(
     return renderModelFromRoot(allocator, elem, opts);
 }
 
+/// Renders `root`, then rescues blank app-shell pages: when the normal pass
+/// produces no visible text — typically a JS framework that streams its entire
+/// body into a single `[hidden]` container (Next.js, see `isCssHidden`) — it
+/// re-renders once with the generic `[hidden]` reset relaxed so that content
+/// surfaces. The normal pass is kept for pages where `[hidden]` legitimately
+/// hides only chrome (Wikipedia nav), so their visible body is unaffected.
 fn renderModelFromRoot(
     allocator: std.mem.Allocator,
     root: ?*const dom.Element,
     opts: RenderOptions,
+) !ScreenModel {
+    var model = try renderModelFromRootOnce(allocator, root, opts, false);
+    if (!isBlankRender(model.text)) return model;
+    model.deinit();
+    return renderModelFromRootOnce(allocator, root, opts, true);
+}
+
+/// True when rendered text carries no visible glyphs — only whitespace and the
+/// `[Region omitted]` collapse placeholders the browse profile emits for
+/// chrome. Such a render is indistinguishable from a blank screen to the user,
+/// so it triggers the `[hidden]` rescue pass.
+fn isBlankRender(text: []const u8) bool {
+    var rest = text;
+    while (std.mem.indexOfScalar(u8, rest, '[')) |open| {
+        for (rest[0..open]) |ch| if (!std.ascii.isWhitespace(ch)) return false;
+        const close = std.mem.indexOfScalar(u8, rest[open..], ']') orelse return true;
+        rest = rest[open + close + 1 ..];
+    }
+    for (rest) |ch| if (!std.ascii.isWhitespace(ch)) return false;
+    return true;
+}
+
+fn renderModelFromRootOnce(
+    allocator: std.mem.Allocator,
+    root: ?*const dom.Element,
+    opts: RenderOptions,
+    relax_hidden_attr: bool,
 ) !ScreenModel {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -1216,6 +1256,7 @@ fn renderModelFromRoot(
     var state = RenderState{
         .allocator = allocator,
         .opts = opts,
+        .relax_hidden_attr = relax_hidden_attr,
     };
     defer state.deinit();
 
@@ -3119,7 +3160,24 @@ fn isCssHidden(state: *RenderState, elem: *const dom.Element) bool {
             }
         }
         if (!matched) continue;
-        if (isHiddenCssValue(rule.declarations.getPropertyValue("display"), "none")) return true;
+        if (isHiddenCssValue(rule.declarations.getPropertyValue("display"), "none")) {
+            // `[hidden]`-attribute resets (e.g. Tailwind / modern-normalize
+            // `[hidden]:where(:not([hidden=until-found]))`) hide content that
+            // frameworks reveal client-side via JS: React/Next.js stream SSR
+            // markup into `<div hidden>` containers and relocate it into the
+            // visible tree on hydration; tab panels and disclosure widgets do
+            // the same. AWR runs no hydration, so honoring this reset blanks
+            // pages whose entire body lives in such a container (every
+            // streaming Next.js app). Surface that content instead — it
+            // approximates the post-hydration state a real user sees.
+            // Explicit inline `display:none` and class/id chrome hides below
+            // still apply, so this only relaxes the generic `[hidden]` reset.
+            // Gated on the rescue flag so the normal pass still hides small
+            // `[hidden]` chrome (e.g. Wikipedia nav) — the relaxation only
+            // kicks in on the blank-page rescue re-render.
+            if (state.relax_hidden_attr and ruleHidesViaHiddenAttr(rule, elem)) continue;
+            return true;
+        }
         if (isHiddenCssValue(rule.declarations.getPropertyValue("visibility"), "hidden")) return true;
     }
 
@@ -3130,6 +3188,27 @@ fn isCssHidden(state: *RenderState, elem: *const dom.Element) bool {
         if (isHiddenCssValue(style.getPropertyValue("visibility"), "hidden")) return true;
     }
 
+    return false;
+}
+
+/// True when a `display:none` rule matches `elem` *because of* its `hidden`
+/// HTML attribute — i.e. the generic `[hidden]` UA/reset rule, not a content
+/// selector. Used to keep JS-revealed content (Next.js streaming containers,
+/// tab panels) visible on AWR's non-JS browse surface. Requires both that the
+/// element actually carries `hidden` and that the rule's selector references
+/// the `[hidden]` attribute, so a `.chrome{display:none}` that happens to land
+/// on a `hidden` element still hides as the author intended.
+fn ruleHidesViaHiddenAttr(rule: *const css_parser.Rule, elem: *const dom.Element) bool {
+    if (elem.getAttribute("hidden") == null) return false;
+    return containsIgnoreCaseAscii(rule.selector_text, "[hidden");
+}
+
+fn containsIgnoreCaseAscii(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0 or needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
     return false;
 }
 
@@ -3847,6 +3926,79 @@ test "render — complex document with mixed elements" {
     try std.testing.expect(std.mem.indexOf(u8, out, "Second paragraph.") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "References:") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "/link") != null);
+}
+
+test "isBlankRender treats whitespace + omitted-region placeholders as blank" {
+    try std.testing.expect(isBlankRender(""));
+    try std.testing.expect(isBlankRender("   \n\n  "));
+    try std.testing.expect(isBlankRender("\n[Header omitted]\n[Sidebar omitted]\n"));
+    try std.testing.expect(!isBlankRender("\n[Header omitted]\nReal content here\n"));
+    try std.testing.expect(!isBlankRender("Visible"));
+    // Unterminated bracket is treated as blank (no closing ']'): nothing visible.
+    try std.testing.expect(isBlankRender("   ["));
+}
+
+test "browse render rescues content hidden only by the [hidden] reset" {
+    // A Next.js-style shell: the whole body streams into a `<div hidden>` and a
+    // Tailwind/normalize reset hides `[hidden]`. Honoring it blanks the page, so
+    // the rescue pass must surface the streamed content.
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body>
+        \\<div hidden id="S:0"><main><h1>Model Catalog</h1><p>Eight models available for deployment right now.</p></main></div>
+        \\</body></html>
+    );
+    defer doc.deinit();
+
+    var model = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = false,
+        .css_stylesheets = &.{"[hidden]:where(:not([hidden=until-found])){display:none}"},
+    });
+    defer model.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Model Catalog") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Eight models") != null);
+}
+
+test "browse render keeps [hidden] chrome hidden when the body is visible" {
+    // Mirror Wikipedia: visible article body plus small `[hidden]` chrome. The
+    // normal pass is non-blank, so the rescue never fires and the chrome that
+    // `[hidden]` legitimately hides stays hidden.
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body><main>
+        \\<p hidden>Skip to navigation shortcut that real users never see.</p>
+        \\<h1>Octopus</h1>
+        \\<p>An octopus is a soft-bodied eight-limbed mollusc of the order Octopoda.</p>
+        \\</main></body></html>
+    );
+    defer doc.deinit();
+
+    var model = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = false,
+        .css_stylesheets = &.{"[hidden]{display:none}"},
+    });
+    defer model.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Octopus") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "soft-bodied") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Skip to navigation") == null);
+}
+
+test "browse render still honors explicit display:none inside rescued content" {
+    // Even on the rescue pass, an explicit author `display:none` (not the
+    // generic `[hidden]` reset) must keep hiding its target.
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body>
+        \\<div hidden><main><p>Streamed body content that should appear.</p>
+        \\<p class="ad" style="display:none">tracking pixel junk</p></main></div>
+        \\</body></html>
+    );
+    defer doc.deinit();
+
+    var model = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = false,
+        .css_stylesheets = &.{"[hidden]{display:none}"},
+    });
+    defer model.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Streamed body content") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "tracking pixel junk") == null);
 }
 
 test "renderModel captures lines and interactive links" {
