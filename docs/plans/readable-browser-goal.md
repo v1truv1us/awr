@@ -7,15 +7,25 @@
 
 ## Definition of done
 
+Mission (raised bar, 2026-06-03): **every page we can render actually renders
+readably — not merely decodes.** When a page decodes but stays blank, diagnose
+*why* and route it to the right task; never call a decoded-but-unreadable page
+done. Three buckets, from the Tier-4 target-site audit:
+- **A — server-rendered** (HN, GitHub, Stack Overflow, old.reddit, Discourse,
+  Rails/Django/Phoenix): addressed by T3–T6. Bar = renders readably.
+- **B — JS-dependent UI** (Google homepage, light SPAs that strip UI in a
+  non-Chromium env): addressed by **T7**. Bar = usable shell/content renders.
+- **C — permanently out** (per-site anti-bot challenges, WebGL/canvas, `<video>`
+  playback): excluded by `spec/subspecs/browser-roadmap.md §5`. Not a failure.
+
 All tasks below are `[x]`, and on `main`:
 - `zig build` is green; both `awr` and `awrd` build.
 - `zig build test-tls` and `zig build test-h2` are green (Chrome-132 fingerprint
   intact) — **non-negotiable**.
 - Each task's targeted gate (below) is green.
-- The only acceptable red in `zig build test` is `corpus[wikipedia_octopus]`
-  (owned by a separate worktree; see Coordination) — **no other** corpus
-  fixture is red, and no NEW corpus fixture is reddened without a justified
-  re-bless.
+- `zig build test` has **zero** failures (the `wikipedia_octopus` snapshot was
+  re-blessed on `main`); no NEW corpus fixture is reddened without a justified
+  one-line re-bless.
 
 ## Guardrails (apply every iteration)
 
@@ -119,19 +129,29 @@ instead of only omit-markers; existing article-page corpus fixtures still pass
 (re-bless only with justification, never `wikipedia_octopus`); `test-tls`/`h2`
 green.
 
-### [ ] T3 — Brotli response decode
+### [ ] T3 — Brotli response decode (bucket A → renders readably)
 **Why:** AWR advertises `br` in `Accept-Encoding` (fingerprint) but only decodes
 gzip/deflate/zstd (`src/net/http1.zig:66`), so Google/Discourse return 200 but
-undecoded bytes. Highest-reach P1 item.
-**Files:** the decompression path (`src/client.zig` / `src/net/`), **without**
-touching header/fingerprint emission.
-**Approach:** add a Brotli decoder for `Content-Encoding: br` on all three fetch
-paths (stdlib H1, BoringSSL H1, H2), mirroring the existing gzip/zstd handling.
-Use an available Brotli implementation; do not alter `Accept-Encoding`.
-**Done-criteria / verify:** a round-trip unit test (pre-compressed Brotli bytes →
-decoded) like the existing gzip/zstd tests; `zig build test-client`/`test-net`
-green; `test-tls`/`test-h2` green (headers unchanged); manual: `awr https://www.google.com/`
-returns readable text, not binary.
+undecoded bytes. Highest-reach P1 item; unblocks the whole server-rendered
+`br` bucket.
+**Files:** decompression path (`src/client.zig` / `src/net/`) — **without**
+touching header/fingerprint emission; `third_party/brotli/` + `src/net/brotli_shim.c`
++ `build.zig` wiring.
+**Approach (decided 2026-06-03):** vendor Google's C `brotlidec` as a static lib
+with a Zig shim, mirroring how BoringSSL/nghttp2 are integrated (AWR already
+links C libs for TLS/H2 and lexbor for DOM — vendoring the reference decoder is
+consistent, not a deviation). Decode `Content-Encoding: br` on all three fetch
+paths (stdlib H1, BoringSSL H1, H2), mirroring existing gzip/zstd handling. Do
+NOT alter `Accept-Encoding`. *Follow-up (out of scope here):* an optional
+pure-Zig brotli rewrite later, if single-binary purity warrants it.
+**Done-criteria / verify (raised bar — renders readably, not just decoded):**
+1. round-trip unit test (pre-compressed Brotli bytes → expected output) like the
+   existing gzip/zstd tests in `src/client.zig`; `zig build test-client`/`test-net` green;
+2. `test-tls`/`test-h2` green (Accept-Encoding + fingerprint unchanged);
+3. manual: `awr extract https://meta.discourse.org/` returns **readable text**
+   (a real `br`-served server-rendered site renders, not just decodes);
+4. manual: `awr https://www.google.com/` is **decoded** (not binary) — full
+   Google UI is a JS-strip blocker tracked in **T7**, not T3.
 
 ### [ ] T4 — SVG graceful degradation
 **Why:** stb_image is raster-only; SVG sources (HN's `y18.svg`) become a 1×1
@@ -159,6 +179,29 @@ doesn't overlap.
 **Done-criteria / verify:** a test on a whitespace-heavy DOM asserts collapsed
 output; corpus fixtures still pass (re-bless with justification if improved);
 `test-tls`/`h2` green.
+
+### [ ] T7 — JS-driven UI render (bucket B → Google-class pages render)
+**Why:** some pages (Google homepage, light SPAs) return a near-empty shell and
+build/strip their UI via JS that branches on a Chromium environment, so even
+after Brotli decode (T3) the rendered page has no usable content. This is the
+"renders, not just decodes" gap for the JS-dependent bucket.
+**Files:** `src/page.zig` (post-load JS settle / DOM re-render), `src/js/*`,
+`src/dom/bridge.zig`, possibly `src/browse_heuristics.zig` (pick content after
+JS mutates the DOM). **Not** `src/net/` fingerprint emission.
+**Approach (scope to confirm at activation — this is the largest task):** make
+AWR present a browser-enough environment that JS-driven pages populate a usable
+DOM — e.g. ensure the post-load drain settles JS that injects content, re-pick
+content after mutation, and avoid non-Chromium UI-strip paths where feasible
+WITHOUT changing the network fingerprint. Diagnose Google specifically: identify
+the exact branch that strips the UI and address the smallest cause.
+**Done-criteria / verify:** `awr extract`/`awr browse` of a representative
+JS-dependent page (start with Google homepage, plus one light SPA) renders
+usable shell/content (links, search affordance, headings) rather than an empty
+shell; a co-located/e2e test pins the behavior on a hermetic fixture;
+`test-tls`/`test-h2` green (fingerprint untouched).
+**Boundary:** if usable render for a target genuinely requires layout (Tier 4)
+or full SPA runtime (Tier 5) or anti-bot evasion (bucket C), STOP and record the
+blocker + bucket rather than expanding scope or touching governed specs.
 
 ---
 
