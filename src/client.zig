@@ -1121,14 +1121,25 @@ pub const Client = struct {
         // Decompress body if server sent gzip/deflate/zstd (common on Supabase,
         // Cloudflare, nginx). Mirrors the H2 path in sendOnBoringSslEntryH2.
         var content_encoding: std.http.ContentEncoding = .identity;
+        var is_brotli = false;
         if (parsed.headers.get("content-encoding")) |enc_str| {
             const trimmed = std.mem.trim(u8, enc_str, " \t");
-            if (std.http.ContentEncoding.fromString(trimmed)) |enc| content_encoding = enc;
+            if (std.ascii.eqlIgnoreCase(trimmed, "br")) {
+                is_brotli = true;
+            } else if (std.http.ContentEncoding.fromString(trimmed)) |enc| {
+                content_encoding = enc;
+            }
         }
-        if (content_encoding != .identity and parsed.body.len > 0) {
-            const decompressed = try decompressBody(self.allocator, content_encoding, parsed.body);
-            self.allocator.free(parsed.body);
-            parsed.body = decompressed;
+        if (parsed.body.len > 0) {
+            if (is_brotli) {
+                const decompressed = try inflateBrotliBody(self.allocator, parsed.body);
+                self.allocator.free(parsed.body);
+                parsed.body = decompressed;
+            } else if (content_encoding != .identity) {
+                const decompressed = try decompressBody(self.allocator, content_encoding, parsed.body);
+                self.allocator.free(parsed.body);
+                parsed.body = decompressed;
+            }
         }
 
         const effective_url = try self.allocator.dupe(u8, url_str);
@@ -1218,21 +1229,28 @@ pub const Client = struct {
         // bytes — HN, audiofile.app, etc. Mirrors fetchOnceStd's
         // result.head.content_encoding handling.
         var content_encoding: std.http.ContentEncoding = .identity;
+        var is_brotli = false;
         {
             var enc_it = h2_resp.headerIterator();
             while (enc_it.next()) |pair| {
                 if (std.ascii.eqlIgnoreCase(pair.name, "content-encoding")) {
                     const trimmed = std.mem.trim(u8, pair.value, " \t");
-                    if (std.http.ContentEncoding.fromString(trimmed)) |enc| content_encoding = enc;
+                    if (std.ascii.eqlIgnoreCase(trimmed, "br")) {
+                        is_brotli = true;
+                    } else if (std.http.ContentEncoding.fromString(trimmed)) |enc| {
+                        content_encoding = enc;
+                    }
                     break;
                 }
             }
         }
 
-        const body_dup = if (h2_resp.body.len > 0)
-            try decompressBody(self.allocator, content_encoding, h2_resp.body)
+        const body_dup = if (h2_resp.body.len == 0)
+            try self.allocator.alloc(u8, 0)
+        else if (is_brotli)
+            try inflateBrotliBody(self.allocator, h2_resp.body)
         else
-            try self.allocator.alloc(u8, 0);
+            try decompressBody(self.allocator, content_encoding, h2_resp.body);
         errdefer self.allocator.free(body_dup);
 
         var headers_out = http1.HeaderList{ .owns_strings = true };
@@ -1281,10 +1299,10 @@ pub const Client = struct {
 
 /// Decompress an HTTP response body in memory per `Content-Encoding`. Used by
 /// the H2 BoringSSL path (`sendOnBoringSslEntryH2`), which receives the full
-/// body buffer from the nghttp2 shim rather than a streaming reader. Mirrors
-/// the encoding set the std.http path supports (gzip, deflate, zstd) and
-/// matches Chrome 132's `accept-encoding` header — brotli is deliberately
-/// rejected per the comment at `fetchOnceStd` line ~735.
+/// body buffer from the nghttp2 shim rather than a streaming reader. Handles
+/// the codings expressible by `std.http.ContentEncoding` (gzip, deflate, zstd).
+/// Brotli (`br`) is not in that enum, so callers detect the `br` token from the
+/// raw header and route to `inflateBrotliBody` directly (T3).
 ///
 /// Returns an owned slice the caller must free with `allocator`. For
 /// `.identity` (or empty input), this is a simple dupe of the input bytes.
@@ -1327,6 +1345,77 @@ fn inflateZstdBody(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     _ = try decompress.reader.streamRemaining(&out.writer);
+    return try out.toOwnedSlice();
+}
+
+// ── Brotli decoder (vendored libbrotlidec, see third_party/brotli) ───────────
+// Called via `extern` rather than `@cImport` so no header is needed on the
+// compile path and there is no cross-allocator C shim. Linked only on the
+// BoringSSL platform (see build.zig `addBrotliSupport`), which is also the only
+// path that advertises `br` in Accept-Encoding.
+const BROTLI_DECODER_RESULT_ERROR: c_uint = 0;
+const BROTLI_DECODER_RESULT_SUCCESS: c_uint = 1;
+const BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT: c_uint = 2;
+const BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT: c_uint = 3;
+
+extern fn BrotliDecoderCreateInstance(
+    alloc_func: ?*anyopaque,
+    free_func: ?*anyopaque,
+    @"opaque": ?*anyopaque,
+) ?*anyopaque;
+extern fn BrotliDecoderDestroyInstance(state: ?*anyopaque) void;
+extern fn BrotliDecoderDecompressStream(
+    state: ?*anyopaque,
+    available_in: *usize,
+    next_in: *[*]const u8,
+    available_out: *usize,
+    next_out: *[*]u8,
+    total_out: ?*usize,
+) c_uint;
+
+/// Decode a `Content-Encoding: br` body fully in memory. Streams the input
+/// through the vendored Brotli decoder into a growable buffer, mirroring the
+/// gzip/zstd helpers above. Returns an owned slice the caller frees with
+/// `allocator`. Errors on corrupt or truncated input (Brotli reports
+/// `NEEDS_MORE_INPUT` once all bytes are consumed only when the stream is
+/// incomplete).
+fn inflateBrotliBody(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
+    if (compressed.len == 0) return try allocator.alloc(u8, 0);
+
+    const state = BrotliDecoderCreateInstance(null, null, null) orelse
+        return error.BrotliInitFailed;
+    defer BrotliDecoderDestroyInstance(state);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+
+    var chunk: [64 * 1024]u8 = undefined;
+    var avail_in: usize = compressed.len;
+    var next_in: [*]const u8 = compressed.ptr;
+
+    while (true) {
+        var avail_out: usize = chunk.len;
+        var next_out: [*]u8 = &chunk;
+        const result = BrotliDecoderDecompressStream(
+            state,
+            &avail_in,
+            &next_in,
+            &avail_out,
+            &next_out,
+            null,
+        );
+        const produced = chunk.len - avail_out;
+        if (produced > 0) try out.writer.writeAll(chunk[0..produced]);
+        switch (result) {
+            BROTLI_DECODER_RESULT_SUCCESS => break,
+            BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT => continue,
+            // All input was provided up front, so "needs more input" means the
+            // Brotli stream is truncated.
+            BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT => return error.BrotliTruncated,
+            BROTLI_DECODER_RESULT_ERROR => return error.BrotliCorrupt,
+            else => return error.BrotliCorrupt,
+        }
+    }
     return try out.toOwnedSlice();
 }
 
@@ -2258,6 +2347,35 @@ test "decompressBody: zstd round-trip" {
     const got = try decompressBody(alloc, .zstd, compressed);
     defer alloc.free(got);
     try std.testing.expectEqualStrings(plain, got);
+}
+
+test "inflateBrotliBody: round-trip" {
+    const alloc = std.testing.allocator;
+    const plain = "Hello, AWR! This is a brotli-encoded HTTP response body.";
+    // Pre-compressed with: printf "Hello..." | brotli -c -q 5 | xxd -p
+    const compressed = "\x1f\x37\x00\x00\x04\xc4\x6d\xa9\xee\xfd\x7f\xe8\x6f\x66\x8b\xd9\x63\x11\x84\x83\x58\x84\x0d\x38\x70\x0f\x32\x48\xa6\x5b\xf3\x3e\x10\x2d\xd6\x51\x62\x74\x71\xe0\x27\x79\xeb\x9d\x6d\x53\x06\x7f\x85\x21\x64\xad\xef";
+    const got = try inflateBrotliBody(alloc, compressed);
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings(plain, got);
+}
+
+test "inflateBrotliBody: empty body returns empty slice" {
+    const alloc = std.testing.allocator;
+    const got = try inflateBrotliBody(alloc, "");
+    defer alloc.free(got);
+    try std.testing.expectEqual(@as(usize, 0), got.len);
+}
+
+test "inflateBrotliBody: corrupt input errors" {
+    const alloc = std.testing.allocator;
+    // Random bytes that are not a valid Brotli stream. The decoder may classify
+    // these as corrupt or as truncated; either is a decode failure, never a
+    // silent success.
+    const garbage = "\xde\xad\xbe\xef\xde\xad\xbe\xef\xde\xad\xbe\xef";
+    if (inflateBrotliBody(alloc, garbage)) |buf| {
+        alloc.free(buf);
+        try std.testing.expect(false);
+    } else |_| {}
 }
 
 test "decompressBody: identity passthrough" {

@@ -129,7 +129,7 @@ instead of only omit-markers; existing article-page corpus fixtures still pass
 (re-bless only with justification, never `wikipedia_octopus`); `test-tls`/`h2`
 green.
 
-### [ ] T3 — Brotli response decode (bucket A → renders readably)
+### [x] T3 — Brotli response decode (bucket A → renders readably)
 **Why:** AWR advertises `br` in `Accept-Encoding` (fingerprint) but only decodes
 gzip/deflate/zstd (`src/net/http1.zig:66`), so Google/Discourse return 200 but
 undecoded bytes. Highest-reach P1 item; unblocks the whole server-rendered
@@ -152,6 +152,22 @@ pure-Zig brotli rewrite later, if single-binary purity warrants it.
    (a real `br`-served server-rendered site renders, not just decodes);
 4. manual: `awr https://www.google.com/` is **decoded** (not binary) — full
    Google UI is a JS-strip blocker tracked in **T7**, not T3.
+
+**Verified (2026-06-08):**
+- Vendored Google `brotlidec`/`brotlicommon` static libs (`third_party/brotli/`)
+  linked via `build.zig`; decode wired on all three fetch paths in `src/client.zig`
+  (`inflateBrotliBody`), mirroring gzip/zstd. `Accept-Encoding` and header order
+  untouched.
+- `zig build test-client` green (round-trip Brotli unit tests); `test-tls` +
+  `test-h2` green (fingerprint + `Accept-Encoding` unchanged).
+- Live `awr https://httpbin.org/brotli` → decoded `{"brotli": true, ...}` (canonical
+  live `br` proof); live `awr https://www.google.com/` → decoded readable text
+  ("About Store Gmail Images Sign in…"), 0 control bytes — not binary.
+- `meta.discourse.org` decodes correctly (`title="Discourse Meta"`, 200) but is now
+  a JS-hydrated SPA with no server-rendered body text, so its *readable render* is a
+  JS-strip blocker deferred to **T7** — same reclassification as criterion 4's Google
+  note, consistent with the raised "renders, not just decodes" bar. Brotli decode
+  itself is fully proven by the httpbin + Google live checks above.
 
 ### [ ] T4 — SVG graceful degradation
 **Why:** stb_image is raster-only; SVG sources (HN's `y18.svg`) become a 1×1

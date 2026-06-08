@@ -68,6 +68,13 @@ pub fn build(b: *std.Build) void {
     const boringssl_lib_ssl = b.path("third_party/boringssl/lib/macos-arm64/libssl.a");
     const boringssl_lib_crpt = b.path("third_party/boringssl/lib/macos-arm64/libcrypto.a");
 
+    // ── Brotli paths (vendored in third_party/) ───────────────────────────
+    // Pre-built static decoder for `Content-Encoding: br`. See
+    // third_party/brotli/BUILD_NOTES.md to refresh. Decoder depends on common,
+    // so libbrotlidec.a must be linked before libbrotlicommon.a.
+    const brotli_lib_dec = b.path("third_party/brotli/lib/macos-arm64/libbrotlidec.a");
+    const brotli_lib_common = b.path("third_party/brotli/lib/macos-arm64/libbrotlicommon.a");
+
     // ── Test steps ────────────────────────────────────────────────────────
     const test_step = b.step("test", "Run all unit tests");
     const test_net_step = b.step("test-net", "Run src/net unit tests");
@@ -487,6 +494,7 @@ pub fn build(b: *std.Build) void {
         page_mod.linkSystemLibrary("lexbor", .{});
         if (supports_boringssl) addBoringSslSupport(b, page_mod, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
         if (supports_boringssl) addNgHttp2Support(b, page_mod, nghttp2_include, nghttp2_include_sys, nghttp2_lib);
+        if (supports_boringssl) addBrotliSupport(b, page_mod, brotli_lib_dec, brotli_lib_common);
 
         // render.zig (transitively imported via page) needs the
         // image_protocol module by name for its RenderOptions field.
@@ -529,6 +537,7 @@ pub fn build(b: *std.Build) void {
     client_mod.addImport("xev", xev_mod);
     if (supports_boringssl) addBoringSslSupport(b, client_mod, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
     if (supports_boringssl) addNgHttp2Support(b, client_mod, nghttp2_include, nghttp2_include_sys, nghttp2_lib);
+    if (supports_boringssl) addBrotliSupport(b, client_mod, brotli_lib_dec, brotli_lib_common);
     const client_test = b.addTest(.{
         .name = "client",
         .root_module = client_mod,
@@ -557,6 +566,7 @@ pub fn build(b: *std.Build) void {
         exe_page_mod.linkSystemLibrary("lexbor", .{});
         if (supports_boringssl) addBoringSslSupport(b, exe_page_mod, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
         if (supports_boringssl) addNgHttp2Support(b, exe_page_mod, nghttp2_include, nghttp2_include_sys, nghttp2_lib);
+        if (supports_boringssl) addBrotliSupport(b, exe_page_mod, brotli_lib_dec, brotli_lib_common);
 
         // Shared image-protocol module: both main.zig (root) and
         // render.zig (transitively under page) need it. Without a
@@ -857,6 +867,7 @@ pub fn build(b: *std.Build) void {
         page_import.linkSystemLibrary("lexbor", .{});
         if (supports_boringssl) addBoringSslSupport(b, page_import, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
         if (supports_boringssl) addNgHttp2Support(b, page_import, nghttp2_include, nghttp2_include_sys, nghttp2_lib);
+        if (supports_boringssl) addBrotliSupport(b, page_import, brotli_lib_dec, brotli_lib_common);
         // render.zig (transitively under page) needs image_protocol.
         const wpt_image_protocol_mod = b.createModule(.{
             .root_source_file = b.path("src/image/protocol.zig"),
@@ -924,6 +935,7 @@ pub fn build(b: *std.Build) void {
         page_import.linkSystemLibrary("lexbor", .{});
         if (supports_boringssl) addBoringSslSupport(b, page_import, boringssl_include, boringssl_lib_ssl, boringssl_lib_crpt);
         if (supports_boringssl) addNgHttp2Support(b, page_import, nghttp2_include, nghttp2_include_sys, nghttp2_lib);
+        if (supports_boringssl) addBrotliSupport(b, page_import, brotli_lib_dec, brotli_lib_common);
         // render.zig (transitively under page) needs image_protocol.
         const corpus_image_protocol_mod = b.createModule(.{
             .root_source_file = b.path("src/image/protocol.zig"),
@@ -1263,4 +1275,20 @@ fn addNgHttp2Support(
     mod.addIncludePath(nghttp2_include_sys);
     mod.addLibraryPath(nghttp2_lib);
     mod.linkSystemLibrary("nghttp2", .{});
+}
+
+/// Wire the vendored Brotli decoder into a module that compiles
+/// `src/client.zig`, so `inflateBrotliBody`'s `extern` `BrotliDecoder*`
+/// symbols resolve at link time. Mirrors `addBoringSslSupport`: the static
+/// archives are added as object files. The decoder archive depends on the
+/// common archive, so dec must precede common in link order.
+fn addBrotliSupport(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    brotli_lib_dec: std.Build.LazyPath,
+    brotli_lib_common: std.Build.LazyPath,
+) void {
+    _ = b;
+    mod.addObjectFile(brotli_lib_dec);
+    mod.addObjectFile(brotli_lib_common);
 }
