@@ -53,6 +53,16 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) ImageError!Image 
     if (bytes.len == 0) return ImageError.InvalidImage;
     if (bytes.len > max_encoded_bytes) return ImageError.OversizeEncoded;
 
+    // T4: reject SVG / XML markup up front. stb_image is raster-only and its
+    // TGA sniffer has no magic number, so we don't want to depend on the
+    // accident that markup happens to fail TGA header validation — detect it
+    // explicitly so an `<img src="...svg">` reliably degrades to the alt-text
+    // fallback (a clean UnsupportedFormat → pipeline miss) instead of risking a
+    // degenerate 1×1 emit. Sniffing the precise `<svg` / `<?xml` signatures
+    // (not any leading `<`) avoids false-rejecting a valid TGA whose first byte
+    // is an ID-field length of 0x3c.
+    if (looksLikeSvg(bytes)) return ImageError.UnsupportedFormat;
+
     // Pre-flight: ask stb_image for the dimensions without decoding so we
     // can reject oversized images before allocating gigabytes of RGBA.
     var info_w: c_int = 0;
@@ -105,6 +115,21 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) ImageError!Image 
         .pixels = pixels,
         .allocator = allocator,
     };
+}
+
+/// True when `bytes` is SVG / XML markup rather than a raster image. Skips an
+/// optional UTF-8 BOM and leading ASCII whitespace, then matches the `<svg`
+/// or `<?xml` signature case-insensitively. Deliberately narrow: a bare
+/// leading `<` is not enough (a valid TGA may start with id-length 0x3c), but
+/// `<svg` / `<?xml` cannot be a raster header.
+fn looksLikeSvg(bytes: []const u8) bool {
+    var b = bytes;
+    if (b.len >= 3 and b[0] == 0xEF and b[1] == 0xBB and b[2] == 0xBF) b = b[3..]; // UTF-8 BOM
+    var i: usize = 0;
+    while (i < b.len and (b[i] == ' ' or b[i] == '\t' or b[i] == '\n' or b[i] == '\r')) : (i += 1) {}
+    const rest = b[i..];
+    return std.ascii.startsWithIgnoreCase(rest, "<svg") or
+        std.ascii.startsWithIgnoreCase(rest, "<?xml");
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -173,4 +198,47 @@ test "decode rejects encoded payload over max_encoded_bytes" {
     defer std.testing.allocator.free(oversized);
     @memset(oversized, 0);
     try std.testing.expectError(ImageError.OversizeEncoded, decode(std.testing.allocator, oversized));
+}
+
+test "decode rejects SVG → UnsupportedFormat (no degenerate 1x1 emit)" {
+    // T4: stb_image is raster-only and its TGA sniffer has no magic number,
+    // so XML/SVG text can false-positive into a degenerate tiny image. Sniff
+    // SVG explicitly so the pipeline gets a clean miss and falls back to
+    // alt-text instead of emitting a 1×1 blob. Covers both the bare `<svg>`
+    // root and the `<?xml …?>`-prefixed form (HN's y18.svg uses the latter).
+    const svg_bare =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18\" height=\"18\">" ++
+        "<path d=\"M0 0h18v18H0z\" fill=\"#ff6600\"/></svg>";
+    try std.testing.expectError(ImageError.UnsupportedFormat, decode(std.testing.allocator, svg_bare));
+
+    const svg_xml_prefixed =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" ++
+        "<!-- HN logo -->\n" ++
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">" ++
+        "<circle cx=\"12\" cy=\"12\" r=\"10\"/></svg>";
+    try std.testing.expectError(ImageError.UnsupportedFormat, decode(std.testing.allocator, svg_xml_prefixed));
+
+    // Leading whitespace before the root (common in served SVGs) must still
+    // be recognized.
+    const svg_leading_ws = "  \n\t<svg viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\"/></svg>";
+    try std.testing.expectError(ImageError.UnsupportedFormat, decode(std.testing.allocator, svg_leading_ws));
+
+    // UTF-8 BOM before the root must still be recognized.
+    const svg_bom = "\xEF\xBB\xBF<svg></svg>";
+    try std.testing.expectError(ImageError.UnsupportedFormat, decode(std.testing.allocator, svg_bom));
+}
+
+test "looksLikeSvg: precise — does not false-match a TGA-style 0x3c header" {
+    // A valid uncompressed TGA may begin with id-length 0x3c ('<') followed by
+    // colormap-type 0x00; the sniff must not treat that as SVG. (We assert on
+    // looksLikeSvg directly because such bytes are not a *decodable* image, so
+    // decode() would still error later via stb_image — this isolates the sniff.)
+    const tga_like = [_]u8{ 0x3c, 0x00, 0x02, 0x00 } ++ [_]u8{0} ** 14;
+    try std.testing.expect(!looksLikeSvg(&tga_like));
+    // Sanity: real SVG/XML signatures match (case-insensitively).
+    try std.testing.expect(looksLikeSvg("<svg/>"));
+    try std.testing.expect(looksLikeSvg("<?XML version=\"1.0\"?>"));
+    // Non-SVG markup is not SVG-sniffed (stb_image's own validation rejects it
+    // separately — the sniff only claims the SVG/XML signatures).
+    try std.testing.expect(!looksLikeSvg("<html><body></body></html>"));
 }

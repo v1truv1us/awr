@@ -169,13 +169,29 @@ pure-Zig brotli rewrite later, if single-binary purity warrants it.
   note, consistent with the raised "renders, not just decodes" bar. Brotli decode
   itself is fully proven by the httpbin + Google live checks above.
 
-### [ ] T4 — SVG graceful degradation
+### [x] T4 — SVG graceful degradation
 **Why:** stb_image is raster-only; SVG sources (HN's `y18.svg`) become a 1×1
 placeholder blob. Should degrade to alt-text / skip, not a degenerate image.
 **Files:** `src/image/pipeline.zig` / `decode.zig` (detect SVG/unsupported and
 skip → alt-text path instead of emitting a 1×1 image).
 **Done-criteria / verify:** a test that an SVG (or undecodable) `<img>` yields
 the alt-text/footnote fallback, not a 1×1 image emit; `test-image` green.
+
+**Verified (2026-06-08):**
+- `src/image/decode.zig`: added an explicit `looksLikeSvg` sniff (skips UTF-8
+  BOM + leading whitespace, matches `<svg`/`<?xml` case-insensitively) that
+  returns `UnsupportedFormat` before stb_image runs. Previously SVG was
+  rejected only by accident (markup's 2nd byte fails stb_image's TGA
+  colormap-type validation); the sniff makes the rejection intentional and
+  robust to stb_image changes. The sniff is precise — it does not false-match a
+  valid TGA whose id-length first byte is `0x3c` (`<`).
+- Chain to alt-text is intact: `pipeline.build()` already drops images whose
+  decode fails (`pl.failed += 1`, never stored), so the renderer's lookup
+  misses and emits the `[alt][N]` footnote (existing test "render —
+  image_lookup miss falls back to alt-ref").
+- New tests in `decode.zig`: SVG (bare `<svg>`, `<?xml>`-prefixed, leading
+  whitespace, UTF-8 BOM) → `UnsupportedFormat`; `looksLikeSvg` precision (no
+  TGA `0x3c` false-match). `zig build test-image` green (image_decode 7/7).
 
 ### [ ] T5 — Image vertical row-height accounting
 **Why:** a kitty/iterm image occupies `r` cell rows but the render model counts
