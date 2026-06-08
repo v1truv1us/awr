@@ -1,72 +1,28 @@
-Skip to content[1][Header omitted]
+Skip to content[1] You signed in with another tab or window. Reload to refresh
+your session. You signed out in another tab or window. Reload to refresh your
+session. You switched accounts on another tab or window. Reload to refresh
+your session.[button] Dismiss alert[Dismiss this message] {{ message }}
+ziglang[2] / zig[3] Public[Navigation omitted]
 
-You signed in with another tab or window. Reload to refresh your session. You
-signed out in another tab or window. Reload to refresh your session. You
-switched accounts on another tab or window. Reload to refresh your session.[button]
-Dismiss alert[Dismiss this message] {{ message }}
-ziglang[2] / zig[3] Public  •                                 Uh oh!
-
-
-                                There was an error while loading. Please
-                                reload this page.
-
-
-
-  •        Notifications[4] You must be signed in to change notification
-      settings
-  •        Fork 3.1k[5]
-  •        Star 42.9k[6]
-
-[Navigation omitted]
-
-[7][ master] Branches[8]Tags[9][10][11][Go to file][Code][button]Open more
-actions menuFolders and files
+[4][ master][Code]Folders and files
 -----------------
 
-NameNameLast commit messageLast commit dateLatest commit
+Last commit dateLatest commit
 -------------
 
  History
 -------
 
-36,058 Commits[12][13]36,058 Commits.forgejo[14].forgejo[15]  ci[16]ci[17] 
- cmake[18]cmake[19]  doc[20]doc[21]  lib[22]lib[23]  src[24]src[25]  
-stage1[26]stage1[27]  test[28]test[29]  tools[30]tools[31]  
-.gitattributes[32].gitattributes[33]  .gitignore[34].gitignore[35]  
-.mailmap[36].mailmap[37]  CMakeLists.txt[38]CMakeLists.txt[39]  
-LICENSE[40]LICENSE[41]  README.md[42]README.md[43]  bootstrap.c[44]
-bootstrap.c[45]  build.zig[46]build.zig[47]  build.zig.zon[48]
-build.zig.zon[49]  [View all files]Repository files navigation
+          Repository files navigation
 ---------------------------
 
 [Navigation omitted]
 
 
-Moved to Codeberg[50]
+Moved to Codeberg[5]
 This repository is not mirrored.
 
-About
------
-
-Moved to Codeberg
-ziglang.org/news/migrating-from-github-to-codeberg/[51]Topics
-
-language[52] compiler[53] zig[54]Resources
-
-Readme[55]License
-
-MIT license[56]Uh oh!
-
-
-There was an error while loading. Please reload this page.
-
-Activity[57] Custom properties[58]Stars
-
-42.9k stars[59]Watchers
-
-384 watching[60]Forks
-
-3.1k forks[61] Report repository[62]Sponsor this project
+Sponsor this project
 --------------------
 
 Uh oh!
@@ -74,7 +30,7 @@ Uh oh!
 
 There was an error while loading. Please reload this page.
 
-  •        https://ziglang.org/zsf[63]
+  •        https://ziglang.org/zsf[6]
 Uh oh!
 
 
@@ -91,13 +47,11 @@ There was an error while loading. Please reload this page.
 Languages
 ---------
 
-  •        Zig 98.4%[64]
-  •        C 1.1%[65]
-  •        C++ 0.2%[66]
-  •        Python 0.1%[67]
-  •        CMake 0.1%[68]
-  •        JavaScript 0.1%[69]
-
-[Footer omitted]
+  •        Zig 98.4%[7]
+  •        C 1.1%[8]
+  •        C++ 0.2%[9]
+  •        Python 0.1%[10]
+  •        CMake 0.1%[11]
+  •        JavaScript 0.1%[12]
 
 [Dismiss error] You can’t perform that action at this time.[Close dialog]

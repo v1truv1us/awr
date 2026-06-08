@@ -117,6 +117,12 @@ const ComplexSelector = struct {
     const Combinator = enum { descendant, child, adjacent, sibling };
     steps: std.ArrayListUnmanaged(SimpleSelector) = .empty,
     combinators: std.ArrayListUnmanaged(Combinator) = .empty,
+    /// Set when the source had an empty compound (a stray/leading/doubled
+    /// combinator, e.g. "> p" or ".a > > .b"). Per CSS Selectors such a
+    /// selector is invalid and must match nothing — degrading it to the
+    /// remaining compounds would over-match (e.g. a `display:none` rule then
+    /// hides unrelated content).
+    invalid: bool = false,
 
     fn deinit(self: *ComplexSelector, alloc: std.mem.Allocator) void {
         for (self.steps.items) |*s| s.deinit(alloc);
@@ -427,7 +433,7 @@ pub const Document = struct {
     }
 
     fn matchesComplexSelector(elem: *const Element, sel: *const ComplexSelector) bool {
-        if (sel.steps.items.len == 0) return false;
+        if (sel.invalid or sel.steps.items.len == 0) return false;
         return matchStep(elem, sel, sel.steps.items.len - 1);
     }
 
@@ -633,7 +639,17 @@ pub const Document = struct {
                     break;
             }
             const token = std.mem.trim(u8, sel[start..i], " \t\n\r");
-            if (token.len == 0) continue;
+            if (token.len == 0) {
+                // sel[i] is a stray/leading/doubled combinator (e.g. "> p" or
+                // ".a > > .b"): the inner scan broke on it without advancing, so
+                // this compound is empty. The selector is invalid per CSS
+                // Selectors — flag it so it matches nothing, and skip the char
+                // to keep i moving (otherwise the outer loop spins forever at
+                // 100% CPU, hanging any render that evaluates such a selector).
+                out.invalid = true;
+                if (i < sel.len) i += 1;
+                continue;
+            }
             try out.steps.append(alloc, try parseSimpleSelector(alloc, token));
             if (i >= sel.len) break;
 
@@ -1294,6 +1310,27 @@ test "Element.matches supports compound selectors" {
     const leaf = doc.getElementById("leaf") orelse return error.SkipZigTest;
     try std.testing.expect(leaf.matches("p.copy"));
     try std.testing.expect(!leaf.matches("section.shell"));
+}
+
+test "Element.matches terminates on stray/doubled combinators" {
+    // Regression: parseComplexSelector spun forever on a compound that begins
+    // with a combinator (leading ">", doubled "> >", or trailing "x >"),
+    // because the empty token was skipped without advancing the cursor. Real
+    // minified stylesheets contain such fragments; matching them used to hang
+    // the whole render (100% CPU). These must simply return, not loop.
+    var doc = try parseDocument(std.testing.allocator, "<html><body><section class=\"shell\"><div><p id=\"leaf\" class=\"copy\">hello</p></div></section></body></html>");
+    defer doc.deinit();
+
+    const leaf = doc.getElementById("leaf") orelse return error.SkipZigTest;
+    // Degraded parses: just assert termination + no crash (booleans unused).
+    _ = leaf.matches("> p");
+    _ = leaf.matches("div > > p");
+    _ = leaf.matches("p >");
+    _ = leaf.matches("section > > div > > p");
+    _ = leaf.matches(">>");
+    // A valid descendant combinator still resolves correctly after the fix.
+    try std.testing.expect(leaf.matches("div p.copy"));
+    try std.testing.expect(leaf.matches("section.shell div > p"));
 }
 
 test "Element.closest walks ancestors" {
