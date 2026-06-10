@@ -64,10 +64,19 @@ pub const PipelineError = error{
     OutOfMemory,
 };
 
+/// An encoded image plus the terminal cell-rows it paints. T5: the row count
+/// lets the browse model reserve the image's vertical footprint so following
+/// content lays out below it rather than over it.
+pub const Entry = struct {
+    bytes: []u8,
+    rows: u32,
+};
+
 pub const Pipeline = struct {
     allocator: std.mem.Allocator,
-    /// Owns both keys (URL strings) and values (encoded protocol bytes).
-    bytes_by_url: std.StringHashMap([]u8),
+    /// Owns both keys (URL strings) and values (encoded protocol bytes + the
+    /// image's cell-row count).
+    bytes_by_url: std.StringHashMap(Entry),
     /// Count of `<img>` elements that were skipped because of the
     /// per-page max_images cap. Surfaced for status reporting.
     overflow_skipped: u32 = 0,
@@ -79,7 +88,7 @@ pub const Pipeline = struct {
         var it = self.bytes_by_url.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
+            self.allocator.free(entry.value_ptr.bytes);
         }
         self.bytes_by_url.deinit();
         self.* = undefined;
@@ -89,12 +98,18 @@ pub const Pipeline = struct {
     /// `RenderOptions.image_lookup`. The returned struct borrows
     /// `self`; lifetime is the Pipeline's.
     pub fn lookup(self: *const Pipeline) page_mod.ImageLookup {
-        return .{ .ctx = self, .getFn = getFn };
+        return .{ .ctx = self, .getFn = getFn, .rowsFn = rowsFn };
     }
 
     fn getFn(ctx: *const anyopaque, url: []const u8) ?[]const u8 {
         const self: *const Pipeline = @ptrCast(@alignCast(ctx));
-        if (self.bytes_by_url.get(url)) |bytes| return bytes;
+        if (self.bytes_by_url.get(url)) |entry| return entry.bytes;
+        return null;
+    }
+
+    fn rowsFn(ctx: *const anyopaque, url: []const u8) ?u32 {
+        const self: *const Pipeline = @ptrCast(@alignCast(ctx));
+        if (self.bytes_by_url.get(url)) |entry| return entry.rows;
         return null;
     }
 };
@@ -122,18 +137,18 @@ pub fn build(
     if (proto == .none) {
         return .{
             .allocator = allocator,
-            .bytes_by_url = std.StringHashMap([]u8).init(allocator),
+            .bytes_by_url = std.StringHashMap(Entry).init(allocator),
         };
     }
 
     const doc = page.current_doc orelse return .{
         .allocator = allocator,
-        .bytes_by_url = std.StringHashMap([]u8).init(allocator),
+        .bytes_by_url = std.StringHashMap(Entry).init(allocator),
     };
 
     var pl: Pipeline = .{
         .allocator = allocator,
-        .bytes_by_url = std.StringHashMap([]u8).init(allocator),
+        .bytes_by_url = std.StringHashMap(Entry).init(allocator),
     };
     errdefer pl.deinit();
 
@@ -323,7 +338,7 @@ fn encodeOne(
                 errdefer allocator.free(encoded);
                 const url_owned = try allocator.dupe(u8, raw_key);
                 errdefer allocator.free(url_owned);
-                try pl.bytes_by_url.put(url_owned, encoded);
+                try pl.bytes_by_url.put(url_owned, .{ .bytes = encoded, .rows = dims.rows });
                 return;
             }
         }

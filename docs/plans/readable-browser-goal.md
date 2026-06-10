@@ -193,7 +193,7 @@ the alt-text/footnote fallback, not a 1×1 image emit; `test-image` green.
   whitespace, UTF-8 BOM) → `UnsupportedFormat`; `looksLikeSvg` precision (no
   TGA `0x3c` false-match). `zig build test-image` green (image_decode 7/7).
 
-### [ ] T5 — Image vertical row-height accounting
+### [x] T5 — Image vertical row-height accounting
 **Why:** a kitty/iterm image occupies `r` cell rows but the render model counts
 it as one logical line, so rows after an image space oddly (the item-8 gap).
 **Files:** `src/render.zig` (image line modeling), `src/browser.zig` (draw line
@@ -203,6 +203,21 @@ following content lays out below the image, not over it.
 **Done-criteria / verify:** a test asserting an image line reserves its rows;
 `test-image`/`test-tui` green; manual PTY check that content after an image
 doesn't overlap.
+
+**Verified (2026-06-10):**
+- `src/image/pipeline.zig`: cache stores `Entry{ bytes, rows }` and exposes the
+  row count through a new optional `ImageLookup.rowsFn` (default `null`, so all
+  existing lookup sites keep their behavior).
+- `src/render.zig`: `reserveImageRows` emits `rows - 1` blank model lines after
+  a single-blob (kitty/iterm/sixel) image in the **browse profile only**, so
+  `ScreenModel.lines` accounts for every terminal row the image paints and the
+  TUI lays following content below it. Skipped for the streaming default
+  profile (terminal cursor advances as it paints) and braille (bytes already
+  carry one model line per row).
+- Tests: "image line reserves its cell rows in the model" (rows=4 → exactly 3
+  extra newlines vs a rows-less baseline) and "default profile and braille do
+  not reserve image rows". `zig build test` zero failures; `test-image` +
+  `test-tui` + `test-tls` + `test-h2` green.
 
 ### [ ] T6 — Renderer whitespace polish
 **Why:** extracted text (e.g. GitHub) carries excess structural whitespace

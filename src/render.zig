@@ -47,9 +47,20 @@ pub const RenderProfile = enum {
 pub const ImageLookup = struct {
     ctx: *const anyopaque,
     getFn: *const fn (ctx: *const anyopaque, url: []const u8) ?[]const u8,
+    /// T5: optional cell-row count for a URL's encoded image. The browse
+    /// model uses it to reserve the image's vertical footprint (single-blob
+    /// kitty/iterm/sixel images are one model line but occupy `r` terminal
+    /// rows). `null` (the default) means "unknown" — no rows are reserved,
+    /// preserving the behavior of lookups that don't carry dimensions.
+    rowsFn: ?*const fn (ctx: *const anyopaque, url: []const u8) ?u32 = null,
 
     pub fn get(self: ImageLookup, url: []const u8) ?[]const u8 {
         return self.getFn(self.ctx, url);
+    }
+
+    pub fn rows(self: ImageLookup, url: []const u8) ?u32 {
+        const f = self.rowsFn orelse return null;
+        return f(self.ctx, url);
     }
 };
 
@@ -2290,6 +2301,7 @@ fn renderImage(state: *RenderState, w: anytype, elem: *const dom.Element) anyerr
                 try state.ensureNewline(w);
                 try w.writeAll(bytes);
                 try state.newline(w);
+                try reserveImageRows(state, w, lookup, src);
                 return;
             }
         }
@@ -2321,6 +2333,28 @@ fn renderImage(state: *RenderState, w: anytype, elem: *const dom.Element) anyerr
             }
         }
     }
+}
+
+/// T5: reserve a single-blob image's vertical footprint in the browse model.
+///
+/// kitty / iterm / sixel images encode to one logical line of protocol bytes
+/// but paint `r` terminal rows; without reservation the browse model counts
+/// them as a single line and the TUI lays following content over the image.
+/// Emitting `r - 1` blank lines after the image line makes `ScreenModel.lines`
+/// account for every row the image occupies, so the next content starts below
+/// it. Skipped when:
+///   • not the browse profile — the streaming `awr render` path relies on the
+///     terminal advancing the cursor as it paints the image, and extra blank
+///     lines there would double the gap;
+///   • braille — those bytes already carry internal newlines (one model line
+///     per row), so the footprint is reserved by construction;
+///   • the lookup carries no row count (rows() == null) — nothing to reserve.
+fn reserveImageRows(state: *RenderState, w: anytype, lookup: ImageLookup, src: []const u8) anyerror!void {
+    if (state.opts.profile != .browse) return;
+    if (state.opts.image_protocol == .braille) return;
+    const r = lookup.rows(src) orelse return;
+    var i: u32 = 1; // the image's own line is already emitted
+    while (i < r) : (i += 1) try state.newline(w);
 }
 
 fn renderInput(state: *RenderState, w: anytype, elem: *const dom.Element) anyerror!void {
@@ -3637,6 +3671,8 @@ const TestImageLookup = struct {
     /// Lifetime of the returned bytes is the lifetime of this struct.
     url: []const u8,
     bytes: []const u8,
+    /// T5: optional cell-row count reported for the matching URL.
+    rows: ?u32 = null,
 
     fn get(ctx: *const anyopaque, url: []const u8) ?[]const u8 {
         const self: *const TestImageLookup = @ptrCast(@alignCast(ctx));
@@ -3644,8 +3680,14 @@ const TestImageLookup = struct {
         return null;
     }
 
+    fn getRows(ctx: *const anyopaque, url: []const u8) ?u32 {
+        const self: *const TestImageLookup = @ptrCast(@alignCast(ctx));
+        if (std.mem.eql(u8, url, self.url)) return self.rows;
+        return null;
+    }
+
     fn lookup(self: *const TestImageLookup) ImageLookup {
-        return .{ .ctx = self, .getFn = get };
+        return .{ .ctx = self, .getFn = get, .rowsFn = getRows };
     }
 };
 
@@ -3704,6 +3746,108 @@ test "render — no image_lookup keeps current alt-ref behavior verbatim" {
     });
     const out = fbs.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "[A photo]") != null);
+}
+
+test "render browse — image line reserves its cell rows in the model" {
+    // T5: a kitty image paints `rows` terminal rows but encodes to one
+    // logical line. The browse model must reserve the remaining rows-1
+    // lines so following content lays out below the image. Render the
+    // same DOM with and without a row count and compare newline counts —
+    // robust against unrelated spacing changes.
+    const html = "<html><body><main><img alt=\"pic\" src=\"/photo.jpg\"><p>After</p></main></body></html>";
+    const sentinel = "<<IMAGE-BYTES>>";
+
+    var doc_base = try dom.parseDocument(std.testing.allocator, html);
+    defer doc_base.deinit();
+    const tl_base = TestImageLookup{ .url = "/photo.jpg", .bytes = sentinel };
+    var model_base = try renderBrowseModel(std.testing.allocator, &doc_base, .{
+        .ansi_colors = false,
+        .show_images = true,
+        .image_protocol = .kitty,
+        .image_lookup = tl_base.lookup(),
+    });
+    defer model_base.deinit();
+
+    var doc = try dom.parseDocument(std.testing.allocator, html);
+    defer doc.deinit();
+    const tl = TestImageLookup{ .url = "/photo.jpg", .bytes = sentinel, .rows = 4 };
+    var model = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = false,
+        .show_images = true,
+        .image_protocol = .kitty,
+        .image_lookup = tl.lookup(),
+    });
+    defer model.deinit();
+
+    const base_nl = std.mem.count(u8, model_base.text, "\n");
+    const reserved_nl = std.mem.count(u8, model.text, "\n");
+    // rows=4 → 3 extra reserved lines beyond the image's own line.
+    try std.testing.expectEqual(base_nl + 3, reserved_nl);
+    // Following content still renders, below the reservation.
+    const img_at = std.mem.indexOf(u8, model.text, sentinel).?;
+    const after_at = std.mem.indexOf(u8, model.text, "After").?;
+    try std.testing.expect(after_at > img_at);
+}
+
+test "render — default profile and braille do not reserve image rows" {
+    // T5 skip paths: the streaming default profile relies on the terminal
+    // cursor advancing as it paints (extra blanks would double the gap),
+    // and braille bytes carry their own internal newlines.
+    const html = "<html><body><img alt=\"pic\" src=\"/photo.jpg\"><p>After</p></body></html>";
+    const sentinel = "<<IMAGE-BYTES>>";
+    const tl = TestImageLookup{ .url = "/photo.jpg", .bytes = sentinel, .rows = 4 };
+    const tl_base = TestImageLookup{ .url = "/photo.jpg", .bytes = sentinel };
+
+    // Default (streaming) profile: rows present vs absent → identical output.
+    inline for (.{ image_protocol.Protocol.kitty, image_protocol.Protocol.braille }) |proto| {
+        var doc = try dom.parseDocument(std.testing.allocator, html);
+        defer doc.deinit();
+        var buf: [1024]u8 = undefined;
+        var fbs = std.Io.Writer.fixed(&buf);
+        try render(std.testing.allocator, &fbs, &doc, .{
+            .ansi_colors = false,
+            .show_images = true,
+            .image_protocol = proto,
+            .image_lookup = tl.lookup(),
+        });
+
+        var doc_base = try dom.parseDocument(std.testing.allocator, html);
+        defer doc_base.deinit();
+        var buf_base: [1024]u8 = undefined;
+        var fbs_base = std.Io.Writer.fixed(&buf_base);
+        try render(std.testing.allocator, &fbs_base, &doc_base, .{
+            .ansi_colors = false,
+            .show_images = true,
+            .image_protocol = proto,
+            .image_lookup = tl_base.lookup(),
+        });
+
+        try std.testing.expectEqualStrings(fbs_base.buffered(), fbs.buffered());
+    }
+
+    // Browse profile + braille: rows must NOT add lines either.
+    var doc_br = try dom.parseDocument(std.testing.allocator, html);
+    defer doc_br.deinit();
+    var model_br = try renderBrowseModel(std.testing.allocator, &doc_br, .{
+        .ansi_colors = false,
+        .show_images = true,
+        .image_protocol = .braille,
+        .image_lookup = tl.lookup(),
+    });
+    defer model_br.deinit();
+    var doc_br_base = try dom.parseDocument(std.testing.allocator, html);
+    defer doc_br_base.deinit();
+    var model_br_base = try renderBrowseModel(std.testing.allocator, &doc_br_base, .{
+        .ansi_colors = false,
+        .show_images = true,
+        .image_protocol = .braille,
+        .image_lookup = tl_base.lookup(),
+    });
+    defer model_br_base.deinit();
+    try std.testing.expectEqual(
+        std.mem.count(u8, model_br_base.text, "\n"),
+        std.mem.count(u8, model_br.text, "\n"),
+    );
 }
 
 test "render — <section style=background-image> emits bg bytes when lookup hits" {
