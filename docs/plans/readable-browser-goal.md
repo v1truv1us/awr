@@ -235,20 +235,65 @@ after Brotli decode (T3) the rendered page has no usable content. This is the
 **Files:** `src/page.zig` (post-load JS settle / DOM re-render), `src/js/*`,
 `src/dom/bridge.zig`, possibly `src/browse_heuristics.zig` (pick content after
 JS mutates the DOM). **Not** `src/net/` fingerprint emission.
-**Approach (scope to confirm at activation — this is the largest task):** make
-AWR present a browser-enough environment that JS-driven pages populate a usable
-DOM — e.g. ensure the post-load drain settles JS that injects content, re-pick
-content after mutation, and avoid non-Chromium UI-strip paths where feasible
-WITHOUT changing the network fingerprint. Diagnose Google specifically: identify
-the exact branch that strips the UI and address the smallest cause.
-**Done-criteria / verify:** `awr extract`/`awr browse` of a representative
-JS-dependent page (start with Google homepage, plus one light SPA) renders
-usable shell/content (links, search affordance, headings) rather than an empty
-shell; a co-located/e2e test pins the behavior on a hermetic fixture;
-`test-tls`/`test-h2` green (fingerprint untouched).
-**Boundary:** if usable render for a target genuinely requires layout (Tier 4)
-or full SPA runtime (Tier 5) or anti-bot evasion (bucket C), STOP and record the
-blocker + bucket rather than expanding scope or touching governed specs.
+**Approach (scope locked 2026-06-10 — this is the largest task):** make AWR
+present a browser-enough environment that JS-driven pages populate a usable
+DOM, in two diagnosed slices:
+1. **Google homepage (UI-strip branch).** Diagnose the exact JS branch that
+   strips/withholds the UI in a non-Chromium env and address the *smallest*
+   cause (env/API surface the branch probes — never the network fingerprint).
+2. **Light SPA (JS-injected content).** Ensure the post-load drain settles
+   JS that injects content (timers/promises/microtasks that build the DOM),
+   then re-pick the content root after mutation
+   (`browse_heuristics`) so injected content — not the empty pre-JS shell —
+   is what renders.
+
+**Success criteria (all pass/fail):**
+- [ ] Hermetic Google-class fixture: a fixture reproducing the diagnosed
+      UI-strip branch renders usable shell (search affordance + links), pinned
+      by a co-located/e2e test that fails before and passes after.
+- [ ] Hermetic light-SPA fixture: a fixture whose body is empty until JS
+      injects content renders the injected content (headings/links), pinned by
+      a test; content re-pick after mutation is exercised by that test.
+- [ ] Live evidence (manual, not a CI gate): `awr extract https://www.google.com/`
+      shows usable shell text; one live light SPA (e.g. `meta.discourse.org`)
+      shows readable content or is explicitly re-bucketed with evidence.
+- [ ] `zig build test` zero failures; no new corpus fixture reddened without a
+      justified one-line re-bless (never `wikipedia_octopus`).
+- [ ] `test-tls` + `test-h2` green — fingerprint byte-identical.
+
+**Verification evidence required:** test names + real exit codes for every gate;
+the live-check transcript (or the re-bucket rationale) recorded in this file's
+Verified note, same format as T3–T5.
+
+**Scope:**
+- **In:** `src/page.zig` (post-load JS settle / re-render), `src/js/*`,
+  `src/dom/bridge.zig`, `src/browse_heuristics.zig` (re-pick after mutation).
+- **Out:** `src/net/` emission (fingerprint), Tier 4 layout, Tier 5 SPA
+  runtime, anti-bot evasion (bucket C), any governed-spec change.
+
+**Blocked stop condition:** if usable render for a target genuinely requires
+layout (Tier 4), full SPA runtime (Tier 5), or anti-bot evasion (bucket C),
+STOP and record: attempted paths, the exact branch/capability that blocks, the
+bucket it belongs to, and what decision would unblock — rather than expanding
+scope or touching governed specs. A re-bucketed target with evidence counts as
+a valid T7 outcome for that target; an unverified "probably works" does not.
+
+### [ ] T8 — Goal closure audit (definition-of-done, made executable)
+**Why:** the Definition of done at the top of this file is a completion
+contract; closing the goal requires mapping every clause to fresh evidence,
+not assuming it from memory of earlier tasks.
+**Done-criteria / verify (run all on `main`, record real exit codes):**
+- [ ] Every task T1–T7 is `[x]` with a Verified note in this file.
+- [ ] `zig build` green; both `awr` and `awrd` build.
+- [ ] `zig build test` zero failures.
+- [ ] `zig build test-tls` and `test-h2` green (fingerprint intact).
+- [ ] Each task's targeted gate re-run green (`test-image`, `test-tui`,
+      `test-client`, plus T6/T7 gates).
+- [ ] Local `main` pushed; no unmerged feature branches (drift check:
+      `git branch --no-merged main` is empty).
+- [ ] A closing Verified note in this file maps each Definition-of-done clause
+      to its evidence. Phrases like "good enough" or "probably fine" are not
+      evidence; if any clause is unverified, the goal stays open.
 
 ---
 
