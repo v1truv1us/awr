@@ -221,11 +221,42 @@ doesn't overlap.
 
 ### [ ] T6 — Renderer whitespace polish
 **Why:** extracted text (e.g. GitHub) carries excess structural whitespace
-(renderer-heuristic), per the target-site audit.
-**Files:** `src/render.zig` (whitespace collapsing in the flow path).
-**Done-criteria / verify:** a test on a whitespace-heavy DOM asserts collapsed
-output; corpus fixtures still pass (re-bless with justification if improved);
-`test-tls`/`h2` green.
+(renderer-heuristic), per the target-site audit. Intra-line collapsing already
+exists (`collapseWhitespace`, render.zig ~3382); the gap is **vertical** —
+stacked block-spacing newlines produce runs of blank lines.
+**Files:** `src/render.zig` (block-spacing / newline emission in the flow path).
+
+**Bar (locked 2026-06-10):** at most **1 blank line** between blocks (the
+lynx/w3m convention), applied in the **shared flow path** so both profiles —
+streaming `awr render`/extract (agent surface) and the browse model (TUI) —
+benefit.
+
+**Success criteria (all pass/fail):**
+- [ ] A whitespace-heavy DOM (nested divs/sections stacking block spacing)
+      renders with no run of 3+ consecutive `\n` in flow output, in BOTH the
+      default profile and `renderBrowseModel`, pinned by a co-located test
+      that fails before and passes after.
+- [ ] Exemptions hold, pinned by tests: `<pre>`/`<code>` blocks keep their
+      verbatim internal newlines; T5 reserved image rows are NOT collapsed
+      (the rows=4 → +3 lines test keeps passing unchanged).
+- [ ] `zig build test` zero failures; corpus fixtures that improve are
+      re-blessed with a one-line justification each (never
+      `wikipedia_octopus`); none reddened without one.
+- [ ] `test-tls` + `test-h2` green (no `src/net/` contact).
+
+**Verification evidence required:** test names + real exit codes; list of
+re-blessed fixtures with justifications in the commit message; Verified note
+in this file (T3–T5 format).
+
+**Scope:**
+- **In:** newline/block-spacing emission in `src/render.zig`'s flow path.
+- **Out:** intra-line whitespace (already done), `browse_heuristics` content
+  picking, `<pre>` rendering semantics, anything in `src/net/`.
+
+**Blocked stop condition:** if capping blank lines structurally requires
+buffering/lookahead that degrades the streaming default profile (it must stay
+single-pass), STOP and surface the trade-off rather than converting the
+streaming path to a buffered one unilaterally.
 
 ### [ ] T7 — JS-driven UI render (bucket B → Google-class pages render)
 **Why:** some pages (Google homepage, light SPAs) return a near-empty shell and
