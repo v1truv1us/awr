@@ -1,7 +1,5 @@
 [Header omitted]
 
-
-
 [Sidebar omitted]
 
 In 2007, Jeff Bezos, then a multibillionaire and now the world’s richest
@@ -545,7 +543,6 @@ are encrypted on our end. But if you wish for additional anonymity, please get
 in touch via one of these methods: Signal[46] SecureDrop[47] Postal Mail[48]Corrections
 -----------
 
-
 Doris Burke[49], Carson Kessler[50] and Ellis Simani[51] contributed
 reporting.
 Additional image credits: Elon Musk (Britta Pedersen / POOL / AFP via Getty
@@ -553,9 +550,6 @@ Images), Jeff Bezos (Leigh Vogel/Getty Images), Michael Bloomberg (Johannes
 Eisele/AFP via Getty Images), Warren Buffett (Jamie McCarthy/Getty Images)
 
 [Footer omitted]
-
-
-
 
 What We’re Watching
 

@@ -1,7 +1,6 @@
 Edge cases for the parser and renderer
 ======================================
 
-
 Unclosed elements
 -----------------
 
@@ -17,12 +16,10 @@ Nested without close
   •       Three (note: emphasis without close
   •       Four (after the bad em)
 
-
 Deeply nested divs
 ------------------
 
 Eleven divs deep — must not crash or stack-overflow.
-
 
 Mixed casing and weird whitespace
 ---------------------------------
@@ -31,20 +28,17 @@ Paragraph with UPPERCASE tag.
 Tag with weird attribute spacing. Lots   of non-breaking spaces and
 trailing.
 
-
 Tables without tbody
 --------------------
 
 Cell A Cell B
 Cell C Cell D
 
-
 Anchor edge cases
 -----------------
 
 Anchor with no href + Empty href + Fragment-only[1] + Javascript URL —
 must be quarantined or rendered as text[2].
-
 
 Unknown elements
 ----------------
@@ -56,5 +50,4 @@ Comments and CDATA
 
 Before comment. After comment.
 After script and style.
-
 

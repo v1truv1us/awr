@@ -18,7 +18,6 @@ Last commit dateLatest commit
 
 [Navigation omitted]
 
-
 Moved to Codeberg[5]
 This repository is not mirrored.
 
@@ -27,12 +26,10 @@ Sponsor this project
 
 Uh oh!
 
-
 There was an error while loading. Please reload this page.
 
   •        https://ziglang.org/zsf[6]
 Uh oh!
-
 
 There was an error while loading. Please reload this page.
 
@@ -40,7 +37,6 @@ Contributors
 ------------
 
 Uh oh!
-
 
 There was an error while loading. Please reload this page.
 

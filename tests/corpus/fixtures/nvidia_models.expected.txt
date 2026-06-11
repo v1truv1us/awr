@@ -1,6 +1,5 @@
 
 
-
 [Open Menu][NVIDIA][2][____________________]Ctrl+K[Search][Search][?][Login]Models
 ======
 
@@ -11,10 +10,8 @@ inference microservices
 
 [Sidebar omitted]
 
-
 [Filters (2)]8 models[____________________][Search]Sort By[dateCreated:DESC ▼][Most Recent]
 Z.ai[3]Free Endpointglm-4.7
-
 
 GLM-4.7 is a multilingual agentic coding partner with stronger reasoning, tool
 use, and UI skills.Tool Calling[4][+3]4.57M1w[Header omitted]

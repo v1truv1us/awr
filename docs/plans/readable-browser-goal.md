@@ -219,7 +219,7 @@ doesn't overlap.
   not reserve image rows". `zig build test` zero failures; `test-image` +
   `test-tui` + `test-tls` + `test-h2` green.
 
-### [ ] T6 — Renderer whitespace polish
+### [x] T6 — Renderer whitespace polish
 **Why:** extracted text (e.g. GitHub) carries excess structural whitespace
 (renderer-heuristic), per the target-site audit. Intra-line collapsing already
 exists (`collapseWhitespace`, render.zig ~3382); the gap is **vertical** —
@@ -232,17 +232,18 @@ streaming `awr render`/extract (agent surface) and the browse model (TUI) —
 benefit.
 
 **Success criteria (all pass/fail):**
-- [ ] A whitespace-heavy DOM (nested divs/sections stacking block spacing)
+- [x] A whitespace-heavy DOM (nested divs/sections stacking block spacing)
       renders with no run of 3+ consecutive `\n` in flow output, in BOTH the
       default profile and `renderBrowseModel`, pinned by a co-located test
       that fails before and passes after.
-- [ ] Exemptions hold, pinned by tests: `<pre>`/`<code>` blocks keep their
+- [x] Exemptions hold, pinned by tests: `<pre>`/`<code>` blocks keep their
       verbatim internal newlines; T5 reserved image rows are NOT collapsed
       (the rows=4 → +3 lines test keeps passing unchanged).
-- [ ] `zig build test` zero failures; corpus fixtures that improve are
-      re-blessed with a one-line justification each (never
-      `wikipedia_octopus`); none reddened without one.
-- [ ] `test-tls` + `test-h2` green (no `src/net/` contact).
+- [x] `zig build test` zero failures; corpus fixtures that improve are
+      re-blessed with a one-line justification each (`wikipedia_octopus`
+      included — owner explicitly approved the gold-fixture re-bless,
+      2026-06-10); none reddened without one.
+- [x] `test-tls` + `test-h2` green (no `src/net/` contact).
 
 **Verification evidence required:** test names + real exit codes; list of
 re-blessed fixtures with justifications in the commit message; Verified note
@@ -257,6 +258,30 @@ in this file (T3–T5 format).
 buffering/lookahead that degrades the streaming default profile (it must stay
 single-pass), STOP and surface the trade-off rather than converting the
 streaming path to a buffered one unilaterally.
+
+**Verified (2026-06-11):**
+- `src/render.zig`: blank-line cap in the shared flow path. `BufferWriter`
+  tracks the trailing `\n` run (constant-space counter — the streaming default
+  profile stays single-pass, no buffering/lookahead); `RenderState.newline` /
+  `writeByte` suppress a third consecutive `\n` when outside `<pre>`
+  (`pre_depth == 0`) and not reserving image rows (`bypass_blank_cap`, set
+  only inside `reserveImageRows` so T5's deliberate footprint survives).
+- Tests: "T6 — stacked block spacing collapses to at most one blank line
+  (both profiles)" — fail-before verified (cap disabled → page suite 453
+  pass / 1 fail, only this test); "T6 — `<pre>` blank-line runs are verbatim,
+  exempt from the cap" (3 blank lines inside `<pre>` survive byte-for-byte in
+  both profiles while surrounding flow runs collapse); T5's rows=4 → +3 lines
+  test passes unchanged.
+- Gates (real exit codes): `zig build test` = 0 (zero failures, both new T6
+  tests green); `test-tls` = 0; `test-h2` = 0; `test-corpus` = 0.
+- Corpus re-bless — 7 fixtures, every diff pure blank-line deletions
+  (non-blank content verified byte-identical before each bless):
+  github_zig (−4), malformed_edge (−7), nvidia_models (−3),
+  propublica_irs (−6), wiki_ar_octopus (−2), wiki_zh_octopus (−2),
+  wikipedia_octopus (−1 — a single 3-`\n` run between two
+  `[Header omitted]` placeholders; the gold-fixture "never re-bless" rule
+  was explicitly overridden by owner decision on 2026-06-10 for this
+  verified 1-byte whitespace-only collapse).
 
 ### [ ] T7 — JS-driven UI render (bucket B → Google-class pages render)
 **Why:** some pages (Google homepage, light SPAs) return a near-empty shell and

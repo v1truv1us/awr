@@ -330,13 +330,31 @@ const BoxRef = struct {
 const BufferWriter = struct {
     allocator: std.mem.Allocator,
     list: *std.ArrayList(u8),
+    /// T6: length of the run of `\n` bytes most recently appended to the
+    /// buffer (the current trailing blank-line run). Every byte the renderer
+    /// emits funnels through this writer, so it is the authoritative count of
+    /// consecutive newlines at the output tail. `RenderState.newline` /
+    /// `writeByte` read it to cap blank-line runs at one (two `\n`) in the
+    /// flow path; a non-`\n` byte resets it to zero. Zero-width ANSI escapes
+    /// reset it too, but blank-run newlines are always emitted contiguously
+    /// (no escapes interleave), and the agent/corpus surfaces run with
+    /// `ansi_colors = false`, so the count is exact where the cap matters.
+    trailing_newlines: usize = 0,
 
     pub fn writeAll(self: *BufferWriter, bytes: []const u8) !void {
+        if (bytes.len == 0) return;
         try self.list.appendSlice(self.allocator, bytes);
+        var run: usize = 0;
+        var i: usize = bytes.len;
+        while (i > 0 and bytes[i - 1] == '\n') : (i -= 1) run += 1;
+        // A wholly-newline slice extends the existing run; otherwise the last
+        // non-newline byte resets it and only the slice's own tail run counts.
+        self.trailing_newlines = if (run == bytes.len) self.trailing_newlines + run else run;
     }
 
     pub fn writeByte(self: *BufferWriter, byte: u8) !void {
         try self.list.append(self.allocator, byte);
+        if (byte == '\n') self.trailing_newlines += 1 else self.trailing_newlines = 0;
     }
 };
 
@@ -367,6 +385,12 @@ const RenderState = struct {
     /// Without this, the trailing space of "foo " before `<a>bar</a>` was
     /// dropped, rendering "foobar". Reset at every block/structural newline.
     pending_space: bool = false,
+    /// T6: when true, `newline`/`writeByte` skip the blank-line cap and emit
+    /// every requested `\n`. Set only around `reserveImageRows`, whose blank
+    /// lines are a deliberate vertical footprint (T5), not collapsible block
+    /// spacing. Off everywhere else so stacked block newlines collapse to at
+    /// most one blank line in the flow path.
+    bypass_blank_cap: bool = false,
     links: std.ArrayListUnmanaged(LinkRef) = .empty,
     fields: std.ArrayListUnmanaged(FieldRef) = .empty,
     boxes: std.ArrayListUnmanaged(BoxRef) = .empty,
@@ -482,6 +506,12 @@ const RenderState = struct {
     /// Write a single byte, tracking column and lazy-indent.
     fn writeByte(self: *RenderState, w: anytype, byte: u8) !void {
         if (byte == '\n') {
+            // T6: cap blank-line runs at one (two consecutive `\n`) in the
+            // flow path. Verbatim `<pre>` content (pre_depth > 0) and the
+            // image-row reservation are exempt. When suppressing, we are
+            // already at line start (the run we'd extend ends in `\n`), so
+            // col/at_line_start need no change and line_index must NOT advance.
+            if (self.pre_depth == 0 and !self.bypass_blank_cap and w.trailing_newlines >= 2) return;
             try w.writeByte('\n');
             self.col = 0;
             self.at_line_start = true;
@@ -527,6 +557,16 @@ const RenderState = struct {
 
     /// Emit a structural newline (no hang-indent emitted until next content).
     fn newline(self: *RenderState, w: anytype) !void {
+        // T6: collapse stacked block spacing to at most one blank line (two
+        // consecutive `\n`). Verbatim `<pre>` content and the T5 image-row
+        // reservation bypass the cap. A suppressed newline must not advance
+        // line_index, so ScreenModel line numbers stay aligned with the
+        // emitted text; we still consume any pending inter-word space because
+        // the caller intended a structural break.
+        if (self.pre_depth == 0 and !self.bypass_blank_cap and w.trailing_newlines >= 2) {
+            self.pending_space = false;
+            return;
+        }
         try w.writeByte('\n');
         self.col = 0;
         self.at_line_start = true;
@@ -2353,6 +2393,11 @@ fn reserveImageRows(state: *RenderState, w: anytype, lookup: ImageLookup, src: [
     if (state.opts.profile != .browse) return;
     if (state.opts.image_protocol == .braille) return;
     const r = lookup.rows(src) orelse return;
+    // T6: these blank lines are a deliberate vertical footprint, not
+    // collapsible block spacing — bypass the blank-line cap so all r-1
+    // reserved rows survive (the rows=4 → +3 lines contract holds).
+    state.bypass_blank_cap = true;
+    defer state.bypass_blank_cap = false;
     var i: u32 = 1; // the image's own line is already emitted
     while (i < r) : (i += 1) try state.newline(w);
 }
@@ -4713,4 +4758,78 @@ test "T2.8: focused link shows REVERSE when focused" {
     });
     defer focused_model.deinit();
     try std.testing.expect(std.mem.indexOf(u8, focused_model.text, REVERSE) != null);
+}
+
+test "T6 — stacked block spacing collapses to at most one blank line (both profiles)" {
+    // Whitespace-heavy DOM: empty paragraphs and a <br> run stack structural
+    // newlines into runs of 3+ `\n` before T6. The cap collapses every run to
+    // at most two `\n` (one blank line) in BOTH the streaming default profile
+    // and the browse model, without dropping content.
+    const html =
+        "<html><body><main>" ++
+        "<p>Alpha</p>" ++
+        "<p></p><p></p>" ++ // empty paragraphs → stacked trailing newlines
+        "<div>Beta<br><br><br>Gamma</div>" ++ // <br> run inside flowing text
+        "<section></section><section></section>" ++ // empty block landmarks
+        "<p>Delta</p>" ++
+        "</main></body></html>";
+
+    // Default profile (streaming `render` / agent surface).
+    {
+        var doc = try dom.parseDocument(std.testing.allocator, html);
+        defer doc.deinit();
+        var buf: [4096]u8 = undefined;
+        var fbs = std.Io.Writer.fixed(&buf);
+        try render(std.testing.allocator, &fbs, &doc, .{ .ansi_colors = false });
+        const out = fbs.buffered();
+        try std.testing.expect(std.mem.indexOf(u8, out, "\n\n\n") == null);
+        // Content survives the collapse.
+        try std.testing.expect(std.mem.indexOf(u8, out, "Alpha") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "Beta") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "Gamma") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "Delta") != null);
+    }
+
+    // Browse profile (TUI model) — same cap on the shared flow path.
+    {
+        var doc = try dom.parseDocument(std.testing.allocator, html);
+        defer doc.deinit();
+        var model = try renderBrowseModel(std.testing.allocator, &doc, .{ .ansi_colors = false });
+        defer model.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, model.text, "\n\n\n") == null);
+        try std.testing.expect(std.mem.indexOf(u8, model.text, "Alpha") != null);
+        try std.testing.expect(std.mem.indexOf(u8, model.text, "Delta") != null);
+    }
+}
+
+test "T6 — <pre> blank-line runs are verbatim, exempt from the cap" {
+    // The cap must never touch preformatted content: a run of blank lines
+    // inside <pre> is author intent (ASCII art, spaced code), not stacked
+    // block spacing. Surrounding flow blocks still collapse.
+    const html =
+        "<html><body><main>" ++
+        "<p>Intro</p><p></p><p></p>" ++ // flow run before the pre → capped
+        "<pre>top\n\n\n\nbottom</pre>" ++ // 3 blank lines inside pre → verbatim
+        "<p>Outro</p>" ++
+        "</main></body></html>";
+
+    // Default profile.
+    {
+        var doc = try dom.parseDocument(std.testing.allocator, html);
+        defer doc.deinit();
+        var buf: [4096]u8 = undefined;
+        var fbs = std.Io.Writer.fixed(&buf);
+        try render(std.testing.allocator, &fbs, &doc, .{ .ansi_colors = false });
+        const out = fbs.buffered();
+        try std.testing.expect(std.mem.indexOf(u8, out, "top\n\n\n\nbottom") != null);
+    }
+
+    // Browse profile.
+    {
+        var doc = try dom.parseDocument(std.testing.allocator, html);
+        defer doc.deinit();
+        var model = try renderBrowseModel(std.testing.allocator, &doc, .{ .ansi_colors = false });
+        defer model.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, model.text, "top\n\n\n\nbottom") != null);
+    }
 }
