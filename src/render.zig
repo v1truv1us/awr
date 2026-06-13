@@ -2803,8 +2803,18 @@ fn renderTextNode(state: *RenderState, w: anytype, text_node: *const dom.Text) a
     // boundaries — a leading space here honors a word emitted by a previous
     // sibling/inline element, and a trailing space requests a separator
     // before whatever inline content follows (e.g. an adjacent `<a>`).
-    var buf: [8192]u8 = undefined;
-    const normalized = normalizeWhitespace(&buf, raw);
+    //
+    // P1.1: the normalized output is at most raw.len bytes (collapsing
+    // whitespace only shrinks the slice). Heap-allocate when raw exceeds
+    // the fast-path stack buffer so large text nodes are never silently
+    // truncated.
+    var stack_buf: [8192]u8 = undefined;
+    const norm_buf: []u8 = if (raw.len <= stack_buf.len)
+        &stack_buf
+    else
+        try state.allocator.alloc(u8, raw.len);
+    defer if (raw.len > stack_buf.len) state.allocator.free(norm_buf);
+    const normalized = normalizeWhitespace(norm_buf, raw);
     if (normalized.len == 0) return;
 
     // CSS text-transform (visual only): applied to TUI output, never to the
@@ -4831,5 +4841,56 @@ test "T6 — <pre> blank-line runs are verbatim, exempt from the cap" {
         var model = try renderBrowseModel(std.testing.allocator, &doc, .{ .ansi_colors = false });
         defer model.deinit();
         try std.testing.expect(std.mem.indexOf(u8, model.text, "top\n\n\n\nbottom") != null);
+    }
+}
+
+test "P1.1 — text node larger than 8192 bytes renders tail in both profiles" {
+    // Regression: normalizeWhitespace received a fixed 8192-byte stack buffer
+    // and silently truncated input beyond that length. Build a paragraph whose
+    // content is 9000 bytes — all printable ASCII words separated by spaces —
+    // and assert that the recognizable sentinel word at the very tail survives
+    // in both the default (agent) and browse (TUI) render surfaces.
+    const alloc = std.testing.allocator;
+
+    // Build: 8900 bytes of filler words + separator + sentinel word.
+    // Each filler word is "word " (5 chars); 1780 repetitions = 8900 bytes.
+    const filler_word = "word ";
+    const sentinel = "ENDSENTINEL";
+    const filler_count = 1780;
+    const total_len = filler_count * filler_word.len + sentinel.len;
+    var content = try alloc.alloc(u8, total_len);
+    defer alloc.free(content);
+    var pos: usize = 0;
+    for (0..filler_count) |_| {
+        @memcpy(content[pos .. pos + filler_word.len], filler_word);
+        pos += filler_word.len;
+    }
+    @memcpy(content[pos .. pos + sentinel.len], sentinel);
+
+    // Wrap in a paragraph inside a <main> so the browse heuristic keeps it.
+    const prefix = "<html><body><main><p>";
+    const suffix = "</p></main></body></html>";
+    const html = try std.fmt.allocPrint(alloc, "{s}{s}{s}", .{ prefix, content, suffix });
+    defer alloc.free(html);
+
+    // Default profile (agent / streaming surface).
+    {
+        var doc = try dom.parseDocument(alloc, html);
+        defer doc.deinit();
+        const out_buf = try alloc.alloc(u8, total_len + 512);
+        defer alloc.free(out_buf);
+        var fbs = std.Io.Writer.fixed(out_buf);
+        try render(alloc, &fbs, &doc, .{ .ansi_colors = false });
+        const out = fbs.buffered();
+        try std.testing.expect(std.mem.indexOf(u8, out, sentinel) != null);
+    }
+
+    // Browse profile (TUI model).
+    {
+        var doc = try dom.parseDocument(alloc, html);
+        defer doc.deinit();
+        var model = try renderBrowseModel(alloc, &doc, .{ .ansi_colors = false });
+        defer model.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, model.text, sentinel) != null);
     }
 }
