@@ -25,6 +25,17 @@
   (Phase 3); gates nothing until then.
 - **Sequencing:** Phase 1 (achievable core, *active scope*, launchable now) →
   Phase 2 (Tier-4/5 SPA program, *ADR-gated*) → Phase 3 (rename + closure).
+- **Architecture is negotiable; the outcome is not (decided 2026-06-13).** The
+  invariant is a terminal-UX browser that *fully replaces Chrome* for the sites
+  below. The current Zig + QuickJS + lexbor reader (which *fakes* Chrome at the
+  TLS/H2 layer) is the default means, not a constraint. If the X feasibility
+  spike (P2.0) shows that architecture has a ceiling below this goal, that
+  triggers an **architecture-pivot evaluation** — a documented ADR comparing
+  (A) deepen the Zig engine, (B) embed/drive a real web engine and render it to
+  the terminal (the Browsh/Carbonyl approach; makes the hand-built fingerprint
+  moot because you *are* Chrome), or (C) a hybrid (Zig fast-path + real-engine
+  fallback for hard SPAs). The pivot is NOT abandonment of the goal, and the
+  spike must therefore *characterize the exact failure mode*, not just pass/fail.
 - **vs the public plan:** hostile-input hardening (B1/B2/B4), Linux/contributor
   work (D1), swallow/panic audits (D2–D5) stay deferred to
   `.goals/v0_1-public-readiness.md`. CI (A1) is done and guards every commit.
@@ -75,7 +86,10 @@ name with the Chrome-132 fingerprint and all gates intact.
 Delivers real daily-driver value in weeks; within active Tier-1/T7 scope.
 - **P1.1 — Content-loss fix (B3).** Kill the silent >8 KB text-node truncation
   (`src/render.zig:2806,3428`); >8 KB node survives in both profiles; `<pre>`
-  + `pending_space` semantics preserved.
+  + `pending_space` semantics preserved. **✓ Landed 2026-06-13** — stack/heap
+  split in `renderTextNode`; co-located 9 KB-node test (fails-before/passes-
+  after) asserts the tail survives in both profiles; `test-page`/`test-tls`/
+  `test-h2` exit 0; `src/net/` untouched.
 - **P1.2 — T7: JS-driven pages render usable content.** Post-load JS settle /
   re-render so Google results, AudioFile's dynamic sections, and a hermetic
   light-SPA fixture render content not blank shells; fix the pointer-keyed-bridge
@@ -161,7 +175,11 @@ is red, or if Phase 2 ran without the ADR.
 
 ## Blocked stop condition
 Stop and surface (don't loop past) if: the Phase-2 ADR amendment isn't
-authorized (Phase 2 cannot start); X-authenticated proves infeasible after real
-attempts; a requirement can't be met without perturbing the fingerprint; or any
-governed change needs a §8 sign-off not yet given. Report attempted paths,
-evidence, the exact blocker, and what input would unblock.
+authorized (Phase 2 cannot start); a requirement can't be met without perturbing
+the fingerprint; or any governed change needs a §8 sign-off not yet given.
+**If X-authenticated (or any hard requirement) proves infeasible in the current
+architecture after real attempts, that is NOT a terminal stop — it triggers the
+architecture-pivot evaluation above:** characterize the exact failure mode (TLS?
+empty JS shell? DOM never builds? adversarial challenge?), then decide
+deepen-vs-embed-vs-hybrid via ADR. Report attempted paths, evidence, the exact
+blocker, and which pivot the failure mode points to.
