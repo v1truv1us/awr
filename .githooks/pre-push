@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+#
+# AWR pre-push hook — fingerprint-critical fast gates.
+#
+# Blocks a push if formatting or the TLS / HTTP-2 fingerprint tests
+# regress, so a broken JA4 / TLS fingerprint can't land by accident.
+# Runs only the fast subset (not the full suite) to stay quick enough
+# that it's worth keeping enabled.
+#
+# Decisions key off EXIT CODES ONLY. `zig build` prints a benign
+# "failed command:" line even on success, so its output text is never
+# inspected — trust exit 0, not the log line.
+#
+# Enable in a fresh clone:
+#   git config core.hooksPath .githooks
+#
+# Bypass in an emergency (use sparingly): git push --no-verify
+#
+set -u
+
+# Run from the repo root so `zig build` finds build.zig regardless of
+# the directory git invoked the hook from.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if ! command -v zig >/dev/null 2>&1; then
+    echo "pre-push: BLOCKED — 'zig' not found on PATH" >&2
+    exit 1
+fi
+
+run_gate() {
+    echo "pre-push: running: $*"
+    if ! "$@"; then
+        echo "pre-push: BLOCKED — gate failed: $*" >&2
+        exit 1
+    fi
+}
+
+run_gate zig fmt --check src/ build.zig
+run_gate zig build test-tls
+run_gate zig build test-h2
+
+echo "pre-push: all fingerprint gates passed"

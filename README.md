@@ -236,6 +236,10 @@ JS sees real page data through a thin polyfill over five Zig callbacks:
   `test-dom`, `test-client`, `test-h2`, `test-page`, `test-tls`,
   `test-e2e`, `test-wpt`, `test-test262`.
 - macOS Homebrew paths auto-detected; Linux reads from `/usr/local`.
+- Pre-push fingerprint gate: `git config core.hooksPath .githooks`
+  enables `.githooks/pre-push`, which runs `zig fmt --check`,
+  `zig build test-tls`, and `zig build test-h2` before every push and
+  aborts on any failure.
 
 ### Observability
 
