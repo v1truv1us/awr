@@ -66,18 +66,28 @@ blocked on confirming or adjusting these.
 
 ### Milestone A — Safety net (do first; lowest risk, highest leverage)
 
-#### [ ] A1 — CI workflow (build + full gates on push/PR)
+#### [x] A1 — CI workflow (build + full gates on push/PR)
 **Why:** ~1330 tests + the fingerprint gates run only when a human remembers
 (audit X1). The fingerprint *is* the product; nothing guards it automatically.
 **Files:** `.github/workflows/ci.yml` (new).
-**Approach:** `macos-14` (arm64) leg: pin Zig 0.16.0 via `mlugg/setup-zig`;
-`brew install nghttp2 lexbor cmake ninja go`; run `scripts/bootstrap_deps.sh` +
-`scripts/bootstrap_lexbor.sh`; then `zig build test`, `test-tls`, `test-h2`,
-`zig fmt --check src/`. Red blocks merge. (Linux leg added in D1, after
-de-Homebrewing.)
+**Approach (as built):** `macos-14` (arm64 — vendored BoringSSL/Brotli are
+arm64-only); pin Zig 0.16.0 via `mlugg/setup-zig@v2`; `brew install lexbor
+libnghttp2` (both real Homebrew formulae installing to the prefixes `build.zig`
+expects — no `-Dlexbor-prefix` needed); `bash scripts/bootstrap_deps.sh` (clones
+path deps + applies the quickjs patches; `bootstrap_lexbor.sh` is NOT needed
+when brew lexbor is present); then four exit-code-keyed gate steps in order:
+`zig fmt --check src/ build.zig`, `zig build test-tls`, `zig build test-h2`,
+`zig build test`. (Linux leg added in D1, after de-Homebrewing.)
 **Done/verify:** a PR shows the workflow running all gates; an intentionally
 unformatted / fingerprint-breaking commit shows red blocking. Keys off exit
 codes only.
+
+**Verified (2026-06-13):** `.github/workflows/ci.yml` added. Local validation:
+`actionlint` clean; all three gate steps (`test`, `test-tls`, `test-h2`) exist
+in `build.zig`; `zig fmt --check src/ build.zig` exits 0; lexbor (3.0.0) +
+libnghttp2 (1.69.0) confirmed as Homebrew formulae at the expected prefixes.
+The live CI run and making it a required check (branch protection) happen on
+the first push to GitHub — not machine-verifiable locally.
 
 ### Milestone B — Hostile-input resource budgets & correctness
 

@@ -1,0 +1,61 @@
+# AWR continuous integration — fingerprint-critical merge gate.
+#
+# Enforces the Chrome-132 TLS/JA4 + HTTP/2 fingerprint and the full unit
+# test suite on every push and pull request. The TLS fingerprint IS the
+# product; this gate is what stops a silent regression from landing when a
+# human forgets to run the suite.
+#
+# Decisions key off EXIT CODES only — `zig build` prints a benign
+# "failed command:" line even on success, so its output text is never
+# inspected (trust exit 0, not the log line).
+#
+# macOS/arm64 only: BoringSSL and Brotli are vendored as prebuilt
+# macos-arm64 static libs (third_party/), so the runner must be Apple
+# Silicon (macos-14). A Linux leg is deferred until the build is
+# de-Homebrewed (see .goals/v0_1-public-readiness.md, task D1).
+#
+# To block merges on red: enable branch protection on `main` in GitHub
+# repo settings -> Branches and require this workflow's check. That rule
+# lives in repo settings, not in this file.
+
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build + fingerprint + tests (macOS arm64)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig 0.16.0
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install native deps (lexbor + nghttp2)
+        run: brew install lexbor libnghttp2
+
+      - name: Bootstrap path dependencies (libxev + quickjs-ng)
+        run: bash scripts/bootstrap_deps.sh
+
+      - name: Format check
+        run: zig fmt --check src/ build.zig
+
+      - name: TLS fingerprint gate
+        run: zig build test-tls
+
+      - name: HTTP/2 fingerprint gate
+        run: zig build test-h2
+
+      - name: Full unit test suite
+        run: zig build test
