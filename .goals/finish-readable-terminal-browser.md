@@ -1,5 +1,12 @@
 # Goal — Finish the readable-terminal-browser cluster
 
+> **SUPERSEDED (2026-06-13).** This goal (T1–T7) was folded into
+> `.goals/make-awr-a-real-browser-core-wpt.md` (as its Phase 0–1). Live T-task
+> status is the ledger `docs/plans/readable-browser-goal.md` (T1–T6 done; T7/T8
+> open), and the public/contributor readiness track is
+> `.goals/v0_1-public-readiness.md`. The checkboxes below are a historical
+> snapshot and are no longer maintained — do not read them as current status.
+
 **Objective:** Make every page AWR *can* render actually render readably (not
 merely decode) by landing tasks T1–T7 merged on a fully green `main`, executing
 in order from T3 (Brotli decode via vendored C `brotlidec`), per the execution

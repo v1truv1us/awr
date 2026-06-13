@@ -29,7 +29,10 @@ pool, one rendered DOM.
 - **TUI Quality Track** is CLOSED (2026-05-30): inline link word-wrap,
   loading indicator (`⟳ Loading…` header), help modal (`h` key),
   table linearization (HN/YC jobs render in reading order), navigation
-  feedback. AWR is usable as a daily browser replacement.
+  feedback. AWR is usable as a daily browser for server-rendered and
+  interactive reading; JS-driven / SPA pages that build their UI client-side
+  are still being brought to a usable render (T7,
+  `docs/plans/readable-browser-goal.md`).
 - **Tiers 4–5** (real CSS/layout engine and full SPA parity) are documented in
   `spec/subspecs/browser-roadmap.md §3` and deferred.
 
@@ -268,8 +271,12 @@ without recompiling AWR.
 
 - Native MCP stdio server mode remains deferred; use `awr tools` and `awr call`
   as the supported integration surface.
-- Browser/TUI work and later fingerprinting remain deferred; `awr <url>` is the
-  main shipped product path.
+- The interactive TUI (`awr browse`) is shipped (Tier 1 closed); `awr <url>`
+  remains the primary agent path. Later fingerprint-identity work and Tiers 4–5
+  (layout engine, full SPA parity) remain deferred.
+- JS-driven / SPA pages that build their UI client-side do not yet render usable
+  content (tracked as T7 in `docs/plans/readable-browser-goal.md`); public +
+  contributor hardening is tracked in `.goals/v0_1-public-readiness.md`.
 - The closed MVP surface is intentionally narrower than a full browser API.
   See `spec/MVP.md` and `spec/subspecs/wpt-conformance.md` for the exact shipped
   subset.

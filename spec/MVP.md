@@ -8,9 +8,12 @@
 > link word-wrap, loading indicator, help modal, table linearization, nav
 > feedback). Tiers 4–5 (layout engine, full SPA parity) are documented and
 > deferred per `spec/subspecs/browser-roadmap.md`. Daemon mode is closed per
-> `spec/subspecs/daemon-mode.md`. AWR is now fully usable as a browser
-> replacement for both humans and agents. This file remains the change-control
-> point for any tier promotion or scope change.
+> `spec/subspecs/daemon-mode.md`. AWR is usable as a browser for server-rendered
+> and interactive reading on both surfaces; JS-driven / SPA pages that build
+> their UI client-side are still being brought to a usable render (T7,
+> `docs/plans/readable-browser-goal.md`), and public + contributor hardening is
+> tracked in `.goals/v0_1-public-readiness.md`. This file remains the
+> change-control point for any tier promotion or scope change.
 
 ---
 
