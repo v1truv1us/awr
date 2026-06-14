@@ -894,29 +894,44 @@ pub const Page = struct {
 
     // ── HB2 blank/shell detector ─────────────────────────────────────────
 
-    /// Min visible <body> chars below which a Zig render counts as a blank/shell
-    /// page worth escalating to the Chrome backend. The 2026-06-13 spike measured
-    /// X.com at ~1 char (SPA shell) vs Hacker News at ~13k — 64 is a safe cut.
+    /// Min visible *rendered* chars below which a page counts as a blank/shell
+    /// worth escalating to the Chrome backend. The 2026-06-13 spike measured
+    /// X.com at ~1 rendered char vs Hacker News at ~13k — 64 is a safe cut.
     const BLANK_SHELL_MIN_CHARS: usize = 64;
 
-    fn isBlankShell(body_text: []const u8) bool {
-        const trimmed = std.mem.trim(u8, body_text, " \t\r\n");
+    fn isBlankShell(text: []const u8) bool {
+        const trimmed = std.mem.trim(u8, text, " \t\r\n");
         return trimmed.len < BLANK_SHELL_MIN_CHARS;
+    }
+
+    /// Render the just-loaded document to a throwaway model and report whether
+    /// the *rendered* output is a blank/shell. Keys on rendered text, not
+    /// body_text: a bot-challenge or SPA shell can carry body_text yet render
+    /// to nothing (x.com serves AWR a ~190-char "try again" challenge that
+    /// renders to 1 char). Returns false (don't escalate) if rendering fails.
+    fn rendersBlank(self: *Page, result: *const PageResult) bool {
+        var model = self.renderBrowseModel(self.allocator, result, .{
+            .ansi_colors = false,
+            .show_images = false,
+        }) catch return false;
+        defer model.deinit();
+        return isBlankShell(model.text);
     }
 
     // ── HB2 per-URL router ───────────────────────────────────────────────
 
     /// Per-URL router (HB2): run the Zig fast-path; if it renders a blank/shell
-    /// (client-rendered SPA), escalate to the headless-Chrome CDP backend and
-    /// re-render Chrome's JS-settled DOM with JS disabled. Server-rendered pages
-    /// (e.g. Hacker News) never spawn Chrome. Both surfaces call this.
+    /// (client-rendered SPA or bot-challenge), escalate to the headless-Chrome
+    /// CDP backend and re-render Chrome's JS-settled DOM with JS disabled.
+    /// Server-rendered pages (e.g. Hacker News) never spawn Chrome. Both
+    /// surfaces call this.
     pub fn navigateSmart(self: *Page, url: []const u8) !PageResult {
         var result = try self.navigate(url);
-        if (!isBlankShell(result.body_text)) return result; // Zig path wins; no Chrome
+        if (!self.rendersBlank(&result)) return result; // Zig path wins; no Chrome
         if (!cdp.chromeAvailable()) return result; // graceful: keep Zig result
 
         if (std.c.getenv("AWR_ROUTER_LOG") != null)
-            std.debug.print("[router] {s}: blank Zig render ({d} body chars) -> escalating to Chrome\n", .{ url, result.body_text.len });
+            std.debug.print("[router] {s}: blank Zig render -> escalating to Chrome\n", .{url});
 
         const chrome_html = cdp.fetchRenderedHtml(self.allocator, self.io, url, .{}) catch return result;
         defer self.allocator.free(chrome_html);
