@@ -1005,7 +1005,7 @@ fn loadPage(
     location: []const u8,
 ) !page_mod.PageResult {
     if (std.mem.startsWith(u8, location, "http://") or std.mem.startsWith(u8, location, "https://")) {
-        return p.navigate(location);
+        return p.navigateSmart(location);
     }
 
     const path: []const u8 = if (std.mem.startsWith(u8, location, "file://"))

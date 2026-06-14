@@ -14,6 +14,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const client = @import("client.zig");
+const cdp = @import("cdp/client.zig");
 const engine = @import("js/engine.zig");
 const webcrypto_backend = @import("js/webcrypto_backend.zig");
 const dom = @import("dom/node.zig"); // parseDocument handles HTML+DOM internally
@@ -262,6 +263,9 @@ fn collectExternalScriptUrls(
 
 // ── PageResult ────────────────────────────────────────────────────────────
 
+/// Which rendering backend produced this PageResult.
+pub const Backend = enum { zig, chrome };
+
 /// Result of a Page.navigate() or Page.processHtml() call.
 /// All fields are owned by this struct; call deinit() when done.
 pub const PageResult = struct {
@@ -283,6 +287,9 @@ pub const PageResult = struct {
     /// `null` only if the bridge failed to initialise — an empty array
     /// ("[]") is returned when the page registered no tools.
     tools_json: ?[]const u8 = null,
+    /// Which backend rendered this result. Defaulted so all existing
+    /// PageResult construction sites compile without change.
+    backend: Backend = .zig,
 
     allocator: std.mem.Allocator,
 
@@ -883,6 +890,45 @@ pub const Page = struct {
         }
         if (self.metrics_sink) |s| s.protocol_main = resp.protocol.tag();
         return self.processHtml(resp.url, resp.status, resp.body);
+    }
+
+    // ── HB2 blank/shell detector ─────────────────────────────────────────
+
+    /// Min visible <body> chars below which a Zig render counts as a blank/shell
+    /// page worth escalating to the Chrome backend. The 2026-06-13 spike measured
+    /// X.com at ~1 char (SPA shell) vs Hacker News at ~13k — 64 is a safe cut.
+    const BLANK_SHELL_MIN_CHARS: usize = 64;
+
+    fn isBlankShell(body_text: []const u8) bool {
+        const trimmed = std.mem.trim(u8, body_text, " \t\r\n");
+        return trimmed.len < BLANK_SHELL_MIN_CHARS;
+    }
+
+    // ── HB2 per-URL router ───────────────────────────────────────────────
+
+    /// Per-URL router (HB2): run the Zig fast-path; if it renders a blank/shell
+    /// (client-rendered SPA), escalate to the headless-Chrome CDP backend and
+    /// re-render Chrome's JS-settled DOM with JS disabled. Server-rendered pages
+    /// (e.g. Hacker News) never spawn Chrome. Both surfaces call this.
+    pub fn navigateSmart(self: *Page, url: []const u8) !PageResult {
+        var result = try self.navigate(url);
+        if (!isBlankShell(result.body_text)) return result; // Zig path wins; no Chrome
+        if (!cdp.chromeAvailable()) return result; // graceful: keep Zig result
+
+        if (std.c.getenv("AWR_ROUTER_LOG") != null)
+            std.debug.print("[router] {s}: blank Zig render ({d} body chars) -> escalating to Chrome\n", .{ url, result.body_text.len });
+
+        const chrome_html = cdp.fetchRenderedHtml(self.allocator, self.io, url, .{}) catch return result;
+        defer self.allocator.free(chrome_html);
+
+        const prev = self.disable_scripts;
+        self.disable_scripts = true;
+        defer self.disable_scripts = prev;
+
+        var chrome_result = self.processHtml(url, 200, chrome_html) catch return result; // keep Zig result on failure
+        result.deinit(); // escalation succeeded — free the blank Zig result
+        chrome_result.backend = .chrome;
+        return chrome_result;
     }
 
     /// True when `url` should resolve as a local filesystem read
@@ -3117,3 +3163,34 @@ fn appendUrlEncodedBytes(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), 
 /// Backward-compat alias for the test name; remove on next sweep of the
 /// page test fixtures.
 const appendUrlEncodedTest = appendUrlEncodedBytes;
+
+test "isBlankShell — empty/whitespace/short body is a shell; rich body is not" {
+    // empty string is a shell
+    try std.testing.expect(Page.isBlankShell(""));
+    // whitespace-only is a shell
+    try std.testing.expect(Page.isBlankShell("   \n\t  "));
+    // 30-char string is below BLANK_SHELL_MIN_CHARS (64)
+    try std.testing.expect(Page.isBlankShell("short content under sixty-four."));
+    // 200-char string is not a shell
+    const rich = "a" ** 200;
+    try std.testing.expect(!Page.isBlankShell(rich));
+}
+
+test "HB2 mapping — disable_scripts renders settled SPA HTML to a non-blank result" {
+    const allocator = std.testing.allocator;
+    var page = try Page.init(allocator, std.testing.io);
+    defer page.deinit();
+
+    page.disable_scripts = true;
+
+    // Simulate Chrome's JS-settled outerHTML: real content well over 64 visible chars.
+    const fixture =
+        \\<html><body><div id="app"><h1>Loaded</h1><p>This paragraph contains enough visible text to exceed sixty-four characters comfortably.</p></div></body></html>
+    ;
+
+    var result = try page.processHtml("https://example.test/", 200, fixture);
+    defer result.deinit();
+
+    try std.testing.expect(std.mem.indexOf(u8, result.body_text, "Loaded") != null);
+    try std.testing.expect(!Page.isBlankShell(result.body_text));
+}

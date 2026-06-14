@@ -1274,7 +1274,7 @@ pub const BrowserSession = struct {
 
         try self.beginLoading(url);
         defer self.endLoading();
-        var result = try self.page.navigate(url);
+        var result = try self.page.navigateSmart(url);
         errdefer result.deinit();
         try self.installLoadedPage(result, previous_query);
     }
