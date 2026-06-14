@@ -24,7 +24,7 @@
   verified across 3 research rounds; fits "discern a remote page". Applied last
   (Phase 3); gates nothing until then.
 - **Sequencing:** Phase 1 (achievable core, *active scope*, launchable now) →
-  Phase 2 (Tier-4/5 SPA program, *ADR-gated*) → Phase 3 (rename + closure).
+  Phase 2 (hybrid Chrome backend, *ADR 0004-gated*) → Phase 3 (rename + closure).
 - **Architecture is negotiable; the outcome is not (decided 2026-06-13).** The
   invariant is a terminal-UX browser that *fully replaces Chrome* for the sites
   below. The current Zig + QuickJS + lexbor reader (which *fakes* Chrome at the
@@ -36,6 +36,9 @@
   moot because you *are* Chrome), or (C) a hybrid (Zig fast-path + real-engine
   fallback for hard SPAs). The pivot is NOT abandonment of the goal, and the
   spike must therefore *characterize the exact failure mode*, not just pass/fail.
+  **Spike done 2026-06-13 → GO (C) hybrid** (`reports/2026-06-13-architecture-spike.md`,
+  ADR 0004): current arch renders X/CF blank + Google bot-walls it; real Chrome
+  clears it. Pivot adopted; fully-terminal / headless-only invariant locked.
 - **vs the public plan:** hostile-input hardening (B1/B2/B4), Linux/contributor
   work (D1), swallow/panic audits (D2–D5) stay deferred to
   `.goals/v0_1-public-readiness.md`. CI (A1) is done and guards every commit.
@@ -90,11 +93,11 @@ Delivers real daily-driver value in weeks; within active Tier-1/T7 scope.
   split in `renderTextNode`; co-located 9 KB-node test (fails-before/passes-
   after) asserts the tail survives in both profiles; `test-page`/`test-tls`/
   `test-h2` exit 0; `src/net/` untouched.
-- **P1.2 — T7: JS-driven pages render usable content.** Post-load JS settle /
-  re-render so Google results, AudioFile's dynamic sections, and a hermetic
-  light-SPA fixture render content not blank shells; fix the pointer-keyed-bridge
-  mutation-ordering nondeterminism (2026-06-04). Files: `src/page.zig`,
-  `src/js/*`, `src/dom/bridge.zig`, `src/browse_heuristics.zig`. **NOT** `src/net/`.
+- **P1.2 — T7: JS-driven SPA rendering. ✗ CANCELLED 2026-06-13** — superseded by
+  the Phase-2 Chrome backend (ADR 0004). Hand-rolling SPA rendering in QuickJS is
+  exactly the throwaway work the spike was run to avoid; Google / AudioFile-
+  dynamic / X / CF are served by the driven engine instead. (Server-rendered
+  reading stays on the Zig path; P1.1/P1.3/P1.4 unaffected.)
 - **P1.3 — Forms + POST + session persistence.** Audit existing coverage
   (agent-browser spec scopes `fetch`/XHR POST, `<form method=post>`, cookie
   persistence) against HN-post + GitHub-login, then fill gaps. Transcript shows
@@ -105,26 +108,33 @@ Delivers real daily-driver value in weeks; within active Tier-1/T7 scope.
 - **P1.5 — Phase-1 closure audit.** HN, AudioFile, GitHub-read, Google-render
   each mapped to fresh evidence; Verified note in the T3–T6 ledger format.
 
-## Phase 2 — Tier-4/5 real-browser program (ADR-GATED — DO NOT START W/O §8 SIGN-OFF)
-- **P2.0 — Governance (decided 2026-06-13: spike-first).** **X feasibility spike
-  FIRST** — confirm whether an authenticated X session is even reachable for this
-  architecture (the load-bearing risk) — then a formal go/no-go on the full
-  Phase-2 build after Phase 1 lands. Draft the ADR amendment un-deferring
-  Tiers 4-5 (references `.goals/make-awr-a-real-browser-core-wpt.md`) in parallel
-  so it's ready; land it per `spec/MVP.md §8` only on a "go" decision.
-- **P2.1 — Dynamic-SPA engine foundations.** History API, MutationObserver,
-  WebSocket, continuous JS-driven re-render — the shared capability behind
-  CF-dash, X, and GitHub-approve. (May force touching `render.zig`; coordinate
-  with the still-deferred god-file split.)
-- **P2.2 — Cloudflare dashboard:** authenticated DNS management end-to-end.
-- **P2.3 — GitHub PR approve:** the JS review-submit flow.
-- **P2.4 — X: view tweets + sign in.** HIGHEST STRUCTURAL RISK — adversarial
-  anti-automation built to defeat non-Chrome clients (Arkose/JS challenges,
-  behavioral fingerprinting) that flags even real headless Chrome. Treated as a
-  hard requirement, but with an explicit **Blocked-Stop** if proven structurally
-  infeasible after real attempts — documented with evidence, never silently
-  dropped.
-- **P2.5 — Phase-2 closure audit.**
+## Phase 2 — Hybrid Chrome backend (per ADR 0004; §8 sign-off gates the build)
+**Spike done 2026-06-13 → GO hybrid.** The "Tier-4/5-in-Zig" framing is replaced:
+we *drive* a real engine, not *build* one (weeks, de-risked). Headless-only,
+fully-terminal invariant (ADR 0004). **No P2.2+ work starts until ADR 0004 is
+Accepted under `spec/MVP.md §8`.**
+- **P2.0 — Architecture spike. ✓ DONE 2026-06-13.** Verdict in
+  `reports/2026-06-13-architecture-spike.md`: current arch renders X + CF-dash
+  blank (client SPAs) and Google bot-walls the impersonation; real Chrome 149
+  renders X at ~338k chars. → pivot to hybrid.
+- **P2.1 — Governance: accept ADR 0004 (§8).** Move ADR 0004 Proposed → Accepted;
+  cascade per `spec/MVP.md §8` (edit `spec/MVP.md`, affected sub-specs, ADR 0001/
+  0003, README + agent guidance). Gates all work below.
+- **P2.2 — macOS Keychain session-reuse (load-bearing first task).** Finish the
+  deferred encrypted-cookie import so a headless Chrome inherits the author's
+  logged-in session — no GUI login. Without this, fully-terminal auth fails on
+  macOS.
+- **P2.3 — CDP backend + per-URL router.** Drive a headless Chrome via the
+  DevTools Protocol; pull the rendered DOM into the existing terminal render
+  model; router picks Zig-fast-path vs Chrome per URL, auto-escalating when the
+  Zig render returns a blank/shell. **NOT** `src/net/`.
+- **P2.4 — TUI↔CDP interaction bridge.** Forward TUI actions (Tab/Enter/typing/
+  submit) as CDP input events to the live DOM, then re-pull + re-render to the
+  terminal — interaction stays in the TUI, Chrome executes underneath.
+- **P2.5 — Hard sites end-to-end.** Via the backend + session reuse: X (view +
+  signed-in), Cloudflare-dash (DNS management), GitHub PR-approve, Google search.
+  Cold-session interactive CAPTCHA is the documented residual edge (ADR 0004).
+- **P2.6 — Phase-2 closure audit** — every hard site mapped to fresh evidence.
 
 ## Phase 3 — Rename + final closure
 - **P3.1 — Rename.** Apply the chosen name everywhere (binary `awr`/`awrd`, CLI,
