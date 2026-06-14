@@ -370,6 +370,33 @@ pub fn build(b: *std.Build) void {
         test_net_step.dependOn(&run_ws.step);
     }
 
+    // ── CDP transport (HB2 step 1) — pure Zig, imports websocket only ─────
+    // src/cdp/client.zig spawns headless Chrome and pulls JS-settled
+    // outerHTML via the DevTools Protocol (CDP over WebSocket).  No C
+    // deps; reuses websocket.zig as the WS transport.  Wired into the
+    // default test gate so the pure unit tests (parseWsUrl, field
+    // extraction, no-Chrome skip) always run.
+    {
+        const cdp_ws_mod = b.createModule(.{
+            .root_source_file = b.path("src/net/websocket.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const cdp_mod = b.createModule(.{
+            .root_source_file = b.path("src/cdp/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true, // std.c.getenv for AWR_CHROME env override
+        });
+        cdp_mod.addImport("../net/websocket.zig", cdp_ws_mod);
+        const cdp_test = b.addTest(.{
+            .name = "cdp",
+            .root_module = cdp_mod,
+        });
+        const run_cdp = b.addRunArtifact(cdp_test);
+        test_step.dependOn(&run_cdp.step);
+    }
+
     // ── History API stack (Tier 3 — T3.B) — pure Zig, no deps ─────────────
     // Same shape as the storage module: standalone for fast iteration,
     // bridge.zig pulls it transitively when dom-bridge tests run.
