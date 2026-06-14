@@ -6,14 +6,20 @@
 > (`spec/subspecs/cssom.md`) closed 2026-05-27, and the TUI Quality Track
 > (`spec/subspecs/tui-quality.md`) closed 2026-05-30 (all 5 UX items: inline
 > link word-wrap, loading indicator, help modal, table linearization, nav
-> feedback). Tiers 4–5 (layout engine, full SPA parity) are documented and
-> deferred per `spec/subspecs/browser-roadmap.md`. Daemon mode is closed per
-> `spec/subspecs/daemon-mode.md`. AWR is usable as a browser for server-rendered
-> and interactive reading on both surfaces; JS-driven / SPA pages that build
-> their UI client-side are still being brought to a usable render (T7,
-> `docs/plans/readable-browser-goal.md`), and public + contributor hardening is
-> tracked in `.goals/v0_1-public-readiness.md`. This file remains the
-> change-control point for any tier promotion or scope change.
+> feedback). Tiers 4–5 (layout engine, full SPA parity) are now being
+> **activated via a hybrid rendering backend** — Path A, a CDP-controlled real
+> Chrome, per `docs/adr/0004-hybrid-rendering-engine.md` (Accepted 2026-06-13) —
+> **not** a native Zig layout engine; native Zig layout (Path B) stays deferred.
+> Daemon mode is closed per `spec/subspecs/daemon-mode.md`. AWR is usable as a
+> browser for server-rendered and interactive reading on both surfaces.
+> Client-rendered SPAs are handled by the hybrid backend: AWR drives a real
+> **headless** Chrome via CDP for SPA / interactive / challenge sites while
+> keeping the Zig fast-path + agent surface for server-rendered pages — fully
+> terminal, no GUI; detail in `spec/subspecs/hybrid-backend.md`. (Supersedes the
+> cancelled T7 QuickJS-SPA approach.) Public + contributor hardening is tracked
+> in `.goals/v0_1-public-readiness.md`; the dogfood track in
+> `.goals/dogfood-daily-driver.md`. This file remains the change-control point
+> for any tier promotion or scope change.
 
 ---
 
@@ -66,6 +72,8 @@ Tests and Test262 cases.
 | `spec/subspecs/cssom.md` | **Tier 3 closed sub-spec**: non-layout CSSOM, stylesheet loading, cascade, simple `getComputedStyle()` values, and `white-space` renderer integration |
 | `docs/adr/0001-spec-governance.md` | Historical record for spec/documentation governance decisions |
 | `docs/adr/0003-tier4-layout-strategy.md` | Living decision record for Tier 4 layout strategy, layout-adapter design, and embed-vs-native evidence |
+| `docs/adr/0004-hybrid-rendering-engine.md` | **Accepted** decision record: hybrid rendering — drive a real headless Chrome via CDP for SPAs (Path A for Tier 4–5); fully-terminal/headless invariant |
+| `spec/subspecs/hybrid-backend.md` | **Active sub-spec**: the CDP-driven headless-Chrome backend + per-URL router + session/profile reuse + TUI↔CDP interaction bridge |
 
 ### Deferred, documented, not active now
 
@@ -191,11 +199,13 @@ These tracks stay documented, but they are **not** in the active queue:
 - native MCP stdio server work → `spec/subspecs/mcp-stdio.md`
 - later fingerprinting / owned browser identity work →
   `spec/Fingerprint-Plan.md`
-- Tiers 4–5 of the browser-roadmap (layout engine, full SPA parity) →
-  `spec/subspecs/browser-roadmap.md §3`. Tier 4 strategy and evidence live in
-  `docs/adr/0003-tier4-layout-strategy.md`. Tiers 2 and 3 are closed;
-  Tiers 4–5 do not have dedicated sub-specs yet; sub-specs are created
-  at promotion time.
+- Tiers 4–5 are being delivered via the **hybrid rendering backend** (Path A,
+  `docs/adr/0004-hybrid-rendering-engine.md`, Accepted 2026-06-13) — execution
+  authority is `spec/subspecs/hybrid-backend.md` (ACTIVE). What stays **deferred**:
+  a **native Zig layout engine** (Path B, `docs/adr/0003-tier4-layout-strategy.md`)
+  and the broader Tier-5 in-process API surface (Service Workers, IndexedDB, full
+  Web Crypto, Workers) not required by the dogfood site list.
+  `spec/subspecs/browser-roadmap.md §3` owns the cross-tier ladder.
 
 The agent-browser scope (POST in `fetch` and XHR, `<form method=post>` end-to-
 end through `awr browse`, cookie jar disk persistence) is governed by

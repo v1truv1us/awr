@@ -672,6 +672,20 @@ documentation governance.
   `spec/subspecs/browser-roadmap.md`, `src/dom/bridge.zig` (cssom natives +
   polyfill rewrite), `src/render.zig` (white-space integration), this ADR.
 
+### 2026-06-13 — ADR 0004 accepted: hybrid rendering backend activated
+
+- Change: A new ACTIVE sub-spec `spec/subspecs/hybrid-backend.md` joins the
+  canonical doc map (`spec/MVP.md §2`); Tiers 4–5 are activated via Path A (drive
+  a real headless Chrome via CDP) rather than a native Zig engine. No governance
+  *rules* changed — only spec boundaries (a new active execution authority) and
+  the active/deferred split.
+- Reason: `docs/adr/0004-hybrid-rendering-engine.md` (Accepted) records the
+  pivot; §8 requires updating this governance record when spec boundaries change.
+- Documents updated: `docs/adr/0004-hybrid-rendering-engine.md`,
+  `docs/adr/0003-tier4-layout-strategy.md`, `spec/MVP.md`,
+  `spec/subspecs/browser-roadmap.md`, `spec/subspecs/hybrid-backend.md` (new),
+  `README.md`, `AGENTS.md`, `CLAUDE.md`, this ADR.
+
 ### Template for future amendments
 
 - Date:

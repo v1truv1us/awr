@@ -18,8 +18,10 @@ jar / connection pool via the daemon (`spec/subspecs/daemon-mode.md`).
 The product climbs a **tiered capability ladder** (see
 `spec/subspecs/browser-roadmap.md`) from a closed Tier 0 (agent
 runtime + WPT/Test262 gates + daemon) toward the broader readable
-web. Tier 1 (interactive TUI parity with lynx/w3m) is the active
-track; Tiers 2–5 are deferred and documented.
+web. Tiers 0–3 are closed; the **hybrid rendering backend** (drive a real
+headless Chrome via CDP for SPAs — ADR 0004, `spec/subspecs/hybrid-backend.md`)
+is the active track. A native Zig layout engine (Path B) and the Tier-5
+in-process API surface stay deferred.
 
 WebMCP and MCP server mode are supported layers on top of the runtime;
 not the primary framing.
@@ -85,10 +87,10 @@ set; auto-spawn handled by the CLI.
 Deferred (do not implement without an ADR amendment):
 
 1. native MCP stdio server (`spec/subspecs/mcp-stdio.md`)
-2. Tier 2+ browser capabilities (rendering polish, dynamic-site
-   APIs like History/WebSocket/MutationObserver, layout engine,
-   full SPA support) — see
-   `spec/subspecs/browser-roadmap.md §3`
+2. a **native Zig layout engine** (Path B). Tiers 4–5 are instead being
+   delivered by the **hybrid Chrome backend** (Path A, ADR 0004,
+   `spec/subspecs/hybrid-backend.md`, ACTIVE), so the in-process layout / full
+   SPA build stays deferred. See `spec/subspecs/browser-roadmap.md §3`.
 
 When docs or code comments need a one-line description, use **dual-surface
 CLI-first terminal browser**.

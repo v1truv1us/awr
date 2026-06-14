@@ -1,6 +1,6 @@
 # ADR 0004 — Hybrid rendering engine (drive a real engine, don't build one)
 
-- Status: Proposed (awaiting `spec/MVP.md §8` sign-off, 2026-06-13) — NOT yet Accepted
+- Status: **Accepted** (signed off under `spec/MVP.md §8` by the author, 2026-06-13)
 - Date: 2026-06-13
 - Owners: AWR maintainers
 - Related specs: `spec/MVP.md`, `spec/subspecs/browser-roadmap.md`, `docs/adr/0003-tier4-layout-strategy.md`, `.goals/dogfood-daily-driver.md`, `.goals/make-awr-a-real-browser-core-wpt.md`
@@ -175,6 +175,18 @@ Reason: The 2026-06-13 spike proved the current architecture has a structural
 ceiling (X / CF blank; Google behavioral block) that the dogfood goal's hard
 requirements cannot tolerate, and that real Chrome clears it. Driving an engine
 is weeks and de-risked; building one is years and still loses to bot-detection.
+
+### 2026-06-13 — Accepted under §8
+
+Decision: The author signed off. Status Proposed → Accepted. This ADR is the
+`browser-roadmap.md §3` Tier-4 "chosen path" amendment (Path A — CDP-controlled
+Chromium). Phase 2 of `.goals/dogfood-daily-driver.md` (the CDP backend) is
+unblocked; the §8 cascade was applied in the same change (spec/MVP.md,
+browser-roadmap.md, the new `spec/subspecs/hybrid-backend.md`, ADR 0001/0003,
+README + agent guidance).
+
+Reason: Driving a real engine is the sanctioned Path A the roadmap already
+contemplated; the spike supplied the required evidence.
 
 ## Amendment rule
 

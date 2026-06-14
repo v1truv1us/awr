@@ -195,6 +195,14 @@ Decision: If/when prototyping embedding, use the external renderer only to answe
 
 Reason: AWR's differentiator is one shared runtime for humans and agents. Replacing fetch/DOM/JS/cookies with a browser backend is a larger product decision and requires a separate ADR amendment.
 
+### 2026-06-13 — Superseded by ADR 0004: Chrome as a render backend, not just a layout oracle
+
+Decision: `docs/adr/0004-hybrid-rendering-engine.md` (Accepted) selects this ADR's **Option A** (embedded CDP Chromium) and scopes it **up** from the "layout-oracle-only" stance to a full **rendering backend** for client-rendered SPAs, behind a per-URL router, fully terminal / headless-only. AWR now relies on an embedded engine for more than layout/geometry — the trigger this ADR's amendment rule names. The `LayoutAdapter` seam proposed here is subsumed by ADR 0004's render-backend + router contract. Option C (native Zig layout) stays deferred.
+
+Reason: The dogfood goal made app-grade SPAs (X, Cloudflare dashboard) hard requirements; the 2026-06-13 spike (`reports/2026-06-13-architecture-spike.md`) proved the Zig engine renders them blank and real Chrome renders them fully. A layout-only oracle cannot deliver interaction; the backend must drive the whole page.
+
+Documents updated: ADR 0004; the §8 cascade in `spec/MVP.md`, `spec/subspecs/browser-roadmap.md`, the new `spec/subspecs/hybrid-backend.md`, `docs/adr/0001-spec-governance.md`, README + agent guidance.
+
 ## Amendment rule
 
 Update this ADR whenever:

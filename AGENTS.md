@@ -18,7 +18,7 @@ Global framing:
 Execution specs:
 
 - Canonical umbrella spec: `spec/MVP.md`
-- Cross-tier roadmap (T0 closed, T1 active, T2-T5 deferred):
+- Cross-tier roadmap (T0–T3 closed; hybrid Chrome backend ACTIVE per ADR 0004; native Zig layout deferred):
   `spec/subspecs/browser-roadmap.md`
 - Tier 0 closure record: `spec/subspecs/mvp-remainder.md`,
   `spec/subspecs/wpt-conformance.md`

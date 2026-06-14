@@ -10,7 +10,8 @@ pool, one rendered DOM.
 > **Cross-tier roadmap:** `spec/subspecs/browser-roadmap.md`
 > **Tier 0 closure record:** `spec/subspecs/mvp-remainder.md`, `spec/subspecs/wpt-conformance.md`
 > **Tier 1 closed sub-spec:** `spec/subspecs/browser-tui.md`
-> **Deferred tracks:** Tier 4 layout engine, Tier 5 SPA parity, `spec/subspecs/mcp-stdio.md`, `spec/Fingerprint-Plan.md`
+> **Hybrid backend (ACTIVE):** `spec/subspecs/hybrid-backend.md` — drive a real headless Chrome via CDP for SPAs (ADR 0004)
+> **Deferred tracks:** native Zig layout engine (Path B), `spec/subspecs/mcp-stdio.md`, `spec/Fingerprint-Plan.md`
 > **Governance ADR:** `docs/adr/0001-spec-governance.md`
 
 **Status:**
@@ -30,11 +31,14 @@ pool, one rendered DOM.
   loading indicator (`⟳ Loading…` header), help modal (`h` key),
   table linearization (HN/YC jobs render in reading order), navigation
   feedback. AWR is usable as a daily browser for server-rendered and
-  interactive reading; JS-driven / SPA pages that build their UI client-side
-  are still being brought to a usable render (T7,
-  `docs/plans/readable-browser-goal.md`).
-- **Tiers 4–5** (real CSS/layout engine and full SPA parity) are documented in
-  `spec/subspecs/browser-roadmap.md §3` and deferred.
+  interactive reading.
+- **Hybrid rendering backend** (`spec/subspecs/hybrid-backend.md`, ACTIVE per
+  `docs/adr/0004-hybrid-rendering-engine.md`, 2026-06-13): client-rendered SPAs
+  (X, Cloudflare dashboard, Google) are handled by driving a real **headless**
+  Chrome via CDP — fully terminal, no GUI — while the Zig fast-path + agent
+  surface keep serving server-rendered pages. This delivers Tiers 4–5 via
+  **Path A** (drive a real engine); a native Zig layout engine (Path B) stays
+  deferred. (Supersedes the cancelled T7 QuickJS-SPA approach.)
 
 If canonical spec boundaries or document authority change, update both
 `spec/MVP.md` and `docs/adr/0001-spec-governance.md` as part of the same change.
@@ -272,10 +276,11 @@ without recompiling AWR.
 - Native MCP stdio server mode remains deferred; use `awr tools` and `awr call`
   as the supported integration surface.
 - The interactive TUI (`awr browse`) is shipped (Tier 1 closed); `awr <url>`
-  remains the primary agent path. Later fingerprint-identity work and Tiers 4–5
-  (layout engine, full SPA parity) remain deferred.
-- JS-driven / SPA pages that build their UI client-side do not yet render usable
-  content (tracked as T7 in `docs/plans/readable-browser-goal.md`); public +
+  remains the primary agent path. A **native Zig layout engine** (Path B) and
+  later fingerprint-identity work remain deferred.
+- Client-rendered SPAs are handled by the **hybrid backend** — drive a real
+  headless Chrome via CDP, fully terminal (`spec/subspecs/hybrid-backend.md`,
+  ADR 0004), in progress per `.goals/dogfood-daily-driver.md` Phase 2; public +
   contributor hardening is tracked in `.goals/v0_1-public-readiness.md`.
 - The closed MVP surface is intentionally narrower than a full browser API.
   See `spec/MVP.md` and `spec/subspecs/wpt-conformance.md` for the exact shipped

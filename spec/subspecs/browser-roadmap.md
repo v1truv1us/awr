@@ -328,11 +328,15 @@ in the roadmap. Two paths:
   layout-dependent paths). Faster to ship Tier 4, but
   fundamentally changes what AWR is.
 
-This sub-spec stays deferred until that decision is made
-explicitly. Do not start Tier 4 work without an ADR amendment
-recording the chosen path.
+**Decision (2026-06-13, `docs/adr/0004-hybrid-rendering-engine.md`)**:
+**Path A chosen** — drive a CDP-controlled real **headless** Chrome
+for the SPA / layout-dependent paths, behind a per-URL router, keeping
+the Zig fast-path + agent surface for server-rendered pages. This ADR
+is the "chosen path" amendment this note required. Native Zig layout
+(Path B) stays deferred. The hybrid backend is **fully terminal /
+headless-only**; the TUI and agent surface are unchanged.
 
-**Sub-spec(s)**: TBD when activated.
+**Sub-spec(s)**: `spec/subspecs/hybrid-backend.md` (ACTIVE).
 
 **WPT corpus area**: css-flexbox, css-grid, intersection-observer,
 resize-observer, scroll, geometry-utils.
@@ -363,6 +367,13 @@ respond to interaction.
 with all of Tier 5 done, sites that depend on real GPU
 compositing (canvas-based games, WebGL globes, video calls)
 remain out of scope by the nature of a terminal browser.
+
+**ADR 0004 update (2026-06-13)**: under Path A, app-grade SPAs like
+X.com are reached by *driving real Chrome* (which has these APIs
+natively) behind the terminal UI — **not** by re-implementing the
+Tier-5 API surface in-process. The hybrid backend
+(`spec/subspecs/hybrid-backend.md`) delivers most of this list; the
+in-process API work here stays deferred unless a specific need arises.
 
 **Sub-spec(s)**: TBD when activated.
 
@@ -402,9 +413,12 @@ prevent the project from drifting toward them:
   pixel surface)
 - `<video>` / `<audio>` playback (not a media player)
 - WebRTC / camera / microphone (not an interactive call client)
-- bot-detection arms-race against any single site (we ship
-  Chrome-shaped fingerprints; we don't promise undetectability
-  against per-site detection iterating against AWR specifically)
+- bot-detection arms-race **on the Zig fast-path**: there we ship
+  Chrome-shaped fingerprints and don't promise undetectability against
+  per-site detection iterating against AWR specifically. The hybrid
+  backend sidesteps this for SPA / challenge sites by driving *real*
+  Chrome (ADR 0004) — so this limit applies to the lean Zig path, not
+  the engine-backed path.
 - Chromium-feature parity for its own sake
 
 If you find yourself wanting to add one of these to the roadmap,
