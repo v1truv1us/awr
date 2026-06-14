@@ -53,10 +53,12 @@ URL ─► Router ─┬─ Zig fast-path (fetch → lexbor → QuickJS → rend
 
 ## 4. Tasks (Phase 2 of `.goals/dogfood-daily-driver.md`)
 
-- **HB1 — macOS Keychain session-reuse (load-bearing, first).** Finish the
-  deferred encrypted-cookie import (`awr session import` currently skips macOS
-  Chrome Keychain cookies) so a headless Chrome inherits the author's session
-  without a GUI login. Fully-terminal auth on macOS depends on this.
+- **HB1 — macOS Keychain session-reuse (load-bearing, first). ✓ Landed
+  2026-06-13.** `awr session import chrome|chromium` now decrypts macOS cookies
+  (`src/session_import.zig`): Keychain "Safe Storage" password → PBKDF2-HMAC-SHA1
+  (saltysalt/1003) → AES-128-CBC (v10, space-IV), stripping the M127+ host-hash
+  prefix; safe skip-fallback on failure. Pure Zig std.crypto; 3 TDD tests; full
+  suite + `test-tls`/`test-h2` green. (HB2 consumes the imported jar.)
 - **HB2 — CDP backend + per-URL router.** Drive headless Chrome via CDP; pull
   the rendered DOM into the render model; router picks Zig vs Chrome per URL and
   auto-escalates on blank/shell.

@@ -13,12 +13,16 @@
 /// first so the read can't contend.
 ///
 /// Encryption: Chrome on macOS stores `value` empty and the real
-/// value in `encrypted_value` (a BLOB) encrypted with a key in
-/// Keychain. Decryption is deferred (spec §8.2). Cookies with empty
-/// `value` and non-empty `encrypted_value` are skipped with a count
-/// returned in the result so callers can surface "skipped N
-/// encrypted cookies". Linux Chrome doesn't encrypt by default, so
-/// imports from Linux Chrome work end-to-end.
+/// value in `encrypted_value` (a BLOB) encrypted with a key derived
+/// from the "Chrome Safe Storage" password in the login Keychain.
+/// HB1 (ADR 0004 hybrid backend): we decrypt it — read the Keychain
+/// password (shell out to `security`), derive the AES key via
+/// PBKDF2-HMAC-SHA1 (salt "saltysalt", 1003 iters, 16 bytes), and
+/// AES-128-CBC decrypt the `v10`/`v11` blob (IV = 16 spaces), stripping
+/// the Chrome-M127+ 32-byte SHA-256(host) plaintext prefix when present.
+/// On any failure (no Keychain access, bad cipher) the row is skipped
+/// with a count, as before. Linux Chrome doesn't encrypt by default, so
+/// those imports already work end-to-end.
 const std = @import("std");
 
 pub const Browser = enum { chrome, chromium, firefox };
@@ -166,7 +170,7 @@ pub fn importFromDb(
     // the browser-specific schema; the parser dispatches on `browser`.
     const query: []const u8 = switch (browser) {
         .firefox => "SELECT host, path, isSecure, isHttpOnly, expiry, name, value FROM moz_cookies;",
-        .chrome, .chromium => "SELECT host_key AS host, path, is_secure AS isSecure, is_httponly AS isHttpOnly, expires_utc AS expiry, name, value, length(encrypted_value) AS enc_len FROM cookies;",
+        .chrome, .chromium => "SELECT host_key AS host, path, is_secure AS isSecure, is_httponly AS isHttpOnly, expires_utc AS expiry, name, value, length(encrypted_value) AS enc_len, hex(encrypted_value) AS enc_hex FROM cookies;",
     };
 
     // Run sqlite3 in JSON mode. -readonly so we never write to the
@@ -199,7 +203,11 @@ pub fn importFromDb(
     };
     if (!ok) return ImportError.Sqlite3Failed;
 
-    return parseSqliteJson(allocator, stdout_bytes, browser);
+    // Derive the Chrome Safe Storage AES key once (macOS chrome/chromium
+    // only); null elsewhere. parseSqliteJson uses it to decrypt the
+    // `encrypted_value` blobs, falling back to skip-with-count on failure.
+    const decrypt_key = deriveChromeKeyIfMac(io, allocator, browser);
+    return parseSqliteJson(allocator, stdout_bytes, browser, decrypt_key);
 }
 
 /// Read all bytes from a child's pipe into an owned slice. Mirrors
@@ -237,6 +245,7 @@ fn parseSqliteJson(
     allocator: std.mem.Allocator,
     json_bytes: []const u8,
     browser: Browser,
+    decrypt_key: ?[16]u8,
 ) !ImportResult {
     // Empty result is valid: jar exists but holds no cookies. sqlite3
     // emits nothing (empty body) for no-rows queries in json mode.
@@ -271,12 +280,24 @@ fn parseSqliteJson(
         const is_http_only = boolFromInt(obj.get("isHttpOnly"));
 
         // Chrome stores encrypted values in a separate BLOB column.
-        // When `value` is empty and enc_len > 0, the real value is
-        // encrypted — we can't decrypt yet (T-85 follow-up).
-        if (browser == .chrome or browser == .chromium) {
-            if (value_raw.len == 0) {
-                const enc_len = intField(obj.get("enc_len")) orelse 0;
-                if (enc_len > 0) {
+        // When `value` is empty and enc_len > 0, the real value lives in
+        // `encrypted_value`. Decrypt it with the Safe Storage key when we
+        // have one; on any failure (or no key) skip the row with a count.
+        var value_final: []const u8 = value_raw;
+        var decrypted: ?[]u8 = null;
+        defer if (decrypted) |d| allocator.free(d);
+        if ((browser == .chrome or browser == .chromium) and value_raw.len == 0) {
+            const enc_len = intField(obj.get("enc_len")) orelse 0;
+            if (enc_len > 0) {
+                const key = decrypt_key orelse {
+                    skipped += 1;
+                    continue;
+                };
+                const enc_hex = stringField(obj, "enc_hex") orelse "";
+                decrypted = decryptChromeValue(allocator, key, enc_hex, host) catch null;
+                if (decrypted) |d| {
+                    value_final = d;
+                } else {
                     skipped += 1;
                     continue;
                 }
@@ -294,7 +315,7 @@ fn parseSqliteJson(
         const c: ImportedCookie = .{
             .host = try allocator.dupe(u8, host),
             .name = try allocator.dupe(u8, name),
-            .value = try allocator.dupe(u8, value_raw),
+            .value = try allocator.dupe(u8, value_final),
             .path = try allocator.dupe(u8, path),
             .expires = expiry,
             .secure = is_secure,
@@ -350,6 +371,123 @@ fn webkitToUnix(webkit_micros: i64) i64 {
     return @divTrunc(webkit_micros, 1_000_000) - 11644473600;
 }
 
+// ── Chrome Safe Storage decryption (HB1) ───────────────────────────
+
+/// Derive the Chrome/Chromium Safe Storage AES-128 key on macOS, or
+/// null on other platforms / Firefox / when the Keychain password can't
+/// be read. PBKDF2-HMAC-SHA1(password, "saltysalt", 1003) → 16 bytes.
+fn deriveChromeKeyIfMac(io: std.Io, allocator: std.mem.Allocator, browser: Browser) ?[16]u8 {
+    if (@import("builtin").target.os.tag != .macos) return null;
+    const service: []const u8 = switch (browser) {
+        .chrome => "Chrome Safe Storage",
+        .chromium => "Chromium Safe Storage",
+        .firefox => return null,
+    };
+    const pw = keychainPassword(io, allocator, service) orelse return null;
+    defer allocator.free(pw);
+    return pbkdf2Sha1Key16(pw, "saltysalt", 1003);
+}
+
+/// Read a generic-password secret from the login Keychain via the
+/// `security` CLI (matches this module's shell-out-to-sqlite3 pattern).
+/// Returns an owned, trimmed password, or null on any failure.
+fn keychainPassword(io: std.Io, allocator: std.mem.Allocator, service: []const u8) ?[]u8 {
+    const argv = [_][]const u8{ "security", "find-generic-password", "-w", "-s", service };
+    var child = std.process.spawn(io, .{
+        .argv = &argv,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    }) catch return null;
+    const out = drainPipe(io, allocator, &child.stdout.?) catch {
+        _ = child.wait(io) catch {};
+        return null;
+    };
+    const term = child.wait(io) catch {
+        allocator.free(out);
+        return null;
+    };
+    const ok = switch (term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    defer allocator.free(out);
+    if (!ok) return null;
+    const trimmed = std.mem.trim(u8, out, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return allocator.dupe(u8, trimmed) catch null;
+}
+
+/// PBKDF2-HMAC-SHA1 with dkLen=16 (one HMAC-SHA1 block covers 16 bytes).
+/// Implemented directly to avoid std API drift across Zig versions.
+fn pbkdf2Sha1Key16(password: []const u8, salt: []const u8, iterations: u32) [16]u8 {
+    const Hmac = std.crypto.auth.hmac.HmacSha1; // mac_length == 20
+    var u: [Hmac.mac_length]u8 = undefined;
+    // U1 = HMAC(password, salt || INT_BE(1))
+    var ctx = Hmac.init(password);
+    ctx.update(salt);
+    ctx.update(&[_]u8{ 0, 0, 0, 1 });
+    ctx.final(&u);
+    var t: [Hmac.mac_length]u8 = u;
+    var i: u32 = 1;
+    while (i < iterations) : (i += 1) {
+        var next: [Hmac.mac_length]u8 = undefined;
+        Hmac.create(&next, &u, password); // U_{n+1} = HMAC(password, U_n)
+        u = next;
+        for (0..Hmac.mac_length) |j| t[j] ^= u[j];
+    }
+    var key: [16]u8 = undefined;
+    @memcpy(&key, t[0..16]);
+    return key;
+}
+
+/// AES-128-CBC decrypt `ciphertext` (length must be a multiple of 16)
+/// into `out` using `key` and `iv`.
+fn aesCbcDecrypt(key: [16]u8, iv: [16]u8, ciphertext: []const u8, out: []u8) void {
+    const ctx = std.crypto.core.aes.Aes128.initDec(key);
+    var prev = iv;
+    var off: usize = 0;
+    while (off < ciphertext.len) : (off += 16) {
+        const block: [16]u8 = ciphertext[off..][0..16].*;
+        var dec: [16]u8 = undefined;
+        ctx.decrypt(&dec, &block);
+        for (0..16) |j| out[off + j] = dec[j] ^ prev[j];
+        prev = block;
+    }
+}
+
+/// Decrypt one Chrome macOS `encrypted_value` (uppercase hex from
+/// sqlite3 `hex()`). Format: 3-byte version tag (`v10`/`v11`) then
+/// AES-128-CBC ciphertext, IV = 16 × 0x20. PKCS#7 unpadded. Chrome
+/// M127+ prepends a 32-byte SHA-256(host) to the plaintext; stripped
+/// when it matches. Returns an owned plaintext value.
+fn decryptChromeValue(allocator: std.mem.Allocator, key: [16]u8, enc_hex: []const u8, host: []const u8) ![]u8 {
+    if (enc_hex.len < 2 or enc_hex.len % 2 != 0) return error.BadCipher;
+    const raw = try allocator.alloc(u8, enc_hex.len / 2);
+    defer allocator.free(raw);
+    _ = std.fmt.hexToBytes(raw, enc_hex) catch return error.BadCipher;
+    if (raw.len < 3 + 16) return error.BadCipher;
+    if (!std.mem.eql(u8, raw[0..3], "v10") and !std.mem.eql(u8, raw[0..3], "v11")) return error.BadCipher;
+    const ct = raw[3..];
+    if (ct.len == 0 or ct.len % 16 != 0) return error.BadCipher;
+
+    const buf = try allocator.alloc(u8, ct.len);
+    defer allocator.free(buf);
+    aesCbcDecrypt(key, [_]u8{0x20} ** 16, ct, buf);
+
+    const pad = buf[buf.len - 1];
+    if (pad == 0 or pad > 16 or @as(usize, pad) > buf.len) return error.BadPadding;
+    var plain: []const u8 = buf[0 .. buf.len - pad];
+
+    // Strip the Chrome-M127+ 32-byte SHA-256(host) prefix when it matches.
+    if (plain.len >= 32) {
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(host, &hash, .{});
+        if (std.mem.eql(u8, plain[0..32], &hash)) plain = plain[32..];
+    }
+    return allocator.dupe(u8, plain);
+}
+
 // ── Tests ──────────────────────────────────────────────────────────
 
 test "webkitToUnix converts known values" {
@@ -362,7 +500,7 @@ test "webkitToUnix converts known values" {
 }
 
 test "parseSqliteJson handles empty input" {
-    var result = try parseSqliteJson(std.testing.allocator, "", .firefox);
+    var result = try parseSqliteJson(std.testing.allocator, "", .firefox, null);
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), result.cookies.len);
     try std.testing.expectEqual(@as(usize, 0), result.skipped_encrypted);
@@ -372,7 +510,7 @@ test "parseSqliteJson reads Firefox row" {
     const json =
         \\[{"host":"example.com","path":"/","isSecure":1,"isHttpOnly":0,"expiry":2000000000,"name":"session","value":"abc"}]
     ;
-    var result = try parseSqliteJson(std.testing.allocator, json, .firefox);
+    var result = try parseSqliteJson(std.testing.allocator, json, .firefox, null);
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), result.cookies.len);
@@ -392,7 +530,7 @@ test "parseSqliteJson skips Chrome encrypted_value rows" {
     const json =
         \\[{"host":"x.com","path":"/","isSecure":1,"isHttpOnly":1,"expiry":13000000000000000,"name":"sid","value":"","enc_len":48}]
     ;
-    var result = try parseSqliteJson(std.testing.allocator, json, .chrome);
+    var result = try parseSqliteJson(std.testing.allocator, json, .chrome, null);
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), result.cookies.len);
     try std.testing.expectEqual(@as(usize, 1), result.skipped_encrypted);
@@ -402,11 +540,90 @@ test "parseSqliteJson reads Chrome unencrypted row and converts time" {
     const json =
         \\[{"host":"x.com","path":"/api","isSecure":0,"isHttpOnly":0,"expiry":13000000000000000,"name":"k","value":"v","enc_len":0}]
     ;
-    var result = try parseSqliteJson(std.testing.allocator, json, .chrome);
+    var result = try parseSqliteJson(std.testing.allocator, json, .chrome, null);
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), result.cookies.len);
     const c = result.cookies[0];
     try std.testing.expectEqualStrings("x.com", c.host);
     try std.testing.expectEqualStrings("v", c.value);
     try std.testing.expectEqual(@as(?i64, 1_355_526_400), c.expires);
+}
+
+/// Test helper: AES-128-CBC encrypt `plaintext` (PKCS#7-padded) with
+/// `key`, IV = 16 × 0x20, prefix "v10", return uppercase hex (as sqlite3
+/// `hex()` would emit `encrypted_value`).
+fn tdEncryptV10Hex(allocator: std.mem.Allocator, key: [16]u8, plaintext: []const u8) ![]u8 {
+    const pad: u8 = @intCast(16 - (plaintext.len % 16));
+    const padded_len = plaintext.len + pad;
+    const ct = try allocator.alloc(u8, padded_len);
+    defer allocator.free(ct);
+    const enc = std.crypto.core.aes.Aes128.initEnc(key);
+    var prev = [_]u8{0x20} ** 16;
+    var off: usize = 0;
+    while (off < padded_len) : (off += 16) {
+        var blk: [16]u8 = undefined;
+        for (0..16) |j| {
+            const src: u8 = if (off + j < plaintext.len) plaintext[off + j] else pad;
+            blk[j] = src ^ prev[j];
+        }
+        var outb: [16]u8 = undefined;
+        enc.encrypt(&outb, &blk);
+        @memcpy(ct[off..][0..16], &outb);
+        prev = outb;
+    }
+    const hex = try allocator.alloc(u8, (3 + ct.len) * 2);
+    const hc = "0123456789ABCDEF";
+    const tag = "v10";
+    for (0..3) |k| {
+        hex[k * 2] = hc[tag[k] >> 4];
+        hex[k * 2 + 1] = hc[tag[k] & 0xF];
+    }
+    for (ct, 0..) |b, idx| {
+        hex[(3 + idx) * 2] = hc[b >> 4];
+        hex[(3 + idx) * 2 + 1] = hc[b & 0xF];
+    }
+    return hex;
+}
+
+test "decryptChromeValue round-trips a v10 value (HB1)" {
+    const alloc = std.testing.allocator;
+    const key = [_]u8{0x42} ** 16;
+    const hex = try tdEncryptV10Hex(alloc, key, "session=abc123");
+    defer alloc.free(hex);
+    const got = try decryptChromeValue(alloc, key, hex, "example.com");
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings("session=abc123", got);
+}
+
+test "decryptChromeValue strips the M127+ host-hash prefix (HB1)" {
+    const alloc = std.testing.allocator;
+    const key = [_]u8{0x07} ** 16;
+    const host = "x.com";
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(host, &hash, .{});
+    const value = "real_token_value";
+    const plain = try alloc.alloc(u8, 32 + value.len);
+    defer alloc.free(plain);
+    @memcpy(plain[0..32], &hash);
+    @memcpy(plain[32..], value);
+    const hex = try tdEncryptV10Hex(alloc, key, plain);
+    defer alloc.free(hex);
+    const got = try decryptChromeValue(alloc, key, hex, host);
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings(value, got);
+}
+
+test "parseSqliteJson decrypts a Chrome encrypted row when given a key (HB1)" {
+    const alloc = std.testing.allocator;
+    const key = [_]u8{0x99} ** 16;
+    const hex = try tdEncryptV10Hex(alloc, key, "v");
+    defer alloc.free(hex);
+    const json = try std.fmt.allocPrint(alloc, "[{{\"host\":\"x.com\",\"path\":\"/\",\"isSecure\":1,\"isHttpOnly\":1,\"expiry\":13000000000000000,\"name\":\"sid\",\"value\":\"\",\"enc_len\":48,\"enc_hex\":\"{s}\"}}]", .{hex});
+    defer alloc.free(json);
+    var result = try parseSqliteJson(alloc, json, .chrome, key);
+    defer result.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), result.cookies.len);
+    try std.testing.expectEqualStrings("sid", result.cookies[0].name);
+    try std.testing.expectEqualStrings("v", result.cookies[0].value);
+    try std.testing.expectEqual(@as(usize, 0), result.skipped_encrypted);
 }
