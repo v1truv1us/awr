@@ -94,3 +94,40 @@ challenges rarely fire — not eliminated.
   Web Crypto, Workers) — delivered by driving real Chrome instead of re-built.
 - The permanently-out-of-scope items in `spec/subspecs/browser-roadmap.md §5`
   (WebGL/Canvas pixels, media playback, WebRTC).
+
+## 8. Portability (deferred)
+
+The hybrid pivot makes cross-platform easier, not harder — the heavy lifting (real
+web rendering) is delegated to Chrome, which already speaks identical CDP on every
+OS. Pixel-correct rendering everywhere is Chrome's problem, not AWR's. macOS/arm64
+is primary per `CLAUDE.md`; this section is the map for whoever ports it.
+
+| Layer | Portable today? | Work to port |
+|---|---|---|
+| CDP backend (HB2+), render model, TUI, agent surfaces | Inherently portable | CDP is OS-agnostic; only Chrome-binary discovery + temp-dir need a per-OS branch. Terminal raw-mode is POSIX (Linux+macOS share `termios`); Windows needs a console-mode shim. |
+| Build / deps | macOS-hardcoded | `build.zig` hardcodes Homebrew `/opt/homebrew/` for nghttp2 + lexbor; replace with pkg-config or vendoring. Mechanical. |
+| BoringSSL (the fingerprint) | macOS/arm64 prebuilt only | Need the same BoringSSL built as static libs per target (linux-x64/arm64, windows) to preserve the JA4 string. CI work, not design work. |
+| Session import (HB1) | Fundamentally per-OS | Cookie decryption differs by OS; the only genuinely per-platform-forever piece. |
+
+Session-import breakdown by platform:
+
+- **Linux** — easy: same primitive HB1 already built (salt `saltysalt`,
+  PBKDF2-HMAC-SHA1, AES-128-CBC); differs only in key source (libsecret/kwallet,
+  or hardcoded `"peanuts"` fallback), **1 iteration vs 1003**, and `v11` prefix vs
+  `v10`.
+- **Windows** — the hard one: older Chrome was DPAPI + AES-256-GCM (tractable),
+  but Chrome's 2024+ **app-bound encryption (ABE, `v20` cookies)** deliberately
+  wraps the key with a system service tied to Chrome's own binary, designed to stop
+  any other process from reading the jar.
+
+**Escape hatch (all platforms):** instead of reimplementing each platform's cookie
+crypto, drive Chrome's own profile (`--user-data-dir` pointed at a copy of the
+real profile) so Chrome decrypts its own cookies — sidestepping
+DPAPI/ABE/Keychain/libsecret entirely on every OS. Tradeoff: a profile lock
+(operate on a copy, or while Chrome is closed). Invariant-compatible: still
+headless, still session-reuse, still no login window.
+
+The macOS-coupling today (Keychain in HB1, Homebrew paths in `build.zig`) is the
+non-portable veneer, not the core; the core (drive Chrome, map DOM→terminal) is
+portable once someone funds the per-arch BoringSSL build and a session-import
+variant.
