@@ -389,7 +389,7 @@ fn encodeOne(
     const url_owned = try allocator.dupe(u8, raw_key);
     errdefer allocator.free(url_owned);
 
-    try pl.bytes_by_url.put(url_owned, encoded);
+    try pl.bytes_by_url.put(url_owned, .{ .bytes = encoded, .rows = dims.rows });
 }
 
 // Zig 0.16 removed std.time.milliTimestamp; mirror the pattern in pool.zig.

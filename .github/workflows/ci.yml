@@ -48,6 +48,9 @@ jobs:
       - name: Bootstrap path dependencies (libxev + quickjs-ng)
         run: bash scripts/bootstrap_deps.sh
 
+      - name: Build executables
+        run: zig build
+
       - name: Format check
         run: zig fmt --check src/ build.zig
 
