@@ -930,10 +930,52 @@ pub const Page = struct {
         if (!self.rendersBlank(&result)) return result; // Zig path wins; no Chrome
         if (!cdp.chromeAvailable()) return result; // graceful: keep Zig result
 
-        if (std.c.getenv("AWR_ROUTER_LOG") != null)
-            std.debug.print("[router] {s}: blank Zig render -> escalating to Chrome\n", .{url});
+        // ── Gather matching cookies for the target URL ─────────────────────
+        // Parse the URL to extract host/is_https. On failure (non-HTTP scheme,
+        // malformed URL) we skip injection and pass empty cookies to Chrome.
+        // CdpCookie slices borrow from the jar — valid for the duration of the
+        // call (jar is not mutated between here and fetchRenderedHtml).
+        const parsed_url = url_mod.Url.parse(url) catch null;
+        const now_s = time_util.wallClockSeconds();
 
-        const chrome_html = cdp.fetchRenderedHtml(self.allocator, self.io, url, .{}) catch return result;
+        var cookie_list: std.ArrayList(cdp.CdpCookie) = .empty;
+        defer cookie_list.deinit(self.allocator);
+
+        if (parsed_url) |pu| {
+            const jar = self.client.cookieJar();
+            for (jar.cookies.items) |c| {
+                // Skip expired cookies.
+                if (c.expires) |exp| if (exp <= now_s) continue;
+                // Skip cookies whose domain doesn't match the request host.
+                if (!cookie_mod.domainMatches(pu.host, c.domain)) continue;
+                // Skip Secure-only cookies on plain HTTP.
+                if (c.secure and !pu.is_https) continue;
+                try cookie_list.append(self.allocator, cdp.CdpCookie{
+                    .name = c.name,
+                    .value = c.value,
+                    .domain = c.domain,
+                    .path = c.path,
+                    .expires = c.expires,
+                    .secure = c.secure,
+                    .http_only = c.http_only,
+                    .same_site = switch (c.same_site) {
+                        .strict => "Strict",
+                        .lax => "Lax",
+                        .none => "None",
+                    },
+                });
+            }
+        }
+
+        if (std.c.getenv("AWR_ROUTER_LOG") != null)
+            std.debug.print("[router] {s}: blank Zig render -> escalating to Chrome (injecting {d} cookies)\n", .{ url, cookie_list.items.len });
+
+        const chrome_html = cdp.fetchRenderedHtml(
+            self.allocator,
+            self.io,
+            url,
+            .{ .cookies = cookie_list.items },
+        ) catch return result;
         defer self.allocator.free(chrome_html);
 
         const prev = self.disable_scripts;

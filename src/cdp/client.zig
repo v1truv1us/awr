@@ -79,6 +79,26 @@ pub const CdpError = error{
     OuterHtmlMissing,
 };
 
+// ── Cookie type (decoupled from net/cookie.zig) ───────────────────────────
+
+/// A cookie to inject into headless Chrome via `Network.setCookies`.
+/// Decoupled from `net/cookie.zig` to preserve the fingerprint-safety
+/// constraint (cdp/ must never import src/net/ except websocket.zig).
+/// Callers in page.zig map net/cookie.Cookie → CdpCookie before calling
+/// fetchRenderedHtml.
+pub const CdpCookie = struct {
+    name: []const u8,
+    value: []const u8,
+    domain: []const u8,
+    path: []const u8,
+    /// Unix seconds; null = session cookie (omit `expires` in CDP JSON).
+    expires: ?i64,
+    secure: bool,
+    http_only: bool,
+    /// "Strict" | "Lax" | "None"
+    same_site: []const u8,
+};
+
 // ── Options ────────────────────────────────────────────────────────────────
 
 pub const FetchOpts = struct {
@@ -87,6 +107,9 @@ pub const FetchOpts = struct {
     settle_ms: u64 = 1500,
     /// Milliseconds to wait for Chrome to print its DevTools URL.
     chrome_start_timeout_ms: u64 = 10_000,
+    /// Cookies to inject via `Network.setCookies` before navigation.
+    /// Defaulted to empty so all existing call sites compile unchanged.
+    cookies: []const CdpCookie = &.{},
 };
 
 // ── Main entry point ───────────────────────────────────────────────────────
@@ -214,6 +237,7 @@ pub fn fetchRenderedHtml(
         &net_writer.interface,
         url,
         opts.settle_ms,
+        opts.cookies,
     );
     errdefer allocator.free(html);
 
@@ -320,6 +344,7 @@ const CdpConn = struct {
 /// Run the full CDP session over an established WebSocket connection.
 /// r_adapt / w_adapt provide the readNoEof / writeAll interface.
 /// flush_writer is the underlying std.Io.Writer (for explicit flush after sends).
+/// cookies: optional slice of CdpCookie to inject before navigation.
 fn runCdpSession(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -328,6 +353,7 @@ fn runCdpSession(
     flush_writer: *std.Io.Writer,
     url: []const u8,
     settle_ms: u64,
+    cookies: []const CdpCookie,
 ) ![]u8 {
     var conn: CdpConn = .{};
 
@@ -372,6 +398,32 @@ fn runCdpSession(
         "sessionId",
     );
     defer allocator.free(session_id);
+
+    // ── Cookie injection (Network.enable + Network.setCookies) ────────────
+    // Injected AFTER attachToTarget (session_id is live) and BEFORE
+    // Page.enable / navigate so the navigation request is authenticated.
+    if (cookies.len > 0) {
+        const net_enable_id = conn.nextId();
+        {
+            const msg = try std.fmt.allocPrint(
+                allocator,
+                "{{\"id\":{d},\"sessionId\":\"{s}\"," ++
+                    "\"method\":\"Network.enable\",\"params\":{{}}}}",
+                .{ net_enable_id, session_id },
+            );
+            defer allocator.free(msg);
+            try wsSend(w_adapt, flush_writer, msg);
+        }
+        try awaitAck(allocator, r_adapt, net_enable_id);
+
+        const set_cookies_id = conn.nextId();
+        {
+            const msg = try buildSetCookiesMessage(allocator, set_cookies_id, session_id, cookies);
+            defer allocator.free(msg);
+            try wsSend(w_adapt, flush_writer, msg);
+        }
+        try awaitAck(allocator, r_adapt, set_cookies_id);
+    }
 
     // ── Page.enable ───────────────────────────────────────────────────────
     const enable_id = conn.nextId();
@@ -603,6 +655,82 @@ fn extractStringField(
     return out.toOwnedSlice(allocator) catch null;
 }
 
+// ── JSON helpers ──────────────────────────────────────────────────────────
+
+/// Append `s` as a JSON string (with surrounding quotes) to `list`,
+/// escaping `"`, `\`, and common control characters. Control characters
+/// < 0x20 are rendered as `\uXXXX`.
+fn appendJsonString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, s: []const u8) !void {
+    try list.append(allocator, '"');
+    for (s) |ch| switch (ch) {
+        '"' => try list.appendSlice(allocator, "\\\""),
+        '\\' => try list.appendSlice(allocator, "\\\\"),
+        '\n' => try list.appendSlice(allocator, "\\n"),
+        '\r' => try list.appendSlice(allocator, "\\r"),
+        '\t' => try list.appendSlice(allocator, "\\t"),
+        else => if (ch < 0x20) {
+            var buf: [6]u8 = undefined;
+            const hex = std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{ch}) catch unreachable;
+            try list.appendSlice(allocator, hex);
+        } else try list.append(allocator, ch),
+    };
+    try list.append(allocator, '"');
+}
+
+/// Build the full `Network.setCookies` CDP JSON message.
+/// Returns an owned []u8 that the caller must free.
+/// Factored out so it can be unit-tested without a live WebSocket.
+fn buildSetCookiesMessage(
+    allocator: std.mem.Allocator,
+    id: u32,
+    session_id: []const u8,
+    cookies: []const CdpCookie,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    // Prefix: {"id":N,"sessionId":"...","method":"Network.setCookies","params":{"cookies":[
+    try out.appendSlice(allocator, "{\"id\":");
+    var id_buf: [16]u8 = undefined;
+    const id_str = std.fmt.bufPrint(&id_buf, "{d}", .{id}) catch unreachable;
+    try out.appendSlice(allocator, id_str);
+    try out.appendSlice(allocator, ",\"sessionId\":");
+    try appendJsonString(&out, allocator, session_id);
+    try out.appendSlice(allocator, ",\"method\":\"Network.setCookies\",\"params\":{\"cookies\":[");
+
+    for (cookies, 0..) |c, i| {
+        if (i > 0) try out.append(allocator, ',');
+        try out.append(allocator, '{');
+
+        try out.appendSlice(allocator, "\"name\":");
+        try appendJsonString(&out, allocator, c.name);
+        try out.appendSlice(allocator, ",\"value\":");
+        try appendJsonString(&out, allocator, c.value);
+        try out.appendSlice(allocator, ",\"domain\":");
+        try appendJsonString(&out, allocator, c.domain);
+        try out.appendSlice(allocator, ",\"path\":");
+        try appendJsonString(&out, allocator, c.path);
+        try out.appendSlice(allocator, ",\"secure\":");
+        try out.appendSlice(allocator, if (c.secure) "true" else "false");
+        try out.appendSlice(allocator, ",\"httpOnly\":");
+        try out.appendSlice(allocator, if (c.http_only) "true" else "false");
+        try out.appendSlice(allocator, ",\"sameSite\":");
+        try appendJsonString(&out, allocator, c.same_site);
+
+        if (c.expires) |exp| {
+            try out.appendSlice(allocator, ",\"expires\":");
+            var exp_buf: [24]u8 = undefined;
+            const exp_str = std.fmt.bufPrint(&exp_buf, "{d}", .{exp}) catch unreachable;
+            try out.appendSlice(allocator, exp_str);
+        }
+
+        try out.append(allocator, '}');
+    }
+
+    try out.appendSlice(allocator, "]}}");
+    return out.toOwnedSlice(allocator);
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 test "chromeAvailable — returns bool without crashing" {
@@ -709,4 +837,69 @@ test "fetchRenderedHtml — data: URL renders hello-cdp when Chrome present" {
     };
     defer std.testing.allocator.free(html);
     try std.testing.expect(std.mem.indexOf(u8, html, "hello-cdp") != null);
+}
+
+test "appendJsonString — escapes double-quote and backslash" {
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(std.testing.allocator);
+    try appendJsonString(&list, std.testing.allocator, "a\"b\\c");
+    // Expected JSON string: "a\"b\\c"
+    try std.testing.expectEqualStrings("\"a\\\"b\\\\c\"", list.items);
+}
+
+test "buildSetCookiesMessage — two cookies, one with expires and one session" {
+    const alloc = std.testing.allocator;
+    const cookies = [_]CdpCookie{
+        .{
+            .name = "auth",
+            .value = "tok123",
+            .domain = "example.com",
+            .path = "/",
+            .expires = 1999999999,
+            .secure = true,
+            .http_only = true,
+            .same_site = "Strict",
+        },
+        .{
+            .name = "pref",
+            .value = "dark",
+            .domain = "example.com",
+            .path = "/",
+            .expires = null,
+            .secure = false,
+            .http_only = false,
+            .same_site = "Lax",
+        },
+    };
+
+    const msg = try buildSetCookiesMessage(alloc, 7, "SID42", &cookies);
+    defer alloc.free(msg);
+
+    // Must contain the method name
+    try std.testing.expect(std.mem.indexOf(u8, msg, "Network.setCookies") != null);
+    // Must contain the session id
+    try std.testing.expect(std.mem.indexOf(u8, msg, "SID42") != null);
+    // Must contain both cookie names and values
+    try std.testing.expect(std.mem.indexOf(u8, msg, "\"auth\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "\"tok123\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "\"pref\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "\"dark\"") != null);
+    // First cookie: sameSite = Strict, expires present
+    try std.testing.expect(std.mem.indexOf(u8, msg, "\"Strict\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "1999999999") != null);
+    // Second cookie: sameSite = Lax, no "expires" key for session cookie.
+    // Verify "Lax" appears.
+    try std.testing.expect(std.mem.indexOf(u8, msg, "\"Lax\"") != null);
+    // The session cookie must NOT have an "expires" key.  Since the first
+    // cookie does have one, we confirm by checking that after the second
+    // cookie's name ("pref") there is no "expires" substring — the simplest
+    // structural check is that the total count of "expires" occurrences
+    // equals 1 (only the first cookie).
+    var count: usize = 0;
+    var search = msg;
+    while (std.mem.indexOf(u8, search, "\"expires\"")) |pos| {
+        count += 1;
+        search = search[pos + 1 ..];
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
 }
