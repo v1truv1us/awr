@@ -131,3 +131,42 @@ The macOS-coupling today (Keychain in HB1, Homebrew paths in `build.zig`) is the
 non-portable veneer, not the core; the core (drive Chrome, map DOM→terminal) is
 portable once someone funds the per-arch BoringSSL build and a session-import
 variant.
+
+## 9. Successor plan — own the trust, then the engine
+
+Recorded 2026-06-15 (authority: `docs/adr/0004-hybrid-rendering-engine.md`
+Decision log, same date) so neither the real-profile crutch nor the Chrome
+dependency becomes permanent by default. The 2026-06-15 dogfood sweep confirmed
+the live split: cookie injection signs in cookie-gated sites (X, GitHub,
+AudioFile.app) but does **not** clear active bot-detection (Google, Cloudflare
+Turnstile) on a cold headless instance — the §6 residual edge.
+
+**Trust/profile successor (retire the borrowed-trust crutch).** Driving the
+author's real profile borrows established trust to clear cold-session
+bot-challenges. Graduated replacement:
+1. **Now:** drive a copy of the real profile — borrow trust.
+2. **AWR's own persistent profile:** a dedicated `--user-data-dir` AWR owns; log
+   into each site **once** through AWR (enabled by **HB3**, the TUI↔CDP
+   interaction bridge) so the profile accrues AWR's own cookies + clearance +
+   behavioral trust. Stop borrowing the author's identity.
+3. **Self-owned portable identity** AWR manages, not tied to a Chrome install.
+"Replace the crutch" = own your trust, not defeat detection (bot-detection is an
+arms race; there is no permanently-trusted-headless endpoint).
+
+**Engine successor (replace Chrome entirely — staged, evidence-gated).** The
+render-model contract (both backends emit the same `ScreenModel`) is the swap
+seam:
+- **E0 now:** drive system Chrome via CDP.
+- **E1:** bundle Chromium — own the binary; removes the *installed-Chrome*
+  dependency (promotes ADR 0004 Option B from fallback to a planned step).
+- **E2:** formalize a rendering-backend interface behind the render-model seam.
+- **E3:** add a lean / embeddable engine (lightpanda / servo-component class) for
+  a subset, gated on WPT / Test262 / corpus + hard-site coverage, **escalating to
+  Chrome on failure** — a three-tier ladder (Zig → lean → Chrome); Chrome's share
+  shrinks as coverage grows.
+- **E4 endgame:** the lean engine clears the same bar Chrome clears today; Chrome
+  demotes to a rare fallback or is dropped.
+The swap is gated by **measured coverage, never a date**; "drive, don't build"
+holds until a lean engine is measured to clear the bar, then slots in behind the
+seam incrementally. This does **not** reopen the up-front native-Zig-engine build
+(Path B / §7) — it embeds a proven lean engine behind the existing seam.

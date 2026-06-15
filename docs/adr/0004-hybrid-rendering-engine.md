@@ -128,6 +128,9 @@ Ship a self-contained Chromium that renders its framebuffer to the terminal.
 - **Kept as FALLBACK** if a self-contained single binary is later required.
   Heavier packaging than driving an installed Chrome; deferred unless the
   installed-Chrome dependency becomes unacceptable.
+- **Promoted to a planned phase (E1)** of the engine-successor plan — see
+  Decision log 2026-06-15. Bundling Chromium is the first concrete step that
+  removes the *installed-Chrome* dependency (while keeping the Chrome engine).
 
 ### Option C — WebKit / Servo
 
@@ -187,6 +190,61 @@ README + agent guidance).
 
 Reason: Driving a real engine is the sanctioned Path A the roadmap already
 contemplated; the spike supplied the required evidence.
+
+### 2026-06-15 — Successor plan: own the trust, then replace the engine
+
+Recorded at the author's request so neither the real-profile crutch nor the
+Chrome dependency becomes permanent by default. The 2026-06-15 dogfood sweep
+confirmed the live split: cookie injection signs in cookie-gated sites (X,
+GitHub, AudioFile.app) but does **not** clear active bot-detection (Google
+"unusual traffic", Cloudflare Turnstile) on a cold headless instance — the
+Residual-edge bucket. Two forward commitments follow.
+
+**(1) Trust/profile successor — retire the borrowed-trust crutch.** Driving the
+author's *real* profile is a crutch: it borrows established trust (`cf_clearance`,
+Google) to clear challenges that fire on cold sessions. Graduated replacement:
+- **Stage 0 (now):** drive a copy of the author's real profile — borrow trust.
+- **Stage 1:** AWR keeps its **own persistent profile** (a dedicated
+  `--user-data-dir` AWR owns, not a copy of the author's). Logging into each
+  site **once** through AWR — enabled by **HB3**, the TUI↔CDP interaction
+  bridge — accumulates AWR's own cookies + clearance + behavioral trust. AWR
+  stops borrowing the author's identity.
+- **Stage 2:** a self-owned, portable identity AWR manages (refreshable, not
+  tied to a Chrome install path).
+HB3 is the unlock: log-in-through-AWR is the precondition for a self-trusted
+profile. "Replace the crutch" means **own your trust, not defeat detection** —
+bot-detection is an arms race with no permanently-trusted-headless endpoint.
+
+**(2) Engine successor — replace Chrome entirely (staged, evidence-gated).**
+"Drive Chrome" is not assumed permanent. The **render-model contract** (both
+backends emit the same `ScreenModel`) is the swap seam. Phases:
+- **E0 (now):** drive system Chrome via CDP.
+- **E1:** **bundle Chromium** (own the binary) — promotes Alternative Option B
+  from pure fallback to the planned step that removes the *installed-Chrome*
+  dependency. Still the Chrome engine.
+- **E2:** formalize a rendering-backend interface behind the render-model seam
+  so a third backend is interchangeable (the Zig path + Chrome already prove the
+  seam exists).
+- **E3:** introduce a **lean / embeddable engine** (lightpanda / servo-component
+  class) for a subset, gated against the WPT / Test262 / corpus + hard-site
+  coverage bars, **escalating to Chrome where it fails** — a three-tier ladder
+  (Zig fast-path → lean engine → Chrome). Chrome's share shrinks as the lean
+  engine's coverage grows.
+- **E4 (endgame):** the lean / native engine clears the same site + WPT bar
+  Chrome clears today; Chrome demotes to a rare fallback or is dropped.
+**Gating principle:** the swap is driven by *measured coverage* (WPT / corpus /
+hard-site gates), never a date. The pivot thesis ("drive, don't build") holds
+until a lean engine is *measured* to clear the bar — then it slots in behind the
+seam incrementally, escalate-on-failure, exactly as the Zig→Chrome router works
+today. This does **not** reopen Option A (hand-build a full Zig engine up front);
+it adopts/embeds a lean engine behind the proven seam, evidence-first.
+
+Reason: The author (2026-06-15) asked to record the profile-crutch successor and
+a concrete plan to replace Chrome entirely, so the dependency is deliberate and
+bounded by evidence rather than permanent by default.
+
+Documents updated: this ADR (Option B note + this entry);
+`spec/subspecs/hybrid-backend.md` §9.
 
 ## Amendment rule
 
