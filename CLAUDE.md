@@ -38,7 +38,8 @@ not the primary framing.
 
 ```bash
 zig build              # Build
-zig build test         # Run all tests
+zig build test         # Run fast offline unit tests
+zig build test-all     # Run full suite incl. network/WPT/corpus/daemon (what CI runs)
 zig build run          # Build and run
 zig fmt src/           # Format
 ```
@@ -48,6 +49,7 @@ zig fmt src/           # Format
 zig build test-net     # Networking stack only
 zig build test-tls     # TLS fingerprint tests
 zig build test-client  # HTTP client tests
+zig build test-cdp     # CDP transport unit tests
 zig build test-h2      # HTTP/2 tests
 zig build test-js      # QuickJS engine tests
 zig build test-html    # HTML parser tests

@@ -60,5 +60,5 @@ jobs:
       - name: HTTP/2 fingerprint gate
         run: zig build test-h2
 
-      - name: Full unit test suite
-        run: zig build test
+      - name: Full test suite (test-all)
+        run: zig build test-all

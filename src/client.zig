@@ -14,7 +14,6 @@ const builtin = @import("builtin");
 
 const http1 = @import("net/http1.zig");
 const cookie = @import("net/cookie.zig");
-const pool = @import("net/pool.zig");
 const url_mod = @import("net/url.zig");
 const tcp = @import("net/tcp.zig");
 const dns = @import("util/dns.zig");
@@ -397,7 +396,6 @@ pub const Client = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     cookies: cookie.CookieJar,
-    conns: pool.ConnectionPool,
     options: ClientOptions,
     /// Persistent std.http.Client reused across all fetches for connection
     /// pooling and keep-alive. Initialized lazily on first fetch.
@@ -446,7 +444,6 @@ pub const Client = struct {
             .allocator = allocator,
             .io = io,
             .cookies = cookie.CookieJar.init(allocator),
-            .conns = pool.ConnectionPool.init(allocator),
             .options = options,
         };
         // Disk load only applies to the owned-jar path. Borrowed jars
@@ -488,7 +485,6 @@ pub const Client = struct {
         var key_it = self.std_tls_failed_hosts.keyIterator();
         while (key_it.next()) |k| self.allocator.free(k.*);
         self.std_tls_failed_hosts.deinit(self.allocator);
-        self.conns.deinit();
         // Inline cookie jar deinit is zero-cost when the jar is empty
         // (the external-jar path never populates the inline field) and
         // the right thing when the inline jar IS the active one. Either

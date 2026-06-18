@@ -76,7 +76,10 @@ pub fn build(b: *std.Build) void {
     const brotli_lib_common = b.path("third_party/brotli/lib/macos-arm64/libbrotlicommon.a");
 
     // ── Test steps ────────────────────────────────────────────────────────
-    const test_step = b.step("test", "Run all unit tests");
+    const test_step = b.step("test", "Run fast offline unit tests");
+    const test_cdp_step = b.step("test-cdp", "Run src/cdp unit tests");
+    const test_all_step = b.step("test-all", "Run the full suite: fast unit + network/integration/corpus (CI superset)");
+    test_all_step.dependOn(test_step);
     const test_net_step = b.step("test-net", "Run src/net unit tests");
     const test_js_step = b.step("test-js", "Run src/js unit tests");
     const test_html_step = b.step("test-html", "Run src/html unit tests");
@@ -112,7 +115,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "cookie", .src = "src/net/cookie.zig" },
         .{ .name = "http1", .src = "src/net/http1.zig" },
         .{ .name = "http2", .src = "src/net/http2.zig" },
-        .{ .name = "pool", .src = "src/net/pool.zig" },
         .{ .name = "url", .src = "src/net/url.zig" },
     };
 
@@ -395,6 +397,7 @@ pub fn build(b: *std.Build) void {
         });
         const run_cdp = b.addRunArtifact(cdp_test);
         test_step.dependOn(&run_cdp.step);
+        test_cdp_step.dependOn(&run_cdp.step);
     }
 
     // ── History API stack (Tier 3 — T3.B) — pure Zig, no deps ─────────────
@@ -549,7 +552,7 @@ pub fn build(b: *std.Build) void {
             .use_llvm = true, // required for QuickJS-NG
         });
         const run_page = b.addRunArtifact(page_test);
-        test_step.dependOn(&run_page.step);
+        test_all_step.dependOn(&run_page.step);
         test_page_step.dependOn(&run_page.step);
     }
 
@@ -706,7 +709,7 @@ pub fn build(b: *std.Build) void {
             .root_module = daemon_mod,
         });
         const run_daemon = b.addRunArtifact(daemon_test);
-        test_step.dependOn(&run_daemon.step);
+        test_all_step.dependOn(&run_daemon.step);
 
         // ── MCP stdio server unit tests (deferred track) ────────────
         // src/mcp_stdio.zig is a thin MCP client over page.zig + the
@@ -925,7 +928,7 @@ pub fn build(b: *std.Build) void {
         });
         const run_wpt = b.addRunArtifact(wpt_test);
         test_wpt_step.dependOn(&run_wpt.step);
-        test_step.dependOn(&run_wpt.step);
+        test_all_step.dependOn(&run_wpt.step);
     }
 
     // ── Real-page render-quality corpus runner ────────────────────────────
@@ -987,7 +990,7 @@ pub fn build(b: *std.Build) void {
         });
         const run_corpus = b.addRunArtifact(corpus_test);
         test_corpus_step.dependOn(&run_corpus.step);
-        test_step.dependOn(&run_corpus.step);
+        test_all_step.dependOn(&run_corpus.step);
     }
 
     // ── Image decoder module (depends on stb_image) ──────────────────────
