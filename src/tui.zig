@@ -42,7 +42,6 @@ pub const Size = struct {
 pub const Terminal = struct {
     stdin_file: std.Io.File,
     stdout_file: std.Io.File,
-    stdout_buffer: [4096]u8 = undefined,
     original_termios: c.struct_termios,
     raw_enabled: bool,
 
