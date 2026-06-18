@@ -77,6 +77,9 @@ pub const CdpError = error{
     CdpCallFailed,
     /// The outerHTML result was absent or not a string.
     OuterHtmlMissing,
+    /// Navigation did not complete within nav_timeout_ms and best-effort
+    /// DOM retrieval also failed.  Caller should fall back to Zig render.
+    NavTimeout,
 };
 
 // ── Cookie type (decoupled from net/cookie.zig) ───────────────────────────
@@ -102,11 +105,17 @@ pub const CdpCookie = struct {
 // ── Options ────────────────────────────────────────────────────────────────
 
 pub const FetchOpts = struct {
-    /// Extra milliseconds to wait after `Page.loadEventFired` for SPA JS.
+    /// Extra milliseconds to wait after `Page.navigate` ack for SPA JS.
     /// Default: 1 500 ms — enough for most React/Vue/Next hydration cycles.
     settle_ms: u64 = 1500,
     /// Milliseconds to wait for Chrome to print its DevTools URL.
     chrome_start_timeout_ms: u64 = 10_000,
+    /// Total wall-clock budget for the navigation + settle phase.
+    /// If the page never fires a load event the CDP path sleeps for at most
+    /// `@min(nav_timeout_ms, settle_ms + 3_000)` ms then captures best-effort
+    /// DOM.  Pass 0 to disable (not recommended — risks an infinite hang).
+    /// Default: 20 000 ms.
+    nav_timeout_ms: u64 = 20_000,
     /// Cookies to inject via `Network.setCookies` before navigation.
     /// Defaulted to empty so all existing call sites compile unchanged.
     cookies: []const CdpCookie = &.{},
@@ -129,26 +138,130 @@ pub fn fetchRenderedHtml(
 ) ![]u8 {
     if (!chromeAvailable()) return error.ChromeUnavailable;
 
-    // ── 1. Temp user-data-dir ─────────────────────────────────────────────
-    var tmp_dir_buf: [256]u8 = undefined;
-    const tmp_dir = try std.fmt.bufPrint(
-        &tmp_dir_buf,
-        "/tmp/awr-cdp-{d}",
-        .{milliTimestamp()},
-    );
+    // ── 1. AWR persistent profile directory (with per-PID ephemeral fallback) ─
+    // Preferred: ~/.awr/profile (or $AWR_PROFILE override) so the profile
+    // accumulates cookies and trust over time.  Concurrent awr processes
+    // (e.g. agent fan-out) must not race over the same profile — Chrome's
+    // Singleton files prevent it from starting.  We use a non-blocking flock
+    // on a lock file inside the shared profile to determine ownership:
+    //
+    //   • Lock acquired  → we own the shared profile; clean any stale
+    //     Singleton files left by a previous owner that died un-cleanly.
+    //     The flock releases automatically when the fd is closed (on return)
+    //     or when this process dies — no manual Singleton manipulation by
+    //     concurrent processes.
+    //
+    //   • Lock not acquired → another live AWR-driven Chrome owns the shared
+    //     profile.  Fall back to an ephemeral /tmp/awr-cdp-<pid> directory
+    //     for this run; it is deleted on return.
+    const home = std.c.getenv("HOME") orelse "/tmp";
+    const home_slice = std.mem.span(home);
+    // shared_profile: either borrowed from env (AWR_PROFILE) or allocated.
+    const shared_profile: []const u8 = if (std.c.getenv("AWR_PROFILE")) |p|
+        std.mem.span(p)
+    else
+        try std.fmt.allocPrint(
+            allocator,
+            "{s}/.awr/profile",
+            .{home_slice},
+        );
+    defer if (std.c.getenv("AWR_PROFILE") == null) allocator.free(shared_profile);
 
-    std.Io.Dir.cwd().createDirPath(io, tmp_dir) catch |err| switch (err) {
+    std.Io.Dir.cwd().createDirPath(io, shared_profile) catch |err| switch (err) {
         error.PathAlreadyExists, error.NotDir => {},
         else => return err,
     };
-    errdefer std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
+
+    // Try a non-blocking exclusive flock on .awr-instance.lock inside the
+    // shared profile to determine whether we are the sole owner.
+    const lock_rel = try std.fmt.allocPrint(
+        allocator,
+        "{s}/.awr-instance.lock",
+        .{shared_profile},
+    );
+    defer allocator.free(lock_rel);
+    const lock_rel_z = try allocator.dupeZ(u8, lock_rel);
+    defer allocator.free(lock_rel_z);
+
+    const lock_fd: ?std.posix.fd_t = std.posix.openat(
+        std.posix.AT.FDCWD,
+        lock_rel_z,
+        .{ .ACCMODE = .RDWR, .CREAT = true },
+        0o644,
+    ) catch null;
+
+    const got_lock: bool = if (lock_fd) |fd|
+        (std.c.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB) == 0)
+    else
+        false;
+
+    // profile_dir: the directory Chrome will actually use for this run.
+    var is_ephemeral = false;
+    const profile_dir: []const u8 = blk: {
+        if (got_lock) {
+            // We own the shared profile.  Keep lock_fd open until return.
+            break :blk shared_profile;
+        }
+        // Another live AWR owns the shared profile — fall back to a fresh
+        // per-PID ephemeral directory.
+        if (lock_fd) |fd| _ = std.c.close(fd);
+        const eph = try std.fmt.allocPrint(
+            allocator,
+            "/tmp/awr-cdp-{d}",
+            .{std.c.getpid()},
+        );
+        std.Io.Dir.cwd().createDirPath(io, eph) catch |err| switch (err) {
+            error.PathAlreadyExists, error.NotDir => {},
+            else => {
+                allocator.free(eph);
+                return err;
+            },
+        };
+        is_ephemeral = true;
+        break :blk eph;
+    };
+    // Close the flock fd when we return (releases the lock automatically).
+    defer if (got_lock) {
+        if (lock_fd) |fd| _ = std.c.close(fd);
+    };
+    // Ephemeral dir is removed on return; shared profile persists.
+    defer if (is_ephemeral) {
+        std.Io.Dir.cwd().deleteTree(io, profile_dir) catch {};
+        allocator.free(profile_dir);
+    };
+
+    // ── 1b. Remove stale Singleton files (only when we own the shared profile)
+    // Chrome writes SingletonLock / SingletonSocket / SingletonCookie into the
+    // profile root when it starts and removes them on clean exit.  If a prior
+    // AWR run orphaned Chrome (e.g. SIGKILL), these files linger and prevent
+    // the next Chrome instance from acquiring the profile (ChromeStartTimeout).
+    // The flock above guarantees no other live AWR-driven Chrome is using this
+    // profile, so unlinking is safe.
+    if (got_lock) {
+        const lock_names = [_][]const u8{
+            "SingletonLock",
+            "SingletonSocket",
+            "SingletonCookie",
+        };
+        for (lock_names) |name| {
+            const stale_path = std.fmt.allocPrint(
+                allocator,
+                "{s}/{s}",
+                .{ profile_dir, name },
+            ) catch continue;
+            defer allocator.free(stale_path);
+            const stale_path_z = allocator.dupeZ(u8, stale_path) catch continue;
+            defer allocator.free(stale_path_z);
+            _ = std.c.unlink(stale_path_z.ptr);
+        }
+    }
 
     // ── 2. Spawn Chrome ───────────────────────────────────────────────────
     const chrome_bin = chromePath();
     const udd_flag = try std.fmt.allocPrint(
         allocator,
         "--user-data-dir={s}",
-        .{tmp_dir},
+        .{profile_dir},
     );
     defer allocator.free(udd_flag);
 
@@ -229,6 +342,34 @@ pub fn fetchRenderedHtml(
     try ws.readUpgradeResponse(&r_adapt, allocator, &ws_key);
 
     // ── 8. CDP session ────────────────────────────────────────────────────
+    // Bound the outerHTML read phase with a kernel-level SO_RCVTIMEO so
+    // ws.readFrame() cannot block indefinitely if Chrome stops responding.
+    // We use a short polling window (5 s) and check the wall-clock deadline
+    // inside awaitOuterHtml to decide when to bail.  All earlier CDP acks
+    // (createTarget, attachToTarget, Page.enable, Page.navigate) receive
+    // prompt replies and are not the hang source; the timeout only matters
+    // for the final outerHTML read.
+    if (opts.nav_timeout_ms > 0) {
+        // Total budget = sleep budget + 3 s post-settle read window.
+        const total_budget_ms: u32 = @intCast(@min(
+            opts.nav_timeout_ms + 3_000,
+            @as(u64, std.math.maxInt(u32)),
+        ));
+        const tv: std.posix.timeval = .{
+            .sec = @intCast(total_budget_ms / 1000),
+            .usec = @intCast((total_budget_ms % 1000) * 1000),
+        };
+        const opt = std.mem.asBytes(&tv);
+        std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, opt) catch {};
+    }
+
+    // Compute the absolute deadline for the outerHTML read phase.
+    // We give an extra 3 s beyond nav_timeout_ms for the read itself.
+    const html_deadline_ms: i64 = if (opts.nav_timeout_ms > 0)
+        milliTimestamp() + @as(i64, @intCast(opts.nav_timeout_ms)) + 3_000
+    else
+        0; // 0 = no deadline check (unlimited budget)
+
     const html = try runCdpSession(
         allocator,
         io,
@@ -237,6 +378,8 @@ pub fn fetchRenderedHtml(
         &net_writer.interface,
         url,
         opts.settle_ms,
+        opts.nav_timeout_ms,
+        html_deadline_ms,
         opts.cookies,
     );
     errdefer allocator.free(html);
@@ -251,7 +394,8 @@ pub fn fetchRenderedHtml(
     net_writer.interface.flush() catch {};
 
     child.kill(io);
-    std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
+    // The shared profile persists across runs; an ephemeral fallback dir is
+    // cleaned by the defer installed in step 1.
 
     return html;
 }
@@ -288,7 +432,12 @@ fn readDevToolsUrl(
         // Use std.Io.Reader.readSliceShort to tolerate zero-byte reads.
         const n = stderr_reader.interface.readSliceShort(&byte_buf) catch
             return error.ChromeStartTimeout;
-        if (n == 0) continue; // no data yet — spin
+        if (n == 0) {
+            // No data yet — yield briefly instead of busy-spinning a full core
+            // while Chrome boots (can take seconds on a cold start).
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+            continue;
+        }
         if (byte_buf[0] == '\n') {
             const line = line_buf.items;
             if (std.mem.startsWith(u8, line, marker)) {
@@ -344,6 +493,11 @@ const CdpConn = struct {
 /// Run the full CDP session over an established WebSocket connection.
 /// r_adapt / w_adapt provide the readNoEof / writeAll interface.
 /// flush_writer is the underlying std.Io.Writer (for explicit flush after sends).
+/// settle_ms: extra wait after navigate ack for SPA JS hydration.
+/// nav_timeout_ms: hard ceiling on the navigate+settle phase; caps the settle
+///   sleep so the call is always bounded even if the page never fires loadEventFired.
+/// deadline_ms: absolute milliTimestamp deadline for the outerHTML read phase.
+///   0 means no deadline check (used in tests with synthetic readers).
 /// cookies: optional slice of CdpCookie to inject before navigation.
 fn runCdpSession(
     allocator: std.mem.Allocator,
@@ -353,6 +507,8 @@ fn runCdpSession(
     flush_writer: *std.Io.Writer,
     url: []const u8,
     settle_ms: u64,
+    nav_timeout_ms: u64,
+    deadline_ms: i64,
     cookies: []const CdpCookie,
 ) ![]u8 {
     var conn: CdpConn = .{};
@@ -454,16 +610,43 @@ fn runCdpSession(
     }
     try awaitAck(allocator, r_adapt, nav_id);
 
-    // ── Wait for Page.loadEventFired ──────────────────────────────────────
-    try waitForEvent(allocator, r_adapt, session_id, "Page.loadEventFired");
+    _ = nav_timeout_ms; // deadline_ms already encodes the nav budget; kept for caller ABI
 
-    // ── Settle delay ──────────────────────────────────────────────────────
-    if (settle_ms > 0) {
-        std.Io.sleep(
-            io,
-            std.Io.Duration.fromMilliseconds(@intCast(settle_ms)),
-            .awake,
-        ) catch {};
+    // ── Race Page.loadEventFired against the deadline ─────────────────────
+    // Return to capture as soon as the page fires load (fast path: a page
+    // that hydrates in 200ms is captured at ~load+settle, not a fixed 4.5s),
+    // but never hang if a SPA/challenge page never fires load. The wait is
+    // bounded by load_deadline (reserving a read window for outerHTML) and by
+    // SO_RCVTIMEO on the socket. deadline_ms==0 (unit tests) skips the wait.
+    const read_reserve_ms: i64 = 3_000;
+    const load_deadline_ms: i64 = if (deadline_ms != 0) deadline_ms - read_reserve_ms else 0;
+    if (load_deadline_ms != 0) {
+        while (milliTimestamp() < load_deadline_ms) {
+            const frame = ws.readFrame(r_adapt, allocator) catch {
+                // SO_RCVTIMEO EAGAIN or transient read error — re-check the deadline.
+                if (milliTimestamp() >= load_deadline_ms) break;
+                continue;
+            };
+            defer allocator.free(frame.payload);
+            if (frame.opcode != .text and frame.opcode != .binary) continue;
+            if (hasMethod(frame.payload, "Page.loadEventFired")) break;
+        }
+    }
+
+    // ── Bounded hydration settle ──────────────────────────────────────────
+    // After load (or load timeout) give SPA JS a brief window to hydrate, but
+    // never exceed the remaining nav budget (preserving the outerHTML read
+    // window). When unbounded (tests), just honor settle_ms.
+    {
+        const room_ms: i64 = if (load_deadline_ms != 0)
+            load_deadline_ms - milliTimestamp()
+        else
+            @intCast(settle_ms);
+        if (room_ms > 0) {
+            const sleep_ms: u64 = @min(settle_ms, @as(u64, @intCast(room_ms)));
+            if (sleep_ms > 0)
+                std.Io.sleep(io, std.Io.Duration.fromMilliseconds(@intCast(sleep_ms)), .awake) catch {};
+        }
     }
 
     // ── Runtime.evaluate — get outerHTML ──────────────────────────────────
@@ -481,7 +664,7 @@ fn runCdpSession(
         try wsSend(w_adapt, flush_writer, msg);
     }
 
-    return awaitOuterHtml(allocator, r_adapt, eval_id);
+    return awaitOuterHtml(allocator, r_adapt, eval_id, deadline_ms);
 }
 
 // ── WebSocket send helper ──────────────────────────────────────────────────
@@ -531,32 +714,32 @@ fn awaitAck(
     }
 }
 
-/// Wait for a CDP event with the given `method` on the given `session_id`.
-fn waitForEvent(
-    allocator: std.mem.Allocator,
-    r_adapt: anytype,
-    session_id: []const u8,
-    method: []const u8,
-) !void {
-    while (true) {
-        const frame = try ws.readFrame(r_adapt, allocator);
-        defer allocator.free(frame.payload);
-        if (frame.opcode != .text and frame.opcode != .binary) continue;
-        const msg = frame.payload;
-        if (hasMethod(msg, method) and hasSessionId(msg, session_id)) return;
-    }
-}
-
 /// Await `Runtime.evaluate` result and extract the string value of "value".
 /// Chrome wraps it as:
 ///   {"id":N,"result":{"result":{"type":"string","value":"<!DOCTYPE..."}}}
+///
+/// deadline_ms is an absolute milliTimestamp() deadline for the entire read
+/// loop.  When non-zero, each ws.readFrame() error (including EAGAIN from
+/// SO_RCVTIMEO) triggers a deadline check; if the wall clock has passed
+/// deadline_ms the function returns error.NavTimeout rather than spinning.
+/// When deadline_ms is 0, deadline checking is skipped (used in unit tests
+/// that drive synthetic readers with no kernel socket underneath).
 fn awaitOuterHtml(
     allocator: std.mem.Allocator,
     r_adapt: anytype,
     expected_id: u32,
+    deadline_ms: i64,
 ) ![]u8 {
     while (true) {
-        const frame = try ws.readFrame(r_adapt, allocator);
+        const frame = ws.readFrame(r_adapt, allocator) catch |err| {
+            // SO_RCVTIMEO fires EAGAIN (surfaces as a read error through the
+            // adapter).  Check whether the wall-clock deadline has passed; if
+            // so, give up rather than retrying indefinitely.
+            if (deadline_ms != 0 and milliTimestamp() >= deadline_ms) {
+                return error.NavTimeout;
+            }
+            return err;
+        };
         defer allocator.free(frame.payload);
         if (frame.opcode != .text and frame.opcode != .binary) continue;
         if (!matchesId(frame.payload, expected_id)) continue;
@@ -585,10 +768,6 @@ fn findError(msg: []const u8) bool {
 fn hasMethod(msg: []const u8, method: []const u8) bool {
     return std.mem.indexOf(u8, msg, "\"method\"") != null and
         std.mem.indexOf(u8, msg, method) != null;
-}
-
-fn hasSessionId(msg: []const u8, session_id: []const u8) bool {
-    return std.mem.indexOf(u8, msg, session_id) != null;
 }
 
 /// Find the first `"field":"..."` in `msg` and return the decoded string
