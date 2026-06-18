@@ -38,25 +38,30 @@ On 2026-04-18 this tree was migrated from Zig 0.15 to 0.16 to pick up
 std.Io / build-system changes. A few patches are *local* and need more
 durable follow-up work tracked here so we don't forget them.
 
-### 1. `zig-pkg/quickjs_ng-…/build.zig` — patched in-place
+### 1. `third_party/zig-quickjs-ng/build.zig` — patched by bootstrap
 
 **What:** `lib.linkLibC()`, `lib.addIncludePath(...)`, `lib.addCSourceFiles(...)`
-and `tests.linkLibrary(lib)` (all `Compile`-level calls) were moved to the
-`Module` level per Zig 0.16's build-system rework.
+and `tests.linkLibrary(lib)` (all `Compile`-level calls) must move to the
+`Module` level per Zig 0.16's build-system rework. `scripts/bootstrap_deps.sh`
+applies these patches to the locally-cloned `third_party/zig-quickjs-ng` after
+checkout; `build.zig.zon` consumes it as a local `.path` dependency (no network
+fetch at build time).
 
-**Why it's a problem long-term:** the Zig package cache is content-addressed
-by hash, and `zig build` will re-fetch the upstream tarball whenever the
-entry under `zig-pkg/` is cleared. Any re-fetch wipes the patch.
+**Why it's still debt:** the patches are re-applied by a brittle text-`replace()`
+step in `bootstrap_deps.sh`; if upstream `zig-quickjs-ng` changes those lines the
+patch step fails loudly (by design) and needs hand-updating.
 
 **Durable fix:**
 
 - **Option A (preferred):** send a PR to `mitchellh/zig-quickjs-ng` that
-  updates its `build.zig` to the 0.16 API, then bump the URL hash in
-  `build.zig.zon`.
+  updates its `build.zig` to the 0.16 API, then bump the pinned commit in
+  `bootstrap_deps.sh`.
 - **Option B:** vendor `quickjs-ng` under `third_party/quickjs-ng/` with our
-  own Zig-0.16-compatible `build.zig` and drop the network dependency.
+  own Zig-0.16-compatible `build.zig` checked in, dropping the bootstrap patch.
 
-Until either is done, treat `zig-pkg/` as part of the repo for 0.16 builds.
+Note: the old top-level `zig-pkg/` resolved cache (a byte-for-byte duplicate of
+`third_party/`) is **vestigial and no longer tracked** — `zig build` regenerates
+it locally and it plays no role in a clean build (verified 2026-06-18).
 
 ### 2. `build.zig.zon` — libxev hash drift
 
