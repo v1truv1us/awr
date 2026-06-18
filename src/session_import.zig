@@ -477,6 +477,11 @@ fn decryptChromeValue(allocator: std.mem.Allocator, key: [16]u8, enc_hex: []cons
 
     const pad = buf[buf.len - 1];
     if (pad == 0 or pad > 16 or @as(usize, pad) > buf.len) return error.BadPadding;
+    // Full PKCS#7 validation: every one of the trailing `pad` bytes must equal `pad`,
+    // not just the last — a corrupt BLOB otherwise yields silent wrong plaintext.
+    for (buf[buf.len - pad ..]) |b| {
+        if (b != pad) return error.BadPadding;
+    }
     var plain: []const u8 = buf[0 .. buf.len - pad];
 
     // Strip the Chrome-M127+ 32-byte SHA-256(host) prefix when it matches.

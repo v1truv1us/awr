@@ -435,7 +435,8 @@ pub const Page = struct {
         // works fine without it (just `crypto.*` will be missing from
         // pages that ask). Standalone js_test target never reaches this
         // code path since it doesn't go through Page.init.
-        js_engine.setCryptoBackend(webcrypto_backend.backend) catch {};
+        js_engine.setCryptoBackend(webcrypto_backend.backend) catch |err|
+            std.log.warn("WebCrypto backend init failed; crypto.subtle unavailable for this page: {s}", .{@errorName(err)});
 
         var el = try engine.EventLoop.init(allocator, js_engine.ctx);
         errdefer el.deinit();
@@ -518,7 +519,8 @@ pub const Page = struct {
         // works fine without it (just `crypto.*` will be missing from
         // pages that ask). Standalone js_test target never reaches this
         // code path since it doesn't go through Page.init.
-        js_engine.setCryptoBackend(webcrypto_backend.backend) catch {};
+        js_engine.setCryptoBackend(webcrypto_backend.backend) catch |err|
+            std.log.warn("WebCrypto backend init failed; crypto.subtle unavailable for this page: {s}", .{@errorName(err)});
 
         var el = try engine.EventLoop.init(allocator, js_engine.ctx);
         errdefer el.deinit();
@@ -604,7 +606,8 @@ pub const Page = struct {
         // works fine without it (just `crypto.*` will be missing from
         // pages that ask). Standalone js_test target never reaches this
         // code path since it doesn't go through Page.init.
-        js_engine.setCryptoBackend(webcrypto_backend.backend) catch {};
+        js_engine.setCryptoBackend(webcrypto_backend.backend) catch |err|
+            std.log.warn("WebCrypto backend init failed; crypto.subtle unavailable for this page: {s}", .{@errorName(err)});
 
         var el = try engine.EventLoop.init(allocator, js_engine.ctx);
         errdefer el.deinit();
@@ -696,7 +699,8 @@ pub const Page = struct {
     fn cookieSetAdapter(ptr: *anyopaque, value: []const u8) void {
         const self: *Page = @ptrCast(@alignCast(ptr));
         const u = url_mod.Url.parse(self.base_url) catch return;
-        self.client.cookieJar().parseSetCookie(value, u.host) catch {};
+        self.client.cookieJar().parseSetCookie(value, u.host) catch |err|
+            std.log.warn("Set-Cookie parse failed for host {s}: {s}", .{ u.host, @errorName(err) });
     }
 
     /// FetchHost adapter: runs the caller's URL through either the HTTP

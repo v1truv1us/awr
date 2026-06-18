@@ -1323,15 +1323,20 @@ fn renderModelFromRootOnce(
     }
     // Build filtered indexes only after all sheets are parsed (rule heap
     // storage is stable; the outer list may have reallocated during append).
+    var dropped_css_rules: usize = 0;
     for (state.parsed_sheets.items, 0..) |*sheet, si| {
         for (sheet.rules.items, 0..) |*rule, ri| {
             const disp = rule.declarations.getPropertyValue("display");
             const vis = rule.declarations.getPropertyValue("visibility");
             if (disp.len > 0 or vis.len > 0) {
-                state.hide_rules.append(allocator, rule) catch {};
+                state.hide_rules.append(allocator, rule) catch {
+                    dropped_css_rules += 1;
+                };
             }
             if (rule.declarations.getPropertyValue("white-space").len > 0) {
-                state.ws_rules.append(allocator, rule) catch {};
+                state.ws_rules.append(allocator, rule) catch {
+                    dropped_css_rules += 1;
+                };
             }
             // Collect text rules (in cascade order) so the per-element style
             // pass matches only these — not the thousands of layout rules a
@@ -1339,7 +1344,9 @@ fn renderModelFromRootOnce(
             // pre-compiled once for exact (combinator/attr) matching.
             if (ruleHasTextProp(rule)) {
                 state.has_text_css = true;
-                state.text_rules.append(allocator, .{ .rule = rule, .source_index = si, .rule_index = ri }) catch {};
+                state.text_rules.append(allocator, .{ .rule = rule, .source_index = si, .rule_index = ri }) catch {
+                    dropped_css_rules += 1;
+                };
                 if (rule.complex) {
                     if (dom.compileSelectorList(allocator, rule.selector_text)) |list| {
                         state.compiled_selectors.put(allocator, rule, list) catch {
@@ -1354,6 +1361,8 @@ fn renderModelFromRootOnce(
             }
         }
     }
+    if (dropped_css_rules > 0)
+        std.log.warn("dropped {d} CSS rule(s) under memory pressure; some styles may not apply", .{dropped_css_rules});
     // Exact complex matching is affordable only when few complex text rules
     // exist; above this the per-element ancestor walk is too slow (MediaWiki).
     state.exact_complex_selectors = state.compiled_selectors.count() <= 48;

@@ -457,21 +457,28 @@ pub const JsEngine = struct {
         // for objects and direct toString for primitives.
         var buf: [4096]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
+        var truncated = false;
 
         for (args, 0..) |raw_arg, i| {
             const arg: qjs.Value = @bitCast(raw_arg);
-            if (i > 0) _ = w.writeByte(' ') catch {};
+            if (i > 0) _ = w.writeByte(' ') catch {
+                truncated = true;
+            };
 
             if (arg.isString()) {
                 const cstr = arg.toCString(ctx);
                 if (cstr) |s| {
-                    _ = w.writeAll(std.mem.span(s)) catch {};
+                    _ = w.writeAll(std.mem.span(s)) catch {
+                        truncated = true;
+                    };
                     ctx.freeCString(s);
                 }
             } else if (arg.isNumber() or arg.isBool() or arg.isNull() or arg.isUndefined()) {
                 const cstr = arg.toCString(ctx);
                 if (cstr) |s| {
-                    _ = w.writeAll(std.mem.span(s)) catch {};
+                    _ = w.writeAll(std.mem.span(s)) catch {
+                        truncated = true;
+                    };
                     ctx.freeCString(s);
                 }
             } else {
@@ -480,18 +487,31 @@ pub const JsEngine = struct {
                 defer json_val.deinit(ctx);
                 if (!json_val.isException() and !json_val.isUndefined()) {
                     if (json_val.toCString(ctx)) |s| {
-                        _ = w.writeAll(std.mem.span(s)) catch {};
+                        _ = w.writeAll(std.mem.span(s)) catch {
+                            truncated = true;
+                        };
                         ctx.freeCString(s);
                     } else {
-                        _ = w.writeAll("[object]") catch {};
+                        _ = w.writeAll("[object]") catch {
+                            truncated = true;
+                        };
                     }
                 } else {
-                    _ = w.writeAll("[object]") catch {};
+                    _ = w.writeAll("[object]") catch {
+                        truncated = true;
+                    };
                 }
             }
         }
 
-        host.sink.write(level, w.buffered());
+        const out = w.buffered();
+        if (truncated and out.len >= " [truncated]".len) {
+            // Buffer filled — overwrite the tail so readers can tell the line
+            // was clipped rather than silently ending mid-token.
+            const marker = " [truncated]";
+            @memcpy(buf[out.len - marker.len ..][0..marker.len], marker);
+        }
+        host.sink.write(level, out);
     }
 
     // ── timers — libxev-backed when an EventLoop is attached ─────────────
