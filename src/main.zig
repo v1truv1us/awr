@@ -855,7 +855,7 @@ fn extractJsonRpcResult(resp: []const u8) ?[]const u8 {
 }
 
 const USAGE =
-    \\AWR — Agentic Web Runtime
+    \\AWR — CLI Browser Runtime
     \\
     \\Usage:
     \\  awr tui [<url>] [--no-js]    Open the interactive terminal browser. Without a URL,

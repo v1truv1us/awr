@@ -2432,7 +2432,7 @@ fn drawWelcome(writer: anytype, cols: usize, viewport_height: usize) !void {
 
     // Build the lines in order. Empty strings are blank spacer rows.
     const tips = [_][]const u8{
-        BOLD ++ "AWR — Agentic Web Runtime" ++ RESET,
+        BOLD ++ "AWR — CLI Browser Runtime" ++ RESET,
         DIM ++ "A CLI browser for humans and agents." ++ RESET,
         "",
         BOLD ++ "Type a URL below and press Enter to navigate." ++ RESET,
@@ -3130,7 +3130,7 @@ test "harness: welcome screen paints on fresh session" {
     // Welcome screen needs prompt active to mirror runWith's fresh-tab path.
     try h.session.startPrompt(.url);
 
-    try std.testing.expect(try h.frameContains("AWR — Agentic Web Runtime"));
+    try std.testing.expect(try h.frameContains("AWR — CLI Browser Runtime"));
     try std.testing.expect(try h.frameContains("URL bar"));
     try std.testing.expect(try h.frameContains("URL: "));
 }
