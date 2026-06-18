@@ -87,6 +87,16 @@ pub const RenderOptions = struct {
     /// where orphan `[N]` markers without URLs are dead weight.
     show_references: ?bool = null,
     profile: RenderProfile = .default,
+    /// Blank-render rescue switch. When true, the `.browse` profile skips ALL
+    /// boilerplate pruning/collapsing (`shouldSkipForBrowse` /
+    /// `shouldCollapseForBrowse`) so the full tree renders. Set only by
+    /// `renderBrowseModel`'s final fallback, when the normal narrowed +
+    /// pruned render came out blank — e.g. a non-table, high-link-density
+    /// card-grid SPA (hn.algolia.com) whose result cards score as nav noise to
+    /// the readability scorers and get dropped entirely. Surfacing the content
+    /// (plus some chrome) beats a blank screen; only blank pages reach it, so
+    /// pages that render fine never regress.
+    disable_chrome_pruning: bool = false,
     /// Resolved terminal-image protocol. Default `.none` means no
     /// inline image emit; the renderer falls through to the text alt-ref
     /// path. The actual encoded bytes (the *what to emit*) come from
@@ -1241,7 +1251,22 @@ pub fn renderBrowseModel(
     var browse_opts = opts;
     browse_opts.profile = .browse;
     const root = browse_heuristics.chooseContentRoot(doc) orelse doc.body();
-    return renderModelFromRoot(allocator, root, browse_opts);
+    var model = try renderModelFromRoot(allocator, root, browse_opts);
+    if (!isBlankRender(model.text)) return model;
+
+    // Blank-render rescue. The readability content-root selection plus the
+    // boilerplate pruning dropped everything — typically a non-table,
+    // high-link-density "card grid" results page (hn.algolia.com and similar
+    // search/aggregator SPAs) whose link-only cards score as navigation noise
+    // to both the prose and link-list scorers. Re-render the full <body> with
+    // content narrowing bypassed (root = body) and chrome pruning disabled so
+    // the content surfaces. Only reached when the page would otherwise be a
+    // blank screen, so pages that already render fine never take this path and
+    // cannot regress.
+    model.deinit();
+    var rescue_opts = browse_opts;
+    rescue_opts.disable_chrome_pruning = true;
+    return renderModelFromRoot(allocator, doc.body(), rescue_opts);
 }
 
 pub fn renderBrowseHtmlModel(
@@ -1547,7 +1572,7 @@ fn renderElement(state: *RenderState, w: anytype, elem: *const dom.Element) anye
     if (isHiddenTag(tag)) return;
     if (isCssHidden(state, elem)) return;
 
-    if (state.opts.profile == .browse) {
+    if (state.opts.profile == .browse and !state.opts.disable_chrome_pruning) {
         if (isCompactLandmarkTag(tag)) {
             if (browse_heuristics.shouldCollapseForBrowse(elem)) {
                 try renderCollapsedLandmark(state, w, tag);
@@ -4280,6 +4305,27 @@ test "browse render still honors explicit display:none inside rescued content" {
     defer model.deinit();
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Streamed body content") != null);
     try std.testing.expect(std.mem.indexOf(u8, model.text, "tracking pixel junk") == null);
+}
+
+test "browse render rescues a non-table link-dense card grid (search-results SPA)" {
+    // The hn.algolia.com class: result cards are almost entirely links, with no
+    // <table> rows and no paragraphs. The prose scorer penalizes link density
+    // and the link-list scorer requires table rows, so the normal browse render
+    // prunes the cards as nav noise and comes out blank. The blank-render rescue
+    // must re-render the full <body> (pruning disabled) so the results surface.
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body><section class="SearchResults">
+        \\<article class="Story"><div class="Story_title"><a href="/i1"><span>First Zig result headline</span></a></div><div class="Story_meta"><a href="/p1">120 points</a><a href="/u1">alice</a><a href="/c1">31 comments</a></div></article>
+        \\<article class="Story"><div class="Story_title"><a href="/i2"><span>Second Zig result headline</span></a></div><div class="Story_meta"><a href="/p2">98 points</a><a href="/u2">bob</a><a href="/c2">12 comments</a></div></article>
+        \\<article class="Story"><div class="Story_title"><a href="/i3"><span>Third Zig result headline</span></a></div><div class="Story_meta"><a href="/p3">76 points</a><a href="/u3">carol</a><a href="/c3">9 comments</a></div></article>
+        \\</section></body></html>
+    );
+    defer doc.deinit();
+
+    var model = try renderBrowseModel(std.testing.allocator, &doc, .{ .ansi_colors = false });
+    defer model.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "First Zig result headline") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Third Zig result headline") != null);
 }
 
 test "renderModel captures lines and interactive links" {
