@@ -22,6 +22,9 @@ third_party/quickjs-ng-quickjs/
 # Local Zig package cache. The patched copy of quickjs_ng/build.zig lives
 # here (see DEV_NOTES.md #1); re-apply after any `zig fetch` refresh until
 # the upstream PR lands or we vendor quickjs_ng under third_party/.
+# NOTE: the patched files under zig-pkg/ are deliberately tracked (git keeps
+# already-tracked paths even when ignored); this rule only suppresses the
+# rest of the cache churn from `git status`.
 zig-pkg/
 
 # Solo per-session git worktrees — local-only scratch space for
@@ -34,3 +37,8 @@ zig-pkg/
 # Local diagnostic captures and generated test comparison outputs.
 errors/
 *.actual.txt
+
+# Stray local test binaries from ad-hoc `zig run` / `cc` experiments at the
+# repo root — never commit (removed in the 2026-06-17 hygiene pass).
+/test_io*
+/test_reader*
