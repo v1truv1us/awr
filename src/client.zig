@@ -283,6 +283,7 @@ pub const FetchError = error{
     SendFailed,
     RecvFailed,
     TooManyRedirects,
+    ResponseTooLarge,
     OutOfMemory,
 };
 
@@ -861,7 +862,11 @@ pub const Client = struct {
         var transfer_buffer: [64]u8 = undefined;
         var decompress: std.http.Decompress = undefined;
         const reader = result.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
-        _ = reader.streamRemaining(&body_buf.writer) catch |err| switch (err) {
+        // Cap decompressed output so a hostile gzip/zstd "zip bomb" cannot drive
+        // unbounded allocation (the window buffer above bounds only the sliding
+        // window, not total output). See MAX_DECOMPRESSED_BODY_BYTES / streamCapped.
+        streamCapped(reader, &body_buf.writer, MAX_DECOMPRESSED_BODY_BYTES) catch |err| switch (err) {
+            error.ResponseTooLarge => return error.ResponseTooLarge,
             error.ReadFailed => return mapFetchError(result.bodyErr().?),
             else => |e| return mapFetchError(e),
         };
@@ -1132,11 +1137,11 @@ pub const Client = struct {
         }
         if (parsed.body.len > 0) {
             if (is_brotli) {
-                const decompressed = try inflateBrotliBody(self.allocator, parsed.body);
+                const decompressed = try inflateBrotliBody(self.allocator, parsed.body, MAX_DECOMPRESSED_BODY_BYTES);
                 self.allocator.free(parsed.body);
                 parsed.body = decompressed;
             } else if (content_encoding != .identity) {
-                const decompressed = try decompressBody(self.allocator, content_encoding, parsed.body);
+                const decompressed = try decompressBody(self.allocator, content_encoding, parsed.body, MAX_DECOMPRESSED_BODY_BYTES);
                 self.allocator.free(parsed.body);
                 parsed.body = decompressed;
             }
@@ -1248,9 +1253,9 @@ pub const Client = struct {
         const body_dup = if (h2_resp.body.len == 0)
             try self.allocator.alloc(u8, 0)
         else if (is_brotli)
-            try inflateBrotliBody(self.allocator, h2_resp.body)
+            try inflateBrotliBody(self.allocator, h2_resp.body, MAX_DECOMPRESSED_BODY_BYTES)
         else
-            try decompressBody(self.allocator, content_encoding, h2_resp.body);
+            try decompressBody(self.allocator, content_encoding, h2_resp.body, MAX_DECOMPRESSED_BODY_BYTES);
         errdefer self.allocator.free(body_dup);
 
         var headers_out = http1.HeaderList{ .owns_strings = true };
@@ -1310,13 +1315,14 @@ fn decompressBody(
     allocator: std.mem.Allocator,
     encoding: std.http.ContentEncoding,
     compressed: []const u8,
+    max_bytes: usize,
 ) ![]u8 {
     if (compressed.len == 0) return try allocator.alloc(u8, 0);
     return switch (encoding) {
         .identity => try allocator.dupe(u8, compressed),
-        .gzip => try inflateFlateBody(allocator, compressed, .gzip),
-        .deflate => try inflateFlateBody(allocator, compressed, .zlib),
-        .zstd => try inflateZstdBody(allocator, compressed),
+        .gzip => try inflateFlateBody(allocator, compressed, .gzip, max_bytes),
+        .deflate => try inflateFlateBody(allocator, compressed, .zlib, max_bytes),
+        .zstd => try inflateZstdBody(allocator, compressed, max_bytes),
         .compress => return error.UnsupportedCompressionMethod,
     };
 }
@@ -1325,6 +1331,7 @@ fn inflateFlateBody(
     allocator: std.mem.Allocator,
     compressed: []const u8,
     container: std.compress.flate.Container,
+    max_bytes: usize,
 ) ![]u8 {
     var input_reader = std.Io.Reader.fixed(compressed);
     const window_buf = try allocator.alloc(u8, std.compress.flate.max_window_len);
@@ -1332,11 +1339,11 @@ fn inflateFlateBody(
     var decompress = std.compress.flate.Decompress.init(&input_reader, container, window_buf);
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
-    _ = try decompress.reader.streamRemaining(&out.writer);
+    try streamCapped(&decompress.reader, &out.writer, max_bytes);
     return try out.toOwnedSlice();
 }
 
-fn inflateZstdBody(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
+fn inflateZstdBody(allocator: std.mem.Allocator, compressed: []const u8, max_bytes: usize) ![]u8 {
     var input_reader = std.Io.Reader.fixed(compressed);
     const window_len: u32 = std.compress.zstd.default_window_len;
     const window_buf = try allocator.alloc(u8, window_len + std.compress.zstd.block_size_max);
@@ -1344,8 +1351,32 @@ fn inflateZstdBody(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
     var decompress = std.compress.zstd.Decompress.init(&input_reader, window_buf, .{ .window_len = window_len });
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
-    _ = try decompress.reader.streamRemaining(&out.writer);
+    try streamCapped(&decompress.reader, &out.writer, max_bytes);
     return try out.toOwnedSlice();
+}
+
+/// Hard cap on decompressed HTTP response body size. The streaming window
+/// buffers in the inflate helpers bound only the sliding window, not total
+/// output, so without this a hostile/compressed "zip bomb" body could drive
+/// unbounded allocation (OOM) — AWR's threat model explicitly includes hostile
+/// content. 64 MiB is generous for real pages (Wikipedia ≈ a few MiB) while
+/// closing the DoS class. Tune here if a larger legitimate page appears.
+const MAX_DECOMPRESSED_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Stream all of `reader` into `writer`, aborting with error.ResponseTooLarge
+/// once more than `max_bytes` total bytes have been produced. Reads in fixed
+/// 64 KiB chunks so peak allocation is bounded to the output already written
+/// plus one chunk — never the full (potentially enormous) decompressed size.
+fn streamCapped(reader: *std.Io.Reader, writer: *std.Io.Writer, max_bytes: usize) !void {
+    var total: usize = 0;
+    var chunk: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = try reader.readSliceShort(&chunk);
+        if (n == 0) break;
+        total += n;
+        if (total > max_bytes) return error.ResponseTooLarge;
+        try writer.writeAll(chunk[0..n]);
+    }
 }
 
 // ── Brotli decoder (vendored libbrotlidec, see third_party/brotli) ───────────
@@ -1379,7 +1410,7 @@ extern fn BrotliDecoderDecompressStream(
 /// `allocator`. Errors on corrupt or truncated input (Brotli reports
 /// `NEEDS_MORE_INPUT` once all bytes are consumed only when the stream is
 /// incomplete).
-fn inflateBrotliBody(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
+fn inflateBrotliBody(allocator: std.mem.Allocator, compressed: []const u8, max_bytes: usize) ![]u8 {
     if (compressed.len == 0) return try allocator.alloc(u8, 0);
 
     const state = BrotliDecoderCreateInstance(null, null, null) orelse
@@ -1392,6 +1423,7 @@ fn inflateBrotliBody(allocator: std.mem.Allocator, compressed: []const u8) ![]u8
     var chunk: [64 * 1024]u8 = undefined;
     var avail_in: usize = compressed.len;
     var next_in: [*]const u8 = compressed.ptr;
+    var total: usize = 0;
 
     while (true) {
         var avail_out: usize = chunk.len;
@@ -1405,7 +1437,11 @@ fn inflateBrotliBody(allocator: std.mem.Allocator, compressed: []const u8) ![]u8
             null,
         );
         const produced = chunk.len - avail_out;
-        if (produced > 0) try out.writer.writeAll(chunk[0..produced]);
+        if (produced > 0) {
+            total += produced;
+            if (total > max_bytes) return error.ResponseTooLarge;
+            try out.writer.writeAll(chunk[0..produced]);
+        }
         switch (result) {
             BROTLI_DECODER_RESULT_SUCCESS => break,
             BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT => continue,
@@ -2324,7 +2360,7 @@ test "decompressBody: gzip round-trip" {
     const plain = "Hello, AWR! This is a gzip-encoded HTTP response body.";
     // Pre-compressed with: echo -n "Hello..." | gzip -c | xxd -p
     const compressed = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\xf3\x48\xcd\xc9\xc9\xd7\x51\x70\x0c\x0f\x52\x54\x08\xc9\xc8\x2c\x56\x00\xa2\x44\x85\xf4\xaa\xcc\x02\xdd\xd4\xbc\xe4\xfc\x94\xd4\x14\x05\x8f\x90\x90\x00\x85\xa2\xd4\xe2\x82\xfc\xbc\xe2\x54\x85\xa4\xfc\x94\x4a\x3d\x00\x1d\x7e\x77\x93\x36\x00\x00\x00";
-    const got = try decompressBody(alloc, .gzip, compressed);
+    const got = try decompressBody(alloc, .gzip, compressed, MAX_DECOMPRESSED_BODY_BYTES);
     defer alloc.free(got);
     try std.testing.expectEqualStrings(plain, got);
 }
@@ -2334,7 +2370,7 @@ test "decompressBody: deflate round-trip" {
     const plain = "Hello, AWR! This is a deflate-encoded HTTP response body.";
     // Pre-compressed with: echo -n "Hello..." | python3 -c "import zlib,sys; sys.stdout.buffer.write(zlib.compress(sys.stdin.buffer.read()))" | xxd -p
     const compressed = "\x78\x9c\xf3\x48\xcd\xc9\xc9\xd7\x51\x70\x0c\x0f\x52\x54\x08\xc9\xc8\x2c\x56\x00\xa2\x44\x85\x94\xd4\xb4\x9c\xc4\x92\x54\xdd\xd4\xbc\xe4\xfc\x94\xd4\x14\x05\x8f\x90\x90\x00\x85\xa2\xd4\xe2\x82\xfc\xbc\xe2\x54\x85\xa4\xfc\x94\x4a\x3d\x00\x1e\xf7\x13\x60";
-    const got = try decompressBody(alloc, .deflate, compressed);
+    const got = try decompressBody(alloc, .deflate, compressed, MAX_DECOMPRESSED_BODY_BYTES);
     defer alloc.free(got);
     try std.testing.expectEqualStrings(plain, got);
 }
@@ -2344,7 +2380,7 @@ test "decompressBody: zstd round-trip" {
     const plain = "Hello, AWR! This is a zstd-encoded HTTP response body.";
     // Pre-compressed with: echo -n "Hello..." | zstd -q -c | xxd -p
     const compressed = "\x28\xb5\x2f\xfd\x04\x58\xb1\x01\x00\x48\x65\x6c\x6c\x6f\x2c\x20\x41\x57\x52\x21\x20\x54\x68\x69\x73\x20\x69\x73\x20\x61\x20\x7a\x73\x74\x64\x2d\x65\x6e\x63\x6f\x64\x65\x64\x20\x48\x54\x54\x50\x20\x72\x65\x73\x70\x6f\x6e\x73\x65\x20\x62\x6f\x64\x79\x2e\xb1\xc2\xbe\xa7";
-    const got = try decompressBody(alloc, .zstd, compressed);
+    const got = try decompressBody(alloc, .zstd, compressed, MAX_DECOMPRESSED_BODY_BYTES);
     defer alloc.free(got);
     try std.testing.expectEqualStrings(plain, got);
 }
@@ -2354,14 +2390,14 @@ test "inflateBrotliBody: round-trip" {
     const plain = "Hello, AWR! This is a brotli-encoded HTTP response body.";
     // Pre-compressed with: printf "Hello..." | brotli -c -q 5 | xxd -p
     const compressed = "\x1f\x37\x00\x00\x04\xc4\x6d\xa9\xee\xfd\x7f\xe8\x6f\x66\x8b\xd9\x63\x11\x84\x83\x58\x84\x0d\x38\x70\x0f\x32\x48\xa6\x5b\xf3\x3e\x10\x2d\xd6\x51\x62\x74\x71\xe0\x27\x79\xeb\x9d\x6d\x53\x06\x7f\x85\x21\x64\xad\xef";
-    const got = try inflateBrotliBody(alloc, compressed);
+    const got = try inflateBrotliBody(alloc, compressed, MAX_DECOMPRESSED_BODY_BYTES);
     defer alloc.free(got);
     try std.testing.expectEqualStrings(plain, got);
 }
 
 test "inflateBrotliBody: empty body returns empty slice" {
     const alloc = std.testing.allocator;
-    const got = try inflateBrotliBody(alloc, "");
+    const got = try inflateBrotliBody(alloc, "", MAX_DECOMPRESSED_BODY_BYTES);
     defer alloc.free(got);
     try std.testing.expectEqual(@as(usize, 0), got.len);
 }
@@ -2372,7 +2408,7 @@ test "inflateBrotliBody: corrupt input errors" {
     // these as corrupt or as truncated; either is a decode failure, never a
     // silent success.
     const garbage = "\xde\xad\xbe\xef\xde\xad\xbe\xef\xde\xad\xbe\xef";
-    if (inflateBrotliBody(alloc, garbage)) |buf| {
+    if (inflateBrotliBody(alloc, garbage, MAX_DECOMPRESSED_BODY_BYTES)) |buf| {
         alloc.free(buf);
         try std.testing.expect(false);
     } else |_| {}
@@ -2381,14 +2417,43 @@ test "inflateBrotliBody: corrupt input errors" {
 test "decompressBody: identity passthrough" {
     const alloc = std.testing.allocator;
     const plain = "uncompressed body";
-    const got = try decompressBody(alloc, .identity, plain);
+    const got = try decompressBody(alloc, .identity, plain, MAX_DECOMPRESSED_BODY_BYTES);
     defer alloc.free(got);
     try std.testing.expectEqualStrings(plain, got);
 }
 
 test "decompressBody: empty body returns empty slice" {
     const alloc = std.testing.allocator;
-    const got = try decompressBody(alloc, .gzip, "");
+    const got = try decompressBody(alloc, .gzip, "", MAX_DECOMPRESSED_BODY_BYTES);
     defer alloc.free(got);
     try std.testing.expectEqual(@as(usize, 0), got.len);
+}
+
+// ── Decompression size cap (zip-bomb / decompression-DoS guard, audit H1) ────
+// A hostile or compromised origin can return a tiny compressed body that
+// decompresses to gigabytes. The window buffers bound only the sliding window,
+// so total output must be capped explicitly. These tests use a small cap with
+// the known-size vectors above; the mechanism is identical at the 64 MiB prod cap.
+
+test "decompressBody: gzip output over cap errors ResponseTooLarge" {
+    const alloc = std.testing.allocator;
+    // Decompresses to 53 bytes; a 10-byte cap must abort before allocating it all.
+    const gz = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\xf3\x48\xcd\xc9\xc9\xd7\x51\x70\x0c\x0f\x52\x54\x08\xc9\xc8\x2c\x56\x00\xa2\x44\x85\xf4\xaa\xcc\x02\xdd\xd4\xbc\xe4\xfc\x94\xd4\x14\x05\x8f\x90\x90\x00\x85\xa2\xd4\xe2\x82\xfc\xbc\xe2\x54\x85\xa4\xfc\x94\x4a\x3d\x00\x1d\x7e\x77\x93\x36\x00\x00\x00";
+    try std.testing.expectError(error.ResponseTooLarge, decompressBody(alloc, .gzip, gz, 10));
+}
+
+test "decompressBody: output exactly at cap succeeds (boundary)" {
+    const alloc = std.testing.allocator;
+    const plain = "Hello, AWR! This is a gzip-encoded HTTP response body.";
+    const gz = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\xf3\x48\xcd\xc9\xc9\xd7\x51\x70\x0c\x0f\x52\x54\x08\xc9\xc8\x2c\x56\x00\xa2\x44\x85\xf4\xaa\xcc\x02\xdd\xd4\xbc\xe4\xfc\x94\xd4\x14\x05\x8f\x90\x90\x00\x85\xa2\xd4\xe2\x82\xfc\xbc\xe2\x54\x85\xa4\xfc\x94\x4a\x3d\x00\x1d\x7e\x77\x93\x36\x00\x00\x00";
+    // cap == output length is allowed; only strictly-greater output aborts.
+    const got = try decompressBody(alloc, .gzip, gz, plain.len);
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings(plain, got);
+}
+
+test "inflateBrotliBody: output over cap errors ResponseTooLarge" {
+    const alloc = std.testing.allocator;
+    const br = "\x1f\x37\x00\x00\x04\xc4\x6d\xa9\xee\xfd\x7f\xe8\x6f\x66\x8b\xd9\x63\x11\x84\x83\x58\x84\x0d\x38\x70\x0f\x32\x48\xa6\x5b\xf3\x3e\x10\x2d\xd6\x51\x62\x74\x71\xe0\x27\x79\xeb\x9d\x6d\x53\x06\x7f\x85\x21\x64\xad\xef";
+    try std.testing.expectError(error.ResponseTooLarge, inflateBrotliBody(alloc, br, 8));
 }
