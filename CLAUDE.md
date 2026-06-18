@@ -60,13 +60,14 @@ zig build test-test262 # JS conformance subset
 ```
 
 ### Dependencies
-- **Zig** 0.14+ (primary toolchain)
+- **Zig** 0.16+ (primary toolchain; `build.zig.zon` pins `minimum_zig_version = 0.16.0`)
 - **BoringSSL** — pre-built static libs in `third_party/boringssl/` (not compiled during build)
 - **nghttp2** — via Homebrew (`/opt/homebrew/`)
 - **lexbor** — via Homebrew (`/opt/homebrew/`)
 - **libxev** — Zig package (event loop)
 - **QuickJS-NG** — Zig package (JS engine, requires `use_llvm = true`)
 - **CA bundle** — Mozilla roots in `third_party/ca-bundle/`
+- **sqlite3 CLI** — runtime-only, required for browser-cookie import (`awr session import`); not needed to build or for normal fetches
 
 ## Product framing
 

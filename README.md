@@ -49,10 +49,12 @@ If canonical spec boundaries or document authority change, update both
 
 ```bash
 ./scripts/bootstrap_deps.sh              # clones pinned libxev + zig-quickjs-ng locally
-./scripts/bootstrap_lexbor.sh           # builds lexbor v2.5.0 into third_party/lexbor/install
-zig build -Doptimize=ReleaseSafe \
-  -Dlexbor-prefix=third_party/lexbor/install
-                                        # produces zig-out/bin/awr (~9.9 MB)
+brew install lexbor libnghttp2           # macOS (primary): native deps via Homebrew
+zig build -Doptimize=ReleaseSafe         # produces zig-out/bin/awr (~9.9 MB, macOS arm64)
+
+# Linux (experimental, not CI-tested): build lexbor from source instead of Homebrew —
+#   ./scripts/bootstrap_lexbor.sh
+#   zig build -Doptimize=ReleaseSafe -Dlexbor-prefix=third_party/lexbor/install
 
 ./zig-out/bin/awr --version            # prints 0.0.<git-hash>
 
@@ -237,12 +239,14 @@ JS sees real page data through a thin polyfill over five Zig callbacks:
 
 ### Build & tooling
 
-- `zig build` → `zig-out/bin/awr` (~9.9 MB ReleaseSafe Linux x86_64).
+- `zig build` → `zig-out/bin/awr` (~9.9 MB ReleaseSafe, macOS arm64 — the primary, CI-tested target).
 - `zig build -Doptimize=ReleaseSmall|ReleaseFast` supported.
 - Test steps: `zig build test`, `test-net`, `test-js`, `test-html`,
   `test-dom`, `test-client`, `test-h2`, `test-page`, `test-tls`,
   `test-e2e`, `test-wpt`, `test-test262`.
 - macOS Homebrew paths auto-detected; Linux reads from `/usr/local`.
+- Runtime: the `sqlite3` CLI must be on `PATH` for browser-cookie import
+  (`awr session import`); core fetch/render needs nothing extra.
 - Pre-push fingerprint gate: `git config core.hooksPath .githooks`
   enables `.githooks/pre-push`, which runs `zig fmt --check`,
   `zig build test-tls`, and `zig build test-h2` before every push and
