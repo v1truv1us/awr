@@ -163,8 +163,8 @@ pub fn readResponse(reader: anytype, allocator: std.mem.Allocator, request_metho
     // Headers (response-owned: deinit must free name+value strings)
     var headers = HeaderList{ .owns_strings = true };
     errdefer headers.deinit(allocator);
+    var header_buf: [64 * 1024]u8 = undefined;
     while (true) {
-        var header_buf: [64 * 1024]u8 = undefined;
         const line = reader.readUntilDelimiter(&header_buf, '\n') catch |err| switch (err) {
             error.EndOfStream => return ReadResponseError.EndOfStreamInHeaders,
             else => |e| return e,

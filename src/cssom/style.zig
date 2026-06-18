@@ -40,7 +40,8 @@ pub const StyleDeclaration = struct {
     }
 
     pub fn getPropertyValue(self: *const StyleDeclaration, name: []const u8) []const u8 {
-        const canonical = canonicalNameTemp(name);
+        var name_buf: [128]u8 = undefined;
+        const canonical = canonicalName(&name_buf, name) orelse return "";
         for (self.declarations.items) |decl| {
             if (std.ascii.eqlIgnoreCase(decl.name, canonical)) return decl.value;
         }
@@ -116,10 +117,6 @@ fn canonicalName(buf: *[128]u8, name: []const u8) ?[]const u8 {
     if (trimmed.len > buf.len) return null;
     for (trimmed, 0..) |c, i| buf[i] = std.ascii.toLower(c);
     return buf[0..trimmed.len];
-}
-
-fn canonicalNameTemp(name: []const u8) []const u8 {
-    return std.mem.trim(u8, name, " \t\r\n");
 }
 
 test "CSSOM style parses declarations" {

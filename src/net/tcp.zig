@@ -73,7 +73,7 @@ pub const TcpConn = struct {
 
     const READ_BUF_SIZE = 64 * 1024;
     const WRITE_BUF_SIZE = 64 * 1024;
-    const CONNECT_TIMEOUT_NS = 1 * std.time.ns_per_s;
+    const CONNECT_TIMEOUT_NS = 5 * std.time.ns_per_s;
     /// Per-read wall-clock timeout. Without this, a server that accepts the
     /// TCP+TLS handshake but never sends an HTTP response blocks the calling
     /// thread in kevent() forever (0% CPU, 100% wall-clock hang). Mirrors
