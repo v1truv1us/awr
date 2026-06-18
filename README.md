@@ -1,4 +1,4 @@
-# AWR — Agentic Web Runtime
+# AWR — CLI Browser Runtime
 
 A dual-surface CLI-first terminal browser, written in Zig. One binary
 serves both **humans** in the terminal (`awr browse`) and **AI agents**
