@@ -114,7 +114,16 @@ fn walkLooksForOutsideForm(elem: *const dom.Element, candidate: *const dom.Eleme
 fn isUserVisibleFormControl(elem: *const dom.Element) bool {
     if (eql(elem.tag, "textarea")) return true;
     if (eql(elem.tag, "select")) return true;
-    if (eql(elem.tag, "button")) return true;
+    // A <button> only signals a "form is the page" situation when it actually
+    // belongs to a <form>. Standalone buttons are UI widgets pages scatter
+    // through nav chrome — theme toggles, hamburger menus, dropdown triggers
+    // (e.g. blog.rust-lang.org's `<button class="theme-icon" onclick="…">`).
+    // Treating those as a form to preserve wrongly forces the content root
+    // back to <body>, where boilerplate pruning then discards the real content
+    // (the post-list table). Genuinely form-centric pages — search engines,
+    // logins — always carry an editable input, which still trips the guard
+    // via the <input>/<textarea>/<select> branches.
+    if (eql(elem.tag, "button")) return hasAncestorTag(elem, "form");
     if (eql(elem.tag, "input")) {
         const t = elem.getAttribute("type") orelse "text";
         // Hidden inputs are CSRF round-trip helpers — ignore them.
@@ -572,6 +581,72 @@ test "chooseContentRoot prefers inner link-list cell for HN-like tables" {
     const root = chooseContentRoot(&doc) orelse return error.SkipZigTest;
     try std.testing.expectEqualStrings("stories", root.getAttribute("id").?);
 }
+
+test "chooseContentRoot — decorative orphan <button> does not force body fallback" {
+    // Regression (blog.rust-lang.org): the page's nav carries a theme-toggle
+    // `<button class="theme-icon" onclick="…">` with no <form> ancestor. That
+    // standalone button used to trip the T-72 form-preservation guard, forcing
+    // the content root back to <body>, where boilerplate pruning then discarded
+    // the dominant post-list table — leaving only a two-line intro. The button
+    // must NOT trigger the guard, so the post-list stays the content root.
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body>
+        \\  <nav><a href="/">Home</a><button class="theme-icon" onclick="dropdown()">Theme</button></nav>
+        \\  <header><p>Blog intro.</p></header>
+        \\  <section id="posts"><table class="post-list">
+        \\    <tr><td class="date">Jan 1</td><td><a href="/p1">Announcing Release 1.0</a></td></tr>
+        \\    <tr><td class="date">Feb 2</td><td><a href="/p2">Announcing Release 1.1</a></td></tr>
+        \\    <tr><td class="date">Mar 3</td><td><a href="/p3">Announcing Release 1.2</a></td></tr>
+        \\    <tr><td class="date">Apr 4</td><td><a href="/p4">Announcing Release 1.3</a></td></tr>
+        \\    <tr><td class="date">May 5</td><td><a href="/p5">Announcing Release 1.4</a></td></tr>
+        \\    <tr><td class="date">Jun 6</td><td><a href="/p6">Announcing Release 1.5</a></td></tr>
+        \\    <tr><td class="date">Jul 7</td><td><a href="/p7">Announcing Release 1.6</a></td></tr>
+        \\    <tr><td class="date">Aug 8</td><td><a href="/p8">Announcing Release 1.7</a></td></tr>
+        \\  </table></section>
+        \\</body></html>
+    );
+    defer doc.deinit();
+
+    const root = chooseContentRoot(&doc) orelse return error.SkipZigTest;
+    // Fixed: the post-list subtree is the root. Buggy: root would be <body>.
+    try std.testing.expect(!std.ascii.eqlIgnoreCase(root.tag, "body"));
+    const text = try root.textContent(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Announcing Release 1.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Announcing Release 1.7") != null);
+}
+
+test "chooseContentRoot — editable input outside candidate still preserves the form (T-72)" {
+    // The button narrowing must not weaken T-72: a real editable input outside
+    // the content candidate (search engines, logins) still forces the body
+    // fallback so the form survives instead of being pruned away.
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body>
+        \\  <form><input type="text" name="q"></form>
+        \\  <div id="content"><p>Plenty of readable prose lives here across several sentences. It easily qualifies as the content root on its own merits.</p><p>A second paragraph confirms the body is genuine article content.</p></div>
+        \\</body></html>
+    );
+    defer doc.deinit();
+
+    const root = chooseContentRoot(&doc) orelse return error.SkipZigTest;
+    try std.testing.expect(std.ascii.eqlIgnoreCase(root.tag, "body"));
+}
+
+test "chooseContentRoot — submit <button> inside a <form> still preserves it" {
+    // The conservative half of the narrowing: a button that genuinely belongs
+    // to a <form> still trips the guard, even with no editable input present.
+    var doc = try dom.parseDocument(std.testing.allocator,
+        \\<html><body>
+        \\  <form action="/logout"><button type="submit">Log out</button></form>
+        \\  <div id="content"><p>Plenty of readable prose lives here across several sentences. It easily qualifies as the content root on its own merits.</p><p>A second paragraph confirms the body is genuine article content.</p></div>
+        \\</body></html>
+    );
+    defer doc.deinit();
+
+    const root = chooseContentRoot(&doc) orelse return error.SkipZigTest;
+    try std.testing.expect(std.ascii.eqlIgnoreCase(root.tag, "body"));
+}
+
 const BestCandidate = struct {
     elem: ?*const dom.Element,
     score: f64,
