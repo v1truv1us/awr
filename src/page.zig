@@ -898,14 +898,45 @@ pub const Page = struct {
 
     // ── HB2 blank/shell detector ─────────────────────────────────────────
 
-    /// Min visible *rendered* chars below which a page counts as a blank/shell
-    /// worth escalating to the Chrome backend. The 2026-06-13 spike measured
-    /// X.com at ~1 rendered char vs Hacker News at ~13k — 64 is a safe cut.
+    /// Min visible *content* chars below which a page counts as a blank/shell
+    /// worth escalating to the Chrome backend. Compared against
+    /// `meaningfulContentLen` (NOT raw rendered length): a client-rendered shell
+    /// renders a sliver of banner text wrapped in `[Header/Footer omitted]`
+    /// markers plus a References footer that inflate raw length past a naive
+    /// cut while carrying almost no real content. The 2026-06-13 spike measured
+    /// X.com at ~1 char vs Hacker News at ~13k; 64 separates a genuinely small
+    /// but complete page (example.com ≈ 120 content chars) from a shell
+    /// (nextjs.org ≈ 50: a "NEXT.JS NIGHTS" banner and nothing else).
     const BLANK_SHELL_MIN_CHARS: usize = 64;
 
+    /// Count of *content* bytes in rendered browse text, excluding the
+    /// structural noise the renderer adds: the trailing "References:" footnote
+    /// block, `[...]` spans (both `[Region omitted]` chrome-collapse markers and
+    /// `[N]` link footnotes), and whitespace. Separates a true client-rendered
+    /// shell — mostly such noise around a banner sliver — from a small but
+    /// complete static page whose prose survives the strip.
+    fn meaningfulContentLen(text: []const u8) usize {
+        // Drop the renderer-appended References footnote block.
+        const body = if (std.mem.indexOf(u8, text, "\nReferences:")) |idx| text[0..idx] else text;
+        var count: usize = 0;
+        var i: usize = 0;
+        while (i < body.len) {
+            if (body[i] == '[') {
+                // Skip the whole `[...]` span (omitted-region marker or [N] ref).
+                if (std.mem.indexOfScalarPos(u8, body, i, ']')) |close| {
+                    i = close + 1;
+                    continue;
+                }
+                break;
+            }
+            if (!std.ascii.isWhitespace(body[i])) count += 1;
+            i += 1;
+        }
+        return count;
+    }
+
     fn isBlankShell(text: []const u8) bool {
-        const trimmed = std.mem.trim(u8, text, " \t\r\n");
-        return trimmed.len < BLANK_SHELL_MIN_CHARS;
+        return meaningfulContentLen(text) < BLANK_SHELL_MIN_CHARS;
     }
 
     /// Render the just-loaded document to a throwaway model and report whether
@@ -3235,6 +3266,20 @@ test "isBlankShell — empty/whitespace/short body is a shell; rich body is not"
     // 200-char string is not a shell
     const rich = "a" ** 200;
     try std.testing.expect(!Page.isBlankShell(rich));
+
+    // A client-rendered shell: a tiny banner wrapped in chrome-omission markers
+    // and a References footer. Raw length is ~130 (over the cut), but the actual
+    // content is ~50 chars, so it MUST be detected as a shell (escalate). This
+    // is the nextjs.org case the naive raw-length cut missed.
+    const shell =
+        "[Header omitted]\n\nNEXT.JS NIGHTS SF JUN 9 AMS JUN 11 LDN JUN 18 VIEW EVENTS[1][Footer omitted]\n\nReferences:\n  [1]: /nights";
+    try std.testing.expect(Page.isBlankShell(shell));
+
+    // A genuinely small but COMPLETE static page (example.com) must NOT be a
+    // shell: its prose survives the structural strip and clears the cut.
+    const small_real =
+        "Example Domain\n==============\n\nThis domain is for use in documentation examples without needing permission. Avoid use in operations.\nLearn more[1]\n\nReferences:\n  [1]: https://iana.org/domains/example";
+    try std.testing.expect(!Page.isBlankShell(small_real));
 }
 
 test "HB2 mapping — disable_scripts renders settled SPA HTML to a non-blank result" {

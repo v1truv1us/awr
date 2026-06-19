@@ -1252,17 +1252,20 @@ pub fn renderBrowseModel(
     browse_opts.profile = .browse;
     const root = browse_heuristics.chooseContentRoot(doc) orelse doc.body();
     var model = try renderModelFromRoot(allocator, root, browse_opts);
-    if (!isBlankRender(model.text)) return model;
+    if (meaningfulRenderLen(model.text) >= BROWSE_RESCUE_MIN_CHARS) return model;
 
-    // Blank-render rescue. The readability content-root selection plus the
-    // boilerplate pruning dropped everything — typically a non-table,
-    // high-link-density "card grid" results page (hn.algolia.com and similar
-    // search/aggregator SPAs) whose link-only cards score as navigation noise
-    // to both the prose and link-list scorers. Re-render the full <body> with
+    // Low-content rescue. The readability content-root selection plus the
+    // boilerplate pruning dropped (almost) everything, leaving only chrome
+    // markers and a sliver of banner text. Two shapes hit this: a non-table,
+    // high-link-density "card grid" results page (hn.algolia.com) that renders
+    // fully blank, and a client-rendered marketing shell (nextjs.org) whose
+    // narrowing picks a tiny promo banner and drops the real hero/body — both
+    // carry < BROWSE_RESCUE_MIN_CHARS of actual content (excluding `[...]`
+    // markers and the References footer). Re-render the full <body> with
     // content narrowing bypassed (root = body) and chrome pruning disabled so
-    // the content surfaces. Only reached when the page would otherwise be a
-    // blank screen, so pages that already render fine never take this path and
-    // cannot regress.
+    // the content surfaces. Only reached when the narrowed render is nearly
+    // empty, so pages that render real content never take this path and cannot
+    // regress.
     model.deinit();
     var rescue_opts = browse_opts;
     rescue_opts.disable_chrome_pruning = true;
@@ -1317,6 +1320,37 @@ fn isBlankRender(text: []const u8) bool {
     }
     for (rest) |ch| if (!std.ascii.isWhitespace(ch)) return false;
     return true;
+}
+
+/// Below this many *content* bytes (see `meaningfulRenderLen`), the browse
+/// render is treated as a shell that lost its content to narrowing/pruning and
+/// is rescued by re-rendering the full body. Mirrors `Page.BLANK_SHELL_MIN_CHARS`
+/// (64): a genuinely small but complete page (example.com ≈ 120 content chars)
+/// clears it; a banner-only shell (nextjs.org ≈ 57) does not.
+const BROWSE_RESCUE_MIN_CHARS: usize = 64;
+
+/// Count of *content* bytes in rendered browse text, excluding the structural
+/// noise the renderer emits: the trailing "References:" footnote block, `[...]`
+/// spans (both `[Region omitted]` chrome markers and `[N]` link footnotes), and
+/// whitespace. Separates a render that surfaced real content from one that
+/// dropped it and left only chrome scaffolding. Keep in sync with
+/// `Page.meaningfulContentLen`.
+fn meaningfulRenderLen(text: []const u8) usize {
+    const body = if (std.mem.indexOf(u8, text, "\nReferences:")) |idx| text[0..idx] else text;
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < body.len) {
+        if (body[i] == '[') {
+            if (std.mem.indexOfScalarPos(u8, body, i, ']')) |close| {
+                i = close + 1;
+                continue;
+            }
+            break;
+        }
+        if (!std.ascii.isWhitespace(body[i])) count += 1;
+        i += 1;
+    }
+    return count;
 }
 
 fn renderModelFromRootOnce(
