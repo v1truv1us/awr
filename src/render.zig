@@ -433,6 +433,13 @@ const RenderState = struct {
     /// hot path matches them exactly via the full DOM selector engine without
     /// re-parsing per element (which timed out on large stylesheets).
     compiled_selectors: std.AutoHashMapUnmanaged(*const css_parser.Rule, dom.SelectorList) = .empty,
+    /// Pre-compiled selectors for `hide_rules`/`ws_rules`, keyed by rule pointer.
+    /// `isCssHidden`/`isCssWhiteSpacePreserved` run per element over these rules;
+    /// without this they called `elem.matches(selector_text)`, which re-parses
+    /// the selector (via page_allocator → mmap/munmap) on every element×rule
+    /// check and timed out on large DOMs (apnews ≈ 18k elements × ~160 rules).
+    /// Built once at setup; same match semantics as the per-fragment loop.
+    compiled_hide_ws_selectors: std.AutoHashMapUnmanaged(*const css_parser.Rule, dom.SelectorList) = .empty,
     /// Only the rules that declare a text property the renderer maps to ANSI,
     /// in cascade (source) order. The per-element style pass matches just
     /// these — large pages (Wikipedia) carry thousands of layout rules but few
@@ -469,6 +476,9 @@ const RenderState = struct {
         var cit = self.compiled_selectors.valueIterator();
         while (cit.next()) |list| list.deinit(self.allocator);
         self.compiled_selectors.deinit(self.allocator);
+        var hwit = self.compiled_hide_ws_selectors.valueIterator();
+        while (hwit.next()) |list| list.deinit(self.allocator);
+        self.compiled_hide_ws_selectors.deinit(self.allocator);
         self.text_rules.deinit(self.allocator);
         for (self.parsed_sheets.items) |*sheet| sheet.deinit();
         self.parsed_sheets.deinit(self.allocator);
@@ -1391,11 +1401,13 @@ fn renderModelFromRootOnce(
                 state.hide_rules.append(allocator, rule) catch {
                     dropped_css_rules += 1;
                 };
+                compileHideWsSelector(&state, allocator, rule);
             }
             if (rule.declarations.getPropertyValue("white-space").len > 0) {
                 state.ws_rules.append(allocator, rule) catch {
                     dropped_css_rules += 1;
                 };
+                compileHideWsSelector(&state, allocator, rule);
             }
             // Collect text rules (in cascade order) so the per-element style
             // pass matches only these — not the thousands of layout rules a
@@ -3360,17 +3372,39 @@ fn isHiddenTag(tag: []const u8) bool {
     return false;
 }
 
+/// Compile a hide/ws rule's selector list once and cache it by rule pointer.
+/// Idempotent — a rule that is both a hide and a ws rule compiles once. On a
+/// compile/alloc failure the rule is simply left out of the cache and the
+/// matchers fall back to the per-fragment `elem.matches` path, so behavior is
+/// preserved either way.
+fn compileHideWsSelector(state: *RenderState, allocator: std.mem.Allocator, rule: *const css_parser.Rule) void {
+    if (state.compiled_hide_ws_selectors.contains(rule)) return;
+    if (dom.compileSelectorList(allocator, rule.selector_text)) |list| {
+        state.compiled_hide_ws_selectors.put(allocator, rule, list) catch {
+            var l = list;
+            l.deinit(allocator);
+        };
+    } else |_| {}
+}
+
+/// Whether `elem` matches `rule`'s selector. Uses the pre-compiled selector
+/// list when available (the hot path on large pages); otherwise re-parses each
+/// comma-separated fragment via `elem.matches`. Both branches are equivalent —
+/// a selector list matches when any of its comma parts matches.
+fn ruleSelectorMatches(state: *const RenderState, elem: *const dom.Element, rule: *const css_parser.Rule) bool {
+    if (state.compiled_hide_ws_selectors.getPtr(rule)) |list| {
+        return dom.matchesCompiled(elem, list);
+    }
+    var selectors = std.mem.splitScalar(u8, rule.selector_text, ',');
+    while (selectors.next()) |sel| {
+        if (elem.matches(sel)) return true;
+    }
+    return false;
+}
+
 fn isCssHidden(state: *RenderState, elem: *const dom.Element) bool {
     for (state.hide_rules.items) |rule| {
-        var selectors = std.mem.splitScalar(u8, rule.selector_text, ',');
-        var matched = false;
-        while (selectors.next()) |sel| {
-            if (elem.matches(sel)) {
-                matched = true;
-                break;
-            }
-        }
-        if (!matched) continue;
+        if (!ruleSelectorMatches(state, elem, rule)) continue;
         if (isHiddenCssValue(rule.declarations.getPropertyValue("display"), "none")) {
             // `[hidden]`-attribute resets (e.g. Tailwind / modern-normalize
             // `[hidden]:where(:not([hidden=until-found]))`) hide content that
@@ -3441,15 +3475,7 @@ fn isCssWhiteSpacePreserved(state: *RenderState, elem: *const dom.Element) bool 
     }
 
     for (state.ws_rules.items) |rule| {
-        var selectors = std.mem.splitScalar(u8, rule.selector_text, ',');
-        var matched = false;
-        while (selectors.next()) |sel| {
-            if (elem.matches(sel)) {
-                matched = true;
-                break;
-            }
-        }
-        if (!matched) continue;
+        if (!ruleSelectorMatches(state, elem, rule)) continue;
         const val = rule.declarations.getPropertyValue("white-space");
         if (val.len > 0) return whiteSpacePreservesWhitespace(val);
     }
@@ -4390,6 +4416,34 @@ test "render browse profile applies starter CSSOM display and visibility" {
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Hidden by class") == null);
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Hidden by id") == null);
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Hidden inline") == null);
+}
+
+test "render hides every target of a comma-separated display:none selector (compiled path)" {
+    // Regression guard for the per-element hide/ws matcher: it pre-compiles each
+    // rule's full selector list once (cached by rule pointer) instead of
+    // re-parsing the selector per element — the fix for the apnews/StackOverflow
+    // O(n×m) selector-reparse timeout. A comma-separated selector must still hide
+    // every listed target: the compiled list matches when any comma part
+    // matches, identical to the old per-fragment `elem.matches` loop.
+    const sheet = ".chrome-a, .chrome-b, #chrome-c { display: none; }";
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><head><style>" ++ sheet ++ "</style></head><body><main>" ++
+        "<p>Keep this</p>" ++
+        "<p class=\"chrome-a\">Drop A</p>" ++
+        "<p class=\"chrome-b\">Drop B</p>" ++
+        "<p id=\"chrome-c\">Drop C</p>" ++
+        "</main></body></html>");
+    defer doc.deinit();
+
+    var model = try renderBrowseModel(std.testing.allocator, &doc, .{
+        .ansi_colors = false,
+        .css_stylesheets = &.{sheet},
+    });
+    defer model.deinit();
+
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Keep this") != null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Drop A") == null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Drop B") == null);
+    try std.testing.expect(std.mem.indexOf(u8, model.text, "Drop C") == null);
 }
 
 test "render preserves whitespace under CSS white-space: pre / pre-wrap / pre-line" {
