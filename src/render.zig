@@ -1357,6 +1357,20 @@ fn meaningfulRenderLen(text: []const u8) usize {
             }
             break;
         }
+        // Skip horizontal-rule runs: the renderer emits a row of dashes for
+        // `<hr>`/section separators, which is structural noise, not page
+        // content. Counting them let a chrome-only render (BBC News: a skip
+        // link + an `<hr>` + omitted-region markers) clear the rescue floor and
+        // suppress the low-content rescue. A 1–2 char dash run (a real hyphen
+        // or en-dash sequence) still counts.
+        if (body[i] == '-') {
+            var j = i;
+            while (j < body.len and body[j] == '-') j += 1;
+            if (j - i >= 3) {
+                i = j;
+                continue;
+            }
+        }
         if (!std.ascii.isWhitespace(body[i])) count += 1;
         i += 1;
     }
@@ -4444,6 +4458,23 @@ test "render hides every target of a comma-separated display:none selector (comp
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Drop A") == null);
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Drop B") == null);
     try std.testing.expect(std.mem.indexOf(u8, model.text, "Drop C") == null);
+}
+
+test "meaningfulRenderLen ignores hr-separator dash runs" {
+    // Regression (BBC News): a chrome-only render — a skip link plus the
+    // renderer's `<hr>` dash row and omitted-region markers — must read as
+    // near-empty so the low-content rescue fires. Counting the dash row let it
+    // clear the 64-char floor (~91 chars) and suppress the rescue, leaving the
+    // SSR headlines dropped.
+    const chrome_only = "Skip to content[1][Header omitted]\n\n[Navigation omitted]\n\n" ++
+        "------------------------------------------------------------------------------\n" ++
+        "[Footer omitted]\n\nReferences:\n  [1]: #main";
+    try std.testing.expect(meaningfulRenderLen(chrome_only) < BROWSE_RESCUE_MIN_CHARS);
+
+    // A real sentence with ordinary hyphens (1-char dash runs) still counts in
+    // full — the exclusion only drops `<hr>`-length runs (≥3).
+    const real = "State-of-the-art, end-to-end engineering work is a long-lived, hard-won, well-tested result of care.";
+    try std.testing.expect(meaningfulRenderLen(real) >= BROWSE_RESCUE_MIN_CHARS);
 }
 
 test "render preserves whitespace under CSS white-space: pre / pre-wrap / pre-line" {
