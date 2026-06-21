@@ -331,12 +331,35 @@ pub const JsEngine = struct {
 
     // ── Evaluation ──────────────────────────────────────────────────────
 
+    /// Diagnostic: when AWR_JS_DEBUG is set, drain and print the pending JS
+    /// exception (message + stack). No-op otherwise, so normal execution — which
+    /// deliberately swallows page-script exceptions — is unchanged. Used to find
+    /// which web-platform APIs a real SPA's bundle dies on.
+    fn reportException(self: *JsEngine) void {
+        if (std.c.getenv("AWR_JS_DEBUG") == null) return;
+        const exc = self.ctx.getException();
+        defer exc.deinit(self.ctx);
+        if (exc.toCString(self.ctx)) |msg| {
+            defer self.ctx.freeCString(msg);
+            std.debug.print("[JS exc] {s}\n", .{std.mem.span(msg)});
+        }
+        const stack = exc.getPropertyStr(self.ctx, "stack");
+        defer stack.deinit(self.ctx);
+        if (stack.toCString(self.ctx)) |s| {
+            defer self.ctx.freeCString(s);
+            std.debug.print("[JS stk] {s}\n", .{std.mem.span(s)});
+        }
+    }
+
     /// Evaluate a JS source string.
     /// Returns JsError.EvalException on any JS exception.
     pub fn eval(self: *JsEngine, source: []const u8, filename: [:0]const u8) JsError!void {
         const result = self.ctx.eval(source, filename, .{});
         defer result.deinit(self.ctx);
-        if (result.isException()) return JsError.EvalException;
+        if (result.isException()) {
+            self.reportException();
+            return JsError.EvalException;
+        }
     }
 
     /// Evaluate and return a boolean result.
@@ -353,6 +376,7 @@ pub const JsEngine = struct {
     pub fn evalString(self: *JsEngine, source: []const u8) JsError![]u8 {
         const val = self.ctx.eval(source, "<eval>", .{});
         if (val.isException()) {
+            self.reportException();
             val.deinit(self.ctx);
             return JsError.EvalException;
         }
@@ -392,7 +416,22 @@ pub const JsEngine = struct {
         try self.installStructuredClone();
         try self.installUrlSearchParams();
         try self.installMatchMedia();
+        try self.installModernGlobals();
     }
+
+    // ── Modern web-platform global constructors ─────────────────────────────
+    //
+    // URL, TextEncoder/Decoder, EventTarget, the Observers, the fetch ecosystem
+    // types (Headers/Request/Response/Blob/FormData/AbortController), DOMParser,
+    // getSelection and customElements. QuickJS-NG ships none of these, so SPA
+    // bundles that reference them at module-load time throw a ReferenceError and
+    // never run — the page renders as a blank shell. All pure-JS polyfills built
+    // on existing primitives; none mutate the DOM tree.
+    fn installModernGlobals(self: *JsEngine) JsError!void {
+        try self.eval(MODERN_GLOBALS_POLYFILL, "<modern-globals>");
+    }
+
+    const MODERN_GLOBALS_POLYFILL = @embedFile("modern_globals.js");
 
     /// Called by Page after constructing its EventLoop.
     /// Safe to call multiple times; the most recent pointer wins.
@@ -1096,6 +1135,43 @@ test "JsEngine.eval — basic arithmetic" {
 
     try engine.eval("const x = 1 + 2;", "<test>");
     const ok = try engine.evalBool("x === 3");
+    try std.testing.expect(ok);
+}
+
+test "modern globals — constructors SPA bundles need are defined" {
+    var engine = try JsEngine.init(std.testing.allocator, null);
+    defer engine.deinit();
+
+    // Each of these threw a ReferenceError before installModernGlobals, aborting
+    // any SPA bundle that referenced it at module-load time.
+    const ok = try engine.evalBool(
+        \\(typeof URL === 'function' && typeof TextEncoder === 'function' &&
+        \\ typeof TextDecoder === 'function' && typeof EventTarget === 'function' &&
+        \\ typeof IntersectionObserver === 'function' && typeof ResizeObserver === 'function' &&
+        \\ typeof AbortController === 'function' && typeof Headers === 'function' &&
+        \\ typeof Request === 'function' && typeof Response === 'function' &&
+        \\ typeof Blob === 'function' && typeof FormData === 'function' &&
+        \\ typeof DOMParser === 'function')
+    );
+    try std.testing.expect(ok);
+}
+
+test "modern globals — behavior smoke (URL, TextEncoder, AbortController, Headers)" {
+    var engine = try JsEngine.init(std.testing.allocator, null);
+    defer engine.deinit();
+
+    const ok = try engine.evalBool(
+        \\(function () {
+        \\  var u = new URL('https://ex.com/a/b?q=1#h');
+        \\  if (u.protocol !== 'https:' || u.hostname !== 'ex.com' || u.pathname !== '/a/b') return false;
+        \\  if (u.search !== '?q=1' || u.hash !== '#h' || u.searchParams.get('q') !== '1') return false;
+        \\  if (new URL('../c', 'https://ex.com/a/b/').pathname !== '/a/c') return false;
+        \\  if (new TextDecoder().decode(new TextEncoder().encode('héllo')) !== 'héllo') return false;
+        \\  var ac = new AbortController(); ac.abort(); if (!ac.signal.aborted) return false;
+        \\  var h = new Headers(); h.set('X-A', '1'); if (h.get('x-a') !== '1') return false;
+        \\  return true;
+        \\})()
+    );
     try std.testing.expect(ok);
 }
 
