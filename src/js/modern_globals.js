@@ -15,6 +15,21 @@
     if (typeof G[name] === 'undefined') G[name] = value;
   }
 
+  // ── Global aliases ───────────────────────────────────────────────────────
+  // Bundlers (webpack/rollup) emit chunk registration against `self` at the top
+  // of every chunk — `self.webpackChunk = ...` — and reference `frames`/`top`/
+  // `parent`/`global`. QuickJS-NG defines none, so the chunk throws
+  // `ReferenceError: self is not defined` on its first line and the whole bundle
+  // never runs (observed on vercel.com, notion.so). Alias them all to the global
+  // object so the bundle loads. `window` is installed by the DOM bridge; alias
+  // it here too if it isn't up yet.
+  def('self', G);
+  def('frames', G);
+  def('top', G);
+  def('parent', G);
+  def('global', G);
+  if (typeof G.window === 'undefined') G.window = G;
+
   // ── EventTarget ──────────────────────────────────────────────────────────
   def('EventTarget', (function () {
     function EventTarget() { this.__l = Object.create(null); }

@@ -1145,7 +1145,8 @@ test "modern globals — constructors SPA bundles need are defined" {
     // Each of these threw a ReferenceError before installModernGlobals, aborting
     // any SPA bundle that referenced it at module-load time.
     const ok = try engine.evalBool(
-        \\(typeof URL === 'function' && typeof TextEncoder === 'function' &&
+        \\(self === globalThis && frames === globalThis && top === globalThis &&
+        \\ typeof URL === 'function' && typeof TextEncoder === 'function' &&
         \\ typeof TextDecoder === 'function' && typeof EventTarget === 'function' &&
         \\ typeof IntersectionObserver === 'function' && typeof ResizeObserver === 'function' &&
         \\ typeof AbortController === 'function' && typeof Headers === 'function' &&
