@@ -2373,6 +2373,68 @@ const BRIDGE_POLYFILL =
     \\        const r = __awr_cloneNode__(this._h, !!deep);
     \\        return r ? makeElement(r) : null;
     \\      },
+    \\      append() {
+    \\        for (var i = 0; i < arguments.length; i++) {
+    \\          var n = arguments[i];
+    \\          if (n && n.nodeType === 11) { var ks = (n._kids || []).slice(); n._kids = []; for (var j = 0; j < ks.length; j++) this.append(ks[j]); continue; }
+    \\          if (typeof n === 'string' || (n && n.nodeType === 3)) {
+    \\            var t = typeof n === 'string' ? n : (n._text || '');
+    \\            if (!this._children.length && !(this._h && this.children.length)) this.textContent = (this._h ? (this.textContent || '') : '') + t;
+    \\            continue;
+    \\          }
+    \\          if (n) this.appendChild(n);
+    \\        }
+    \\      },
+    \\      prepend() {
+    \\        var ref = this.firstChild;
+    \\        for (var i = 0; i < arguments.length; i++) { var n = arguments[i]; if (n && n._h) this.insertBefore(n, ref); else if (n) this.append(n); }
+    \\      },
+    \\      before() {
+    \\        var p = this.parentNode; if (!p) return;
+    \\        for (var i = 0; i < arguments.length; i++) { var n = arguments[i]; if (n && n._h) p.insertBefore(n, this); }
+    \\      },
+    \\      after() {
+    \\        var p = this.parentNode; if (!p) return; var ref = this.nextSibling;
+    \\        for (var i = 0; i < arguments.length; i++) { var n = arguments[i]; if (n && n._h) p.insertBefore(n, ref); }
+    \\      },
+    \\      remove() { var p = this.parentNode; if (p) p.removeChild(this); },
+    \\      replaceWith() {
+    \\        var p = this.parentNode; if (!p) return;
+    \\        for (var i = 0; i < arguments.length; i++) { var n = arguments[i]; if (n && n._h) p.insertBefore(n, this); }
+    \\        p.removeChild(this);
+    \\      },
+    \\      replaceChildren() {
+    \\        var cur = this.children; for (var i = cur.length - 1; i >= 0; i--) this.removeChild(cur[i]);
+    \\        this.textContent = '';
+    \\        for (var j = 0; j < arguments.length; j++) this.append(arguments[j]);
+    \\      },
+    \\      insertAdjacentElement(pos, el) {
+    \\        pos = String(pos).toLowerCase(); var p = this.parentNode;
+    \\        if (pos === 'beforebegin') { if (p) p.insertBefore(el, this); }
+    \\        else if (pos === 'afterbegin') this.insertBefore(el, this.firstChild);
+    \\        else if (pos === 'beforeend') this.appendChild(el);
+    \\        else if (pos === 'afterend') { if (p) p.insertBefore(el, this.nextSibling); }
+    \\        return el;
+    \\      },
+    \\      insertAdjacentText(pos, text) {
+    \\        if (String(pos).toLowerCase() === 'beforeend' && !this._children.length) this.textContent = (this.textContent || '') + String(text);
+    \\      },
+    \\      insertAdjacentHTML(pos, html) {
+    \\        pos = String(pos).toLowerCase();
+    \\        if (pos === 'beforeend') this.innerHTML = (this._h ? this.innerHTML : '') + String(html);
+    \\        else if (pos === 'afterbegin') this.innerHTML = String(html) + (this._h ? this.innerHTML : '');
+    \\      },
+    \\      toggleAttribute(name, force) {
+    \\        var has = this.hasAttribute(name); var want = force === undefined ? !has : !!force;
+    \\        if (want) { if (!has) this.setAttribute(name, ''); } else if (has) this.removeAttribute(name);
+    \\        return want;
+    \\      },
+    \\      getAttributeNS(ns, name) { return this.getAttribute(name); },
+    \\      setAttributeNS(ns, name, value) { return this.setAttribute(name, value); },
+    \\      removeAttributeNS(ns, name) { return this.removeAttribute(name); },
+    \\      hasAttributeNS(ns, name) { return this.hasAttribute(name); },
+    \\      get attributes() { var out = []; for (var k in this._attrs) out.push({ name: k, value: this._attrs[k], localName: k }); return out; },
+    \\      normalize() {},
     \\    };
     \\    if (handle) globalThis.__awr_element_cache__.set(handle, el);
     \\    return el;
@@ -2380,6 +2442,30 @@ const BRIDGE_POLYFILL =
     \\
     \\  const document = {
     \\    nodeType: 9,
+    \\    createTextNode(data) {
+    \\      var s = String(data);
+    \\      return { nodeType: 3, _text: s, _h: 0,
+    \\        get textContent() { return this._text; }, set textContent(v) { this._text = String(v); },
+    \\        get nodeValue() { return this._text; }, set nodeValue(v) { this._text = String(v); },
+    \\        get data() { return this._text; }, set data(v) { this._text = String(v); },
+    \\        get length() { return this._text.length; },
+    \\        cloneNode() { return document.createTextNode(this._text); } };
+    \\    },
+    \\    createComment(data) {
+    \\      var s = String(data);
+    \\      return { nodeType: 8, _text: s, _h: 0, get textContent() { return this._text; }, get nodeValue() { return this._text; }, get data() { return this._text; }, cloneNode() { return document.createComment(this._text); } };
+    \\    },
+    \\    createDocumentFragment() {
+    \\      return { nodeType: 11, _kids: [], _h: 0,
+    \\        appendChild(c) { this._kids.push(c); return c; },
+    \\        append() { for (var i = 0; i < arguments.length; i++) this._kids.push(arguments[i]); },
+    \\        get children() { return this._kids.slice(); }, get childNodes() { return this._kids.slice(); },
+    \\        get firstChild() { return this._kids[0] || null; },
+    \\        querySelector() { return null; }, querySelectorAll() { return []; },
+    \\        cloneNode() { return document.createDocumentFragment(); } };
+    \\    },
+    \\    createElementNS(ns, tag) { var t = String(tag); var i = t.indexOf(':'); return this.createElement(i >= 0 ? t.slice(i + 1) : t); },
+    \\    importNode(node, deep) { return node && node.cloneNode ? node.cloneNode(!!deep) : node; },
     \\    querySelector(sel) { const r = __awr_querySelector__(String(sel)); return r ? makeElement(r) : null; },
     \\    querySelectorAll(sel) {
     \\      const r = __awr_querySelectorAll__(String(sel));
@@ -3537,6 +3623,42 @@ test "bridge — document.createElement returns object with tagName" {
     defer removeDomBridge(&eng);
 
     const ok = try eng.evalBool("document.createElement('div').tagName === 'DIV'");
+    try std.testing.expect(ok);
+}
+
+test "bridge — DOM construction methods SPA bundles need" {
+    var doc = try dom.parseDocument(std.testing.allocator, "<html><body><div id='root'></div></body></html>");
+    defer doc.deinit();
+
+    var eng = try engine.JsEngine.init(std.testing.allocator, null);
+    defer eng.deinit();
+    try installDomBridge(&eng, &doc, std.testing.io, std.testing.allocator);
+    defer removeDomBridge(&eng);
+
+    // createTextNode / createDocumentFragment / createElementNS / importNode /
+    // append / prepend / before / after / remove / replaceChildren /
+    // insertAdjacentElement / toggleAttribute — each threw before this batch,
+    // aborting any bundle that touched it.
+    const ok = try eng.evalBool(
+        \\(function () {
+        \\  var root = document.getElementById('root');
+        \\  var t = document.createTextNode('hi'); if (t.nodeType !== 3 || t.data !== 'hi') return false;
+        \\  var frag = document.createDocumentFragment(); if (frag.nodeType !== 11) return false;
+        \\  var s1 = document.createElement('span'); s1.textContent = 'A';
+        \\  var s2 = document.createElement('span'); s2.textContent = 'B';
+        \\  frag.append(s1, s2);
+        \\  root.append(frag);
+        \\  if (root.children.length !== 2) return false;
+        \\  var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); if (!svg) return false;
+        \\  var clone = document.importNode(s1, true); if (!clone) return false;
+        \\  var lead = document.createElement('i'); lead.textContent = 'L'; root.prepend(lead);
+        \\  if (root.children[0].textContent !== 'L') return false;
+        \\  lead.remove(); if (root.children.length !== 2) return false;
+        \\  root.children[0].toggleAttribute('hidden'); if (!root.children[0].hasAttribute('hidden')) return false;
+        \\  root.replaceChildren(); if (root.children.length !== 0) return false;
+        \\  return true;
+        \\})()
+    );
     try std.testing.expect(ok);
 }
 
